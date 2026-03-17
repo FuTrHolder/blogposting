@@ -154,15 +154,63 @@ class TistoryUploader:
         logger.info("카카오 로그인 성공")
 
     def _enter_title(self, page, title: str):
-        title_input = page.wait_for_selector(
-            ".tt_editor_top input, input[placeholder*='제목'], #post-title-inp",
-            timeout=15000,
+    # 페이지 완전 로딩 대기
+    human_delay(2, 3)
+
+    # 티스토리 에디터 iframe 확인
+    # 글쓰기 페이지가 iframe 안에 있는 경우가 있음
+    frame = page.main_frame
+    frames = page.frames
+    logger.info(f"현재 프레임 수: {len(frames)}")
+    for f in frames:
+        logger.info(f"  프레임 URL: {f.url}")
+
+    # iframe 안에 에디터가 있으면 해당 프레임 사용
+    editor_frame = frame
+    for f in frames:
+        if "tistory.com" in f.url and f != frame:
+            editor_frame = f
+            logger.info(f"에디터 프레임 사용: {f.url}")
+            break
+
+    # 제목 입력창 셀렉터 (다양한 버전 대응)
+    selectors = [
+        "input[placeholder='제목을 입력하세요.']",
+        "input[placeholder='제목']",
+        "input[placeholder*='제목']",
+        ".tt_editor_top input",
+        "#post-title-inp",
+        "input[name='title']",
+        ".editor-title input",
+        "div[contenteditable='true'][data-placeholder*='제목']",
+        "[data-placeholder*='제목']",
+    ]
+
+    title_input = None
+    for selector in selectors:
+        try:
+            title_input = editor_frame.wait_for_selector(
+                selector, timeout=3000, state="visible"
+            )
+            if title_input:
+                logger.info(f"제목 셀렉터 발견: {selector}")
+                break
+        except PWTimeout:
+            continue
+
+    if not title_input:
+        # 마지막 수단: 페이지 구조를 로그로 출력
+        html_snippet = page.evaluate(
+            "document.querySelector('body')?.innerHTML?.slice(0, 2000)"
         )
-        title_input.click()
-        human_delay(0.5, 1.0)
-        title_input.fill(title)
-        human_delay(1, 2)
-        logger.info(f"제목 입력 완료: {title}")
+        logger.error(f"제목 입력창을 찾지 못했습니다. 페이지 HTML:\n{html_snippet}")
+        raise RuntimeError("제목 입력창 셀렉터를 찾지 못했습니다.")
+
+    title_input.click()
+    human_delay(0.5, 1.0)
+    title_input.fill(title)
+    human_delay(1, 2)
+    logger.info(f"제목 입력 완료: {title}")
 
     def _enter_content_html(self, page, html_content: str):
         try:
