@@ -68,6 +68,7 @@ def main():
         kakao_email=os.environ["KAKAO_EMAIL"],
         kakao_password=os.environ["KAKAO_PASSWORD"],
         blog_name=os.environ["TISTORY_BLOG_NAME"],
+        category="미국",   # ← 카테고리 이름 (블로그에 맞게 변경)
     )
     result = uploader.upload(
         title=post["title"],
