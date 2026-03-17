@@ -1,0 +1,6 @@
+# 완전 무료 버전 + Playwright
+requests>=2.31.0
+feedparser>=6.0.11
+markdown>=3.6
+Pillow>=10.3.0
+playwright>=1.44.0
