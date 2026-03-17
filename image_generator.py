@@ -12,7 +12,7 @@ import os
 logger = logging.getLogger(__name__)
 
 # Hugging Face Inference API 엔드포인트
-HF_API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
 
 # 이미지 프롬프트 기본 접미사 (품질 향상용)
 PROMPT_SUFFIX = (
