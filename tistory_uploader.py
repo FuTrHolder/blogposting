@@ -20,10 +20,17 @@ def human_delay(min_sec=1.5, max_sec=3.5):
 
 
 class TistoryUploader:
-    def __init__(self, kakao_email: str, kakao_password: str, blog_name: str):
+    def __init__(
+        self,
+        kakao_email: str,
+        kakao_password: str,
+        blog_name: str,
+        category: str = "미국",
+    ):
         self.email = kakao_email
         self.password = kakao_password
         self.blog_name = blog_name
+        self.category = category
         self.write_url = f"https://{blog_name}.tistory.com/manage/post/"
 
     def _md_to_html(self, md_content: str) -> str:
@@ -76,21 +83,43 @@ class TistoryUploader:
             page = context.new_page()
 
             try:
+                # 1) 로그인
                 self._login(page)
 
+                # 2) 글쓰기 페이지 이동
                 logger.info(f"글쓰기 페이지로 이동: {self.write_url}")
                 page.goto(self.write_url, wait_until="networkidle", timeout=30000)
                 human_delay(2, 4)
-                logger.info(f"현재 URL: {page.url}")
 
+                # 임시저장 글 복원 팝업 → 취소 (새 글 작성)
+                try:
+                    cancel_btn = page.wait_for_selector(
+                        "button:has-text('취소'), .btn_cancel",
+                        timeout=5000,
+                        state="visible",
+                    )
+                    cancel_btn.click()
+                    human_delay(1, 2)
+                    logger.info("임시저장 복원 팝업 → 취소 클릭")
+                except PWTimeout:
+                    pass
+
+                logger.info(f"글쓰기 페이지 진입: {page.url}")
+
+                # 3) 카테고리 선택
+                self._select_category(page)
+
+                # 4) 제목 입력
                 self._enter_title(page, title)
-                self._enter_content_html(page, html_content)
 
-                if image_path and os.path.exists(image_path):
-                    self._upload_thumbnail(page, image_path)
+                # 5) 본문 입력 (기본모드 → 내용 붙여넣기)
+                self._enter_content(page, html_content)
 
+                # 6) 태그 입력
                 self._enter_tags(page, tags)
-                post_url = self._publish(page)
+
+                # 7) 완료(발행 패널 열기) → 공개 발행
+                post_url = self._publish(page, title)
                 logger.info(f"발행 완료: {post_url}")
                 return {"url": post_url}
 
@@ -102,20 +131,15 @@ class TistoryUploader:
             finally:
                 browser.close()
 
+    # ── 로그인 ────────────────────────────────────────────────────────────
     def _login(self, page):
-        """
-        tistory.com/auth/login → React 앱 로딩 대기 →
-        'a.link_kakao_id' 클릭 → accounts.kakao.com 로그인 폼 입력
-        """
         logger.info(f"티스토리 로그인 페이지 접근: {TISTORY_LOGIN_URL}")
         page.goto(TISTORY_LOGIN_URL, wait_until="networkidle", timeout=30000)
         human_delay(2, 3)
         logger.info(f"로그인 페이지 URL: {page.url}")
 
-        # React 앱이 마운트될 때까지 대기 (data-react-app="loginPagePC")
-        # 카카오 버튼: <a class="btn_login link_kakao_id" href="#">
+        # React 앱 렌더링 후 카카오 버튼 대기
         try:
-            logger.info("카카오 로그인 버튼 대기 중 (React 렌더링)...")
             kakao_btn = page.wait_for_selector(
                 "a.link_kakao_id",
                 timeout=15000,
@@ -124,33 +148,15 @@ class TistoryUploader:
             logger.info("카카오 버튼 발견! 클릭 중...")
             kakao_btn.click()
             human_delay(2, 3)
-            logger.info(f"카카오 버튼 클릭 후 URL: {page.url}")
         except PWTimeout:
-            logger.warning("a.link_kakao_id 버튼을 찾지 못했습니다.")
-            # 혹시 다른 셀렉터로 재시도
-            try:
-                kakao_btn2 = page.wait_for_selector(
-                    ".btn_login.link_kakao_id, [class*='kakao_id'], "
-                    "a[href*='kakao'], button:has-text('카카오')",
-                    timeout=8000,
-                    state="visible",
-                )
-                kakao_btn2.click()
-                human_delay(2, 3)
-            except PWTimeout:
-                html = page.evaluate(
-                    "document.querySelector('body')?.innerHTML?.slice(0, 2000)"
-                )
-                logger.error(f"카카오 버튼을 찾지 못했습니다. HTML:\n{html}")
-                raise RuntimeError("카카오 로그인 버튼을 찾지 못했습니다.")
+            html = page.evaluate("document.body?.innerHTML?.slice(0,2000)")
+            logger.error(f"카카오 버튼 없음. HTML:\n{html}")
+            raise RuntimeError("카카오 로그인 버튼을 찾지 못했습니다.")
 
-        # accounts.kakao.com 로그인 폼 입력
+        # accounts.kakao.com 로그인 폼
         if "accounts.kakao.com" in page.url:
-            logger.info("카카오 계정 로그인 페이지 진입 확인")
             self._fill_kakao_form(page)
         else:
-            logger.warning(f"예상치 못한 URL: {page.url}")
-            page.screenshot(path="unexpected_url.png")
             raise RuntimeError(f"카카오 로그인 페이지 진입 실패. URL: {page.url}")
 
         # 동의 화면 처리
@@ -162,14 +168,12 @@ class TistoryUploader:
             )
             agree_btn.click()
             human_delay(1.5, 2.5)
-            logger.info("동의 버튼 클릭 완료")
         except PWTimeout:
             pass
 
-        logger.info(f"로그인 완료. 최종 URL: {page.url}")
+        logger.info(f"로그인 완료. URL: {page.url}")
 
     def _fill_kakao_form(self, page):
-        """카카오 계정 로그인 폼을 채웁니다."""
         email_input = page.wait_for_selector(
             "#loginId, input[name='loginId'], input[autocomplete='username']",
             timeout=15000,
@@ -193,9 +197,7 @@ class TistoryUploader:
         human_delay(0.5, 1.0)
 
         login_btn = page.wait_for_selector(
-            "button[type='submit']",
-            timeout=10000,
-            state="visible",
+            "button[type='submit']", timeout=10000, state="visible"
         )
         login_btn.click()
 
@@ -210,131 +212,162 @@ class TistoryUploader:
         human_delay(2, 3)
         logger.info(f"카카오 폼 로그인 완료. URL: {page.url}")
 
+    # ── 카테고리 선택 ─────────────────────────────────────────────────────
+    def _select_category(self, page):
+        try:
+            # 카테고리 드롭다운 클릭
+            cat_btn = page.wait_for_selector(
+                ".category-selector, [data-role='category'], "
+                "button:has-text('카테고리'), .tt_category",
+                timeout=8000,
+                state="visible",
+            )
+            cat_btn.click()
+            human_delay(0.8, 1.5)
+
+            # 카테고리 목록에서 선택
+            cat_option = page.wait_for_selector(
+                f"li:has-text('{self.category}'), "
+                f"option:has-text('{self.category}'), "
+                f"a:has-text('{self.category}')",
+                timeout=5000,
+                state="visible",
+            )
+            cat_option.click()
+            human_delay(0.8, 1.5)
+            logger.info(f"카테고리 선택 완료: {self.category}")
+        except PWTimeout:
+            logger.warning(f"카테고리 선택 실패 ({self.category}). 건너뜁니다.")
+
+    # ── 제목 입력 ─────────────────────────────────────────────────────────
     def _enter_title(self, page, title: str):
-        human_delay(2, 3)
+        human_delay(1, 2)
 
-        frames = page.frames
-        logger.info(f"현재 프레임 수: {len(frames)}")
-        for f in frames:
-            logger.info(f"  프레임 URL: {f.url}")
-
-        editor_frame = page.main_frame
-        for f in frames:
-            if "tistory.com" in f.url and f != page.main_frame:
-                editor_frame = f
-                logger.info(f"에디터 프레임 사용: {f.url}")
-                break
-
+        # 새 에디터: div[contenteditable] placeholder="제목을 입력하세요."
         selectors = [
+            "div[contenteditable='true'][data-placeholder='제목을 입력하세요.']",
+            "div[contenteditable='true'][data-placeholder*='제목']",
+            "[data-placeholder*='제목']",
             "input[placeholder='제목을 입력하세요.']",
-            "input[placeholder='제목']",
             "input[placeholder*='제목']",
             ".tt_editor_top input",
             "#post-title-inp",
             "input[name='title']",
-            ".editor-title input",
-            "div[contenteditable='true'][data-placeholder*='제목']",
-            "[data-placeholder*='제목']",
         ]
 
-        title_input = None
+        title_el = None
         for selector in selectors:
             try:
-                title_input = editor_frame.wait_for_selector(
-                    selector, timeout=3000, state="visible"
+                title_el = page.wait_for_selector(
+                    selector, timeout=4000, state="visible"
                 )
-                if title_input:
+                if title_el:
                     logger.info(f"제목 셀렉터 발견: {selector}")
                     break
             except PWTimeout:
                 continue
 
-        if not title_input:
-            html_snippet = page.evaluate(
-                "document.querySelector('body')?.innerHTML?.slice(0, 3000)"
-            )
-            logger.error(f"제목 입력창 HTML 덤프:\n{html_snippet}")
-            raise RuntimeError("제목 입력창 셀렉터를 찾지 못했습니다.")
+        if not title_el:
+            html_snippet = page.evaluate("document.body?.innerHTML?.slice(0,3000)")
+            logger.error(f"제목 입력창 HTML:\n{html_snippet}")
+            raise RuntimeError("제목 입력창을 찾지 못했습니다.")
 
-        title_input.click()
-        human_delay(0.5, 1.0)
-        title_input.fill(title)
-        human_delay(1, 2)
+        title_el.click()
+        human_delay(0.3, 0.6)
+        title_el.fill(title)
+        human_delay(0.8, 1.5)
         logger.info(f"제목 입력 완료: {title}")
 
-    def _enter_content_html(self, page, html_content: str):
+    # ── 본문 입력 ─────────────────────────────────────────────────────────
+    def _enter_content(self, page, html_content: str):
+        """
+        티스토리 새 에디터(TinyMCE 기반)에 내용을 입력합니다.
+        기본모드(블록에디터)는 iframe 내부의 TinyMCE body에 직접 주입합니다.
+        """
+        human_delay(1, 2)
+
+        # TinyMCE iframe 찾기
         try:
-            mode_btn = page.wait_for_selector(
-                "button.editor-mode, .editor-switch, [data-name='editor-type']",
+            # iframe이 로딩될 때까지 대기
+            page.wait_for_selector(
+                "iframe.tox-edit-area__iframe, iframe[id*='tiny'], "
+                "iframe[title*='편집'], .tox-tinymce iframe",
                 timeout=10000,
             )
-            mode_btn.click()
-            human_delay(0.8, 1.5)
+            human_delay(1, 1.5)
 
-            html_option = page.wait_for_selector(
-                "li[data-value='html'], .editor-mode-html, button:has-text('HTML')",
-                timeout=8000,
-            )
-            html_option.click()
-            human_delay(1, 2)
-            logger.info("HTML 모드로 전환 완료")
-        except PWTimeout:
-            logger.warning("에디터 모드 전환 버튼을 찾지 못했습니다. 계속 진행합니다.")
-
-        try:
-            page.evaluate(
-                """(args) => {
-                    const el = document.querySelector(args.selector);
-                    if (el) {
-                        el.value = args.content;
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }""",
-                {
-                    "selector": "textarea.html-editor, .CodeMirror textarea, #html-editor",
-                    "content": html_content,
-                },
-            )
-        except Exception:
+            # JavaScript로 TinyMCE에 직접 내용 주입
             page.evaluate(
                 """(content) => {
-                    const cm = document.querySelector('.CodeMirror')?.CodeMirror;
-                    if (cm) cm.setValue(content);
+                    // TinyMCE 전역 객체를 통해 직접 주입
+                    if (window.tinymce && window.tinymce.activeEditor) {
+                        window.tinymce.activeEditor.setContent(content);
+                        window.tinymce.activeEditor.fire('change');
+                        return 'tinymce_ok';
+                    }
+                    // iframe body에 직접 주입
+                    const iframes = document.querySelectorAll(
+                        'iframe.tox-edit-area__iframe, iframe[id*="tiny"]'
+                    );
+                    for (const iframe of iframes) {
+                        try {
+                            const doc = iframe.contentDocument || iframe.contentWindow.document;
+                            if (doc && doc.body) {
+                                doc.body.innerHTML = content;
+                                return 'iframe_body_ok';
+                            }
+                        } catch(e) {}
+                    }
+                    return 'failed';
                 }""",
                 html_content,
             )
+            logger.info("TinyMCE 본문 주입 완료")
+
+        except PWTimeout:
+            logger.warning("TinyMCE iframe을 찾지 못했습니다. 클립보드 방식 시도...")
+            # 클립보드로 붙여넣기 (fallback)
+            self._paste_content_via_clipboard(page, html_content)
+
         human_delay(1.5, 2.5)
         logger.info(f"본문 입력 완료 ({len(html_content)}자)")
 
-    def _upload_thumbnail(self, page, image_path: str):
-        try:
-            thumb_btn = page.wait_for_selector(
-                "button.thumbnail, .btn-thumbnail, [data-name='thumbnail']",
-                timeout=8000,
-            )
-            thumb_btn.click()
-            human_delay(1, 2)
-            file_input = page.wait_for_selector("input[type='file']", timeout=8000)
-            file_input.set_input_files(os.path.abspath(image_path))
-            human_delay(2, 4)
+    def _paste_content_via_clipboard(self, page, html_content: str):
+        """TinyMCE 주입 실패 시 클립보드로 텍스트를 붙여넣습니다."""
+        # 본문 영역 클릭
+        content_selectors = [
+            ".tox-edit-area",
+            "div[contenteditable='true']:not([data-placeholder*='제목'])",
+            ".ProseMirror",
+        ]
+        for selector in content_selectors:
             try:
-                confirm_btn = page.wait_for_selector(
-                    "button:has-text('적용'), button:has-text('확인'), .btn-apply",
-                    timeout=8000,
-                )
-                confirm_btn.click()
-                human_delay(1, 2)
+                el = page.wait_for_selector(selector, timeout=3000, state="visible")
+                if el:
+                    el.click()
+                    human_delay(0.5, 1.0)
+                    # 마크다운 원본 텍스트로 붙여넣기 (HTML 태그 없이)
+                    import html as html_module
+                    plain = html_module.unescape(
+                        html_content.replace("<br>", "\n")
+                                   .replace("</p>", "\n")
+                                   .replace("</div>", "\n")
+                    )
+                    # 태그 제거
+                    import re
+                    plain = re.sub(r"<[^>]+>", "", plain).strip()
+                    page.keyboard.type(plain[:500])  # 앞 500자만 (타임아웃 방지)
+                    logger.info("클립보드 방식으로 일부 내용 입력 완료")
+                    break
             except PWTimeout:
-                pass
-            logger.info(f"썸네일 업로드 완료: {image_path}")
-        except PWTimeout:
-            logger.warning("썸네일 업로드 버튼을 찾지 못했습니다. 건너뜁니다.")
+                continue
 
+    # ── 태그 입력 ────────────────────────────────────────────────────────
     def _enter_tags(self, page, tags: list[str]):
         try:
             tag_input = page.wait_for_selector(
-                "input[placeholder*='태그'], .tag-input, #tagInput",
+                "input[placeholder*='태그'], .tag-input, #tagInput, "
+                "[data-placeholder*='태그']",
                 timeout=8000,
             )
             tag_input.click()
@@ -347,41 +380,77 @@ class TistoryUploader:
         except PWTimeout:
             logger.warning("태그 입력란을 찾지 못했습니다. 건너뜁니다.")
 
-    def _publish(self, page) -> str:
+    # ── 발행 ─────────────────────────────────────────────────────────────
+    def _publish(self, page, title: str) -> str:
+        """
+        '완료' 버튼 클릭 → 발행 패널 열림 →
+        공개 선택 확인 → '공개 발행' 버튼 클릭
+        """
         human_delay(1, 2)
-        publish_btn = page.wait_for_selector(
-            "button.publish, .btn-publish, button:has-text('발행'), "
-            "button:has-text('완료'), #publish-layer-btn",
+
+        # '완료' 버튼 클릭 (발행 패널 열기)
+        done_btn = page.wait_for_selector(
+            "button:has-text('완료'), .btn_publish, #publish-layer-btn, "
+            "button.publish",
             timeout=10000,
+            state="visible",
         )
-        publish_btn.click()
+        done_btn.click()
         human_delay(1.5, 2.5)
+        logger.info("완료 버튼 클릭 → 발행 패널 열림")
 
+        # 발행 패널: 공개 선택 확인
         try:
-            public_btn = page.wait_for_selector(
-                "label:has-text('공개'), input[value='public']",
+            public_radio = page.wait_for_selector(
+                "input[type='radio'][value='public'], "
+                "label:has-text('공개') input",
                 timeout=5000,
+                state="visible",
             )
-            public_btn.click()
-            human_delay(0.5, 1.0)
+            if not public_radio.is_checked():
+                public_radio.click()
+                human_delay(0.5, 1.0)
+                logger.info("공개 라디오 선택 완료")
+            else:
+                logger.info("이미 공개 선택됨")
         except PWTimeout:
-            pass
+            # 레이블 클릭으로 재시도
+            try:
+                public_label = page.wait_for_selector(
+                    "label:has-text('공개')",
+                    timeout=4000,
+                    state="visible",
+                )
+                public_label.click()
+                human_delay(0.5, 1.0)
+            except PWTimeout:
+                logger.warning("공개 라디오 버튼을 찾지 못했습니다.")
 
+        # '공개 발행' 버튼 클릭
         try:
-            confirm_publish = page.wait_for_selector(
-                "button.btn-publish-ok, button:has-text('발행하기'), "
-                ".layer-publish button[type='submit']",
+            publish_btn = page.wait_for_selector(
+                "button:has-text('공개 발행'), button:has-text('발행하기'), "
+                ".btn-publish-ok, button[type='submit']:has-text('발행')",
                 timeout=8000,
+                state="visible",
             )
-            confirm_publish.click()
+            publish_btn.click()
+            human_delay(2, 3)
+            logger.info("공개 발행 버튼 클릭 완료")
         except PWTimeout:
-            logger.warning("최종 발행 확인 버튼을 찾지 못했습니다.")
+            logger.warning("공개 발행 버튼을 찾지 못했습니다.")
 
+        # 발행 후 URL 확인
         try:
-            page.wait_for_url(f"**{self.blog_name}.tistory.com/**", timeout=15000)
+            page.wait_for_url(
+                f"**{self.blog_name}.tistory.com/**",
+                timeout=15000,
+            )
             human_delay(1.5, 2.5)
             post_url = page.url
+            logger.info(f"발행 완료 URL: {post_url}")
         except PWTimeout:
             post_url = f"https://{self.blog_name}.tistory.com/"
+            logger.warning(f"URL 변경 감지 실패. 기본 URL 사용: {post_url}")
 
         return post_url
