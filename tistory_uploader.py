@@ -129,53 +129,118 @@ class TistoryUploader:
         except PWTimeout:
             raise RuntimeError("카카오 로그인 버튼을 찾지 못했습니다.")
 
-        if "accounts.kakao.com" not in page.url:
-            raise RuntimeError(f"카카오 페이지 진입 실패: {page.url}")
+        logger.info(f"카카오 버튼 클릭 후 URL: {page.url}")
 
-        # 이메일 입력
-        email_el = page.wait_for_selector(
-            "#loginId, input[name='loginId']", timeout=15000, state="visible"
-        )
-        email_el.click()
-        human_delay(0.5, 1.0)
-        for c in self.email:
-            email_el.type(c, delay=random.randint(50, 120))
-        human_delay(0.8, 1.5)
+        # ── 계정 선택 화면 처리 (select_account) ─────────────────────────
+        # prompt=select_account 파라미터가 있으면 계정 목록이 표시됨
+        # 이메일 주소로 계정을 찾아 클릭하거나, 다른 계정으로 로그인 선택
+        if "select_account" in page.url or "kauth.kakao.com" in page.url:
+            self._handle_kakao_page(page)
 
-        # 비밀번호 입력
-        pw_el = page.wait_for_selector(
-            "#password, input[name='password']", timeout=10000, state="visible"
-        )
-        pw_el.click()
-        human_delay(0.3, 0.7)
-        for c in self.password:
-            pw_el.type(c, delay=random.randint(60, 130))
-        human_delay(0.5, 1.0)
-
-        # 로그인 버튼 클릭
-        page.wait_for_selector("button[type='submit']", timeout=10000).click()
-
-        # ── 핵심 수정: tistory.com으로 완전히 돌아올 때까지 대기 ──────────
-        # kauth.kakao.com → tistory.com 리다이렉트 완료를 기다림
-        logger.info("티스토리 세션 확립 대기 중...")
-        try:
-            page.wait_for_url("**/tistory.com/**", timeout=30000)
-        except PWTimeout:
-            # URL이 안 바뀌면 현재 URL 체크
-            current = page.url
-            logger.warning(f"URL 대기 타임아웃. 현재: {current}")
-            # kauth나 kakao 중간 페이지에 있으면 추가 대기
-            if "kakao" in current:
-                logger.info("카카오 중간 페이지 감지. 추가 30초 대기...")
-                time.sleep(30)
-
-        human_delay(2, 3)
+        # 최종적으로 tistory.com인지 확인
         logger.info(f"로그인 최종 URL: {page.url}")
-
-        # 로그인 성공 검증
         if "tistory.com" not in page.url:
             page.screenshot(path="login_failed.png")
             raise RuntimeError(f"티스토리 세션 확립 실패. URL: {page.url}")
+
+        logger.info("로그인 완료!")
+
+    def _handle_kakao_page(self, page):
+        """
+        카카오 페이지에서 상황에 따라 처리:
+        1. 계정 선택 화면 → 이메일 계정 클릭
+        2. 로그인 폼 화면 → 이메일/비밀번호 입력
+        3. tistory.com으로 리다이렉트될 때까지 반복
+        """
+        for attempt in range(5):
+            current_url = page.url
+            logger.info(f"카카오 처리 시도 {attempt+1}, URL: {current_url[:80]}...")
+
+            # tistory로 이동 완료
+            if "tistory.com" in current_url and "kauth" not in current_url:
+                logger.info("티스토리 세션 확립!")
+                return
+
+            # ── 계정 선택 화면 ──────────────────────────────────────────
+            # 로그인된 계정 목록이 뜨는 경우
+            try:
+                # 계정 목록에서 이메일이 포함된 항목 클릭
+                account_item = page.wait_for_selector(
+                    f"[data-email='{self.email}'], "
+                    f"button:has-text('{self.email}'), "
+                    f"div:has-text('{self.email.split('@')[0]}')",
+                    timeout=3000,
+                    state="visible",
+                )
+                account_item.click()
+                logger.info(f"계정 선택: {self.email}")
+                human_delay(2, 3)
+                continue
+            except PWTimeout:
+                pass
+
+            # "다른 계정으로 로그인" 또는 "로그인" 버튼
+            try:
+                other_btn = page.wait_for_selector(
+                    "button:has-text('다른 카카오계정으로 로그인'), "
+                    "a:has-text('다른 카카오계정'), "
+                    "button:has-text('새 계정으로 로그인')",
+                    timeout=2000,
+                    state="visible",
+                )
+                other_btn.click()
+                logger.info("다른 계정으로 로그인 클릭")
+                human_delay(2, 3)
+                continue
+            except PWTimeout:
+                pass
+
+            # ── 로그인 폼 화면 ───────────────────────────────────────────
+            try:
+                email_el = page.wait_for_selector(
+                    "#loginId, input[name='loginId']",
+                    timeout=3000,
+                    state="visible",
+                )
+                # 이메일 입력
+                email_el.click()
+                human_delay(0.5, 1.0)
+                email_el.triple_click()
+                email_el.fill("")
+                for c in self.email:
+                    email_el.type(c, delay=random.randint(50, 120))
+                human_delay(0.8, 1.5)
+
+                # 비밀번호 입력
+                pw_el = page.wait_for_selector(
+                    "#password, input[name='password']",
+                    timeout=5000,
+                    state="visible",
+                )
+                pw_el.click()
+                human_delay(0.3, 0.7)
+                pw_el.triple_click()
+                pw_el.fill("")
+                for c in self.password:
+                    pw_el.type(c, delay=random.randint(60, 130))
+                human_delay(0.5, 1.0)
+
+                # 로그인 버튼
+                page.wait_for_selector(
+                    "button[type='submit']", timeout=5000
+                ).click()
+                logger.info("로그인 폼 제출")
+                human_delay(3, 5)
+                continue
+
+            except PWTimeout:
+                pass
+
+            # 아무것도 못 찾으면 잠시 대기 후 재시도
+            logger.info("대기 중...")
+            human_delay(3, 5)
+
+        raise RuntimeError("카카오 로그인 처리 실패 (5회 시도)")
 
     # ── 카테고리 ──────────────────────────────────────────────────────────
     def _select_category(self, page):
@@ -221,10 +286,7 @@ class TistoryUploader:
                 continue
 
         if not el:
-            # 현재 URL 및 HTML 덤프
             logger.error(f"현재 URL: {page.url}")
-            html_snippet = page.evaluate("document.body?.innerHTML?.slice(0,2000)")
-            logger.error(f"HTML 덤프:\n{html_snippet}")
             raise RuntimeError("제목 입력창을 찾지 못했습니다.")
 
         el.click()
@@ -348,7 +410,6 @@ class TistoryUploader:
         human_delay(2, 3)
         logger.info("완료 버튼 클릭")
 
-        # 공개 라디오 선택
         try:
             radio = page.wait_for_selector(
                 "input[type='radio'][value='public']",
@@ -366,7 +427,6 @@ class TistoryUploader:
             except PWTimeout:
                 logger.warning("공개 라디오 버튼 없음")
 
-        # 공개 발행 버튼
         try:
             pub_btn = page.wait_for_selector(
                 "button:has-text('공개 발행'), button:has-text('발행하기'), .btn-publish-ok",
