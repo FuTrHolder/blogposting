@@ -1,9 +1,6 @@
 name: 미국 증시 블로그 원고 이메일 발송
 
 on:
-  schedule:
-    # 매일 오전 9시 KST = UTC 00:00
-    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
