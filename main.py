@@ -1,6 +1,6 @@
 """
 미국 증시 블로그 자동화 메인 스크립트 (이메일 발송 버전)
-실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(SD) → 이메일 발송(Gmail)
+실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(SD/Unsplash) → 이메일 발송(Gmail)
 """
 
 import os
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    logger.info("===== 미국 증시 블로그 자동화 시작 (이메일 발송 버전) =====")
+    logger.info("===== 미국 증시 블로그 자동화 시작 =====")
     today = datetime.now().strftime("%Y년 %m월 %d일")
 
     # 1. 뉴스 및 시장 데이터 수집
@@ -30,29 +30,29 @@ def main():
     fetcher = NewsFetcher(alpha_vantage_key=os.environ["ALPHA_VANTAGE_API_KEY"])
     market_data = fetcher.get_market_summary()
     news_list = fetcher.get_top_news(limit=8)
-
     if not news_list:
         logger.error("뉴스 수집 실패. 종료합니다.")
         sys.exit(1)
     logger.info(f"  → 뉴스 {len(news_list)}건 수집 완료")
 
-    # 2. 블로그 글 생성 (Gemini - 무료)
-    logger.info("[2/4] 블로그 글 생성 중 (Gemini - 무료)...")
+    # 2. 블로그 글 생성
+    logger.info("[2/4] 블로그 글 생성 중 (Gemini)...")
     generator = ContentGenerator(api_key=os.environ["GEMINI_API_KEY"])
     post = generator.generate_post(date=today, market_data=market_data, news_list=news_list)
     logger.info(f"  → 제목: {post['title']}")
     logger.info(f"  → 글자 수: {len(post['content'])}자")
 
-    # 3. 이미지 생성 (Stable Diffusion - 무료)
-    logger.info("[3/4] 썸네일 이미지 생성 중 (Stable Diffusion - 무료)...")
+    # 3. 이미지 생성 (SD → Unsplash 자동 대체)
+    logger.info("[3/4] 썸네일 이미지 생성 중...")
     img_gen = ImageGenerator(hf_token=os.environ.get("HF_API_TOKEN", ""))
     image_path = img_gen.generate(
         prompt=post["image_prompt"],
         filename=f"thumbnail_{datetime.now().strftime('%Y%m%d')}.png",
+        content=post["content"],   # ← 글 내용 전달 (Unsplash 키워드 추출용)
     )
     logger.info(f"  → 이미지: {image_path}")
 
-    # 4. 이메일 발송 (Gmail SMTP)
+    # 4. 이메일 발송
     logger.info("[4/4] 이메일 발송 중...")
     sender = EmailSender(
         gmail_address=os.environ["GMAIL_ADDRESS"],
@@ -66,7 +66,7 @@ def main():
         image_path=image_path,
     )
     logger.info(f"  → 발송 완료: {result['to']}")
-    logger.info("===== 자동화 완료 (비용: $0.00) =====")
+    logger.info("===== 자동화 완료 =====")
 
 
 if __name__ == "__main__":
