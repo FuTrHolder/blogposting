@@ -2,6 +2,10 @@
 이메일 발송 모듈
 Gmail SMTP를 사용해 완성된 블로그 원고를 이메일로 전송합니다.
 Gmail 앱 비밀번호 사용 (2단계 인증 필요)
+
+mode:
+  morning : 오전 마감 리뷰 → 파란 계열 헤더
+  evening : 저녁 프리마켓 & 이슈 → 보라/남색 계열 헤더
 """
 
 import smtplib
@@ -14,13 +18,38 @@ import markdown
 
 logger = logging.getLogger(__name__)
 
+# 모드별 UI 설정
+MODE_CONFIG = {
+    "morning": {
+        "label": "📊 전일 마감 리뷰",
+        "accent": "#1a73e8",       # 파란색
+        "accent_light": "#e8f0fe",
+        "th_bg": "#1a73e8",
+        "subtitle": "미국 전일 증시 마감 분석 | 티스토리 원고",
+        "emoji": "📈",
+    },
+    "evening": {
+        "label": "🌙 프리마켓 & 당일 이슈",
+        "accent": "#5c35d9",       # 보라색
+        "accent_light": "#ede7f6",
+        "th_bg": "#5c35d9",
+        "subtitle": "오늘 밤 미국 증시 프리뷰 & 이슈 정리 | 티스토리 원고",
+        "emoji": "🔔",
+    },
+}
 
-def _md_to_html(md_content: str) -> str:
-    """마크다운을 이메일용 HTML로 변환합니다."""
+
+def _md_to_html(md_content: str, mode: str = "morning") -> str:
+    """마크다운을 모드별 스타일이 적용된 이메일 HTML로 변환합니다."""
+    cfg = MODE_CONFIG.get(mode, MODE_CONFIG["morning"])
     html_body = markdown.markdown(
         md_content,
         extensions=["extra", "nl2br", "sane_lists"],
     )
+    accent = cfg["accent"]
+    accent_light = cfg["accent_light"]
+    th_bg = cfg["th_bg"]
+
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -42,12 +71,12 @@ def _md_to_html(md_content: str) -> str:
     box-shadow: 0 2px 12px rgba(0,0,0,0.08);
   }}
   .header {{
-    border-bottom: 3px solid #1a73e8;
+    border-bottom: 3px solid {accent};
     padding-bottom: 16px;
     margin-bottom: 28px;
   }}
   .header h1 {{
-    color: #1a73e8;
+    color: {accent};
     font-size: 22px;
     margin: 0 0 6px;
   }}
@@ -56,9 +85,19 @@ def _md_to_html(md_content: str) -> str:
     font-size: 13px;
     margin: 0;
   }}
+  .mode-badge {{
+    display: inline-block;
+    background: {accent_light};
+    color: {accent};
+    padding: 3px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }}
   h2 {{
-    color: #1a73e8;
-    border-bottom: 2px solid #e8f0fe;
+    color: {accent};
+    border-bottom: 2px solid {accent_light};
     padding-bottom: 8px;
     margin-top: 32px;
     font-size: 18px;
@@ -69,8 +108,8 @@ def _md_to_html(md_content: str) -> str:
     font-size: 16px;
   }}
   blockquote {{
-    background: #f8f9fa;
-    border-left: 4px solid #1a73e8;
+    background: {accent_light};
+    border-left: 4px solid {accent};
     padding: 12px 16px;
     margin: 16px 0;
     border-radius: 4px;
@@ -87,11 +126,11 @@ def _md_to_html(md_content: str) -> str:
     text-align: left;
   }}
   th {{
-    background: #1a73e8;
+    background: {th_bg};
     color: white;
   }}
   tr:nth-child(even) {{
-    background: #f8f9fa;
+    background: {accent_light};
   }}
   strong {{ color: #222; }}
   .footer {{
@@ -102,13 +141,11 @@ def _md_to_html(md_content: str) -> str:
     color: #aaa;
     text-align: center;
   }}
-  .tags {{
-    margin-top: 20px;
-  }}
+  .tags {{ margin-top: 20px; }}
   .tag {{
     display: inline-block;
-    background: #e8f0fe;
-    color: #1a73e8;
+    background: {accent_light};
+    color: {accent};
     padding: 3px 10px;
     border-radius: 12px;
     font-size: 12px;
@@ -119,8 +156,9 @@ def _md_to_html(md_content: str) -> str:
 <body>
 <div class="container">
   <div class="header">
-    <h1>📈 미국 증시 일일 분석 리포트</h1>
-    <p>자동 생성된 블로그 원고 | 티스토리에 직접 붙여넣기 하세요</p>
+    <div class="mode-badge">{cfg['label']}</div>
+    <h1>{cfg['emoji']} 미국 증시 블로그 원고</h1>
+    <p>{cfg['subtitle']}</p>
   </div>
   {html_body}
   <div class="footer">
@@ -148,28 +186,29 @@ class EmailSender:
         content: str,
         tags: list[str],
         image_path: str | None = None,
+        mode: str = "morning",
     ) -> dict:
         """완성된 블로그 원고를 이메일로 발송합니다."""
+        cfg = MODE_CONFIG.get(mode, MODE_CONFIG["morning"])
 
         msg = MIMEMultipart("related")
-        msg["Subject"] = f"[블로그 원고] {title}"
+        msg["Subject"] = f"[{cfg['label']}] {title}"
         msg["From"] = self.sender
         msg["To"] = self.recipient
 
-        # 태그 HTML
-        tags_html = "".join(f'<span class="tag">#{t}</span>' for t in tags)
-        tags_section = f'<div class="tags"><strong>태그:</strong> {tags_html}</div>'
-
         # 마크다운 → HTML 변환 (태그 포함)
-        html_content = _md_to_html(content + f"\n\n---\n**태그:** {' '.join('#'+t for t in tags)}")
+        tags_md = " ".join(f"#{t}" for t in tags)
+        html_content = _md_to_html(
+            content + f"\n\n---\n**태그:** {tags_md}",
+            mode=mode,
+        )
 
-        # HTML 파트
         alt = MIMEMultipart("alternative")
         alt.attach(MIMEText(content, "plain", "utf-8"))
         alt.attach(MIMEText(html_content, "html", "utf-8"))
         msg.attach(alt)
 
-        # 이미지 첨부 (있을 경우)
+        # 이미지 첨부
         if image_path and os.path.exists(image_path):
             with open(image_path, "rb") as f:
                 img = MIMEImage(f.read())
@@ -180,10 +219,9 @@ class EmailSender:
                 )
                 img.add_header("Content-ID", "<thumbnail>")
             msg.attach(img)
-            logger.info(f"썸네일 이미지 첨부: {image_path}")
+            logger.info(f"썸네일 첨부: {image_path}")
 
-        # Gmail SMTP 발송
-        logger.info(f"이메일 발송 중: {self.recipient}")
+        logger.info(f"이메일 발송 중 [{mode}]: {self.recipient}")
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(self.sender, self.password)
             server.sendmail(self.sender, self.recipient, msg.as_string())
