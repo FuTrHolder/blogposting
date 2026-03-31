@@ -1,10 +1,33 @@
 name: 미국 증시 블로그 원고 이메일 발송
 
 on:
+  # ── 오전 9시 KST (UTC 00:00) : 미국 전일 마감 리뷰 ──────────────────────
+  schedule:
+    - cron: "0 0 * * 2-6"   # 화~토 (월~금 미국 증시 마감 다음날 오전)
+    - cron: "0 12 * * 1-5"  # 월~금 (저녁 9시 KST = UTC 12:00)
+
+  # 수동 실행 (테스트용 - 모드 선택 가능)
   workflow_dispatch:
+    inputs:
+      post_mode:
+        description: "포스팅 모드 (morning=전일 마감리뷰 / evening=프리마켓&이슈)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - morning
+          - evening
 
 jobs:
-  send-email:
+  # ── 오전 9시 포스팅 : 전일 마감 리뷰 ────────────────────────────────────
+  morning-post:
+    name: "📊 오전 포스팅 (전일 마감 리뷰)"
+    # UTC 00:00 cron 또는 수동 실행(morning 선택)일 때만 동작
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 2-6') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == '')
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -24,8 +47,46 @@ jobs:
       - name: 📁 디렉토리 준비
         run: mkdir -p images
 
-      - name: 🚀 원고 생성 및 이메일 발송
+      - name: 🌅 오전 원고 생성 및 이메일 발송
         env:
+          POST_MODE: morning
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python main.py
+
+  # ── 저녁 9시 포스팅 : 프리마켓 & 이슈 ───────────────────────────────────
+  evening-post:
+    name: "🌙 저녁 포스팅 (프리마켓 & 당일 이슈)"
+    # UTC 12:00 cron 또는 수동 실행(evening 선택)일 때만 동작
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'evening')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 📁 디렉토리 준비
+        run: mkdir -p images
+
+      - name: 🌙 저녁 원고 생성 및 이메일 발송
+        env:
+          POST_MODE: evening
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
