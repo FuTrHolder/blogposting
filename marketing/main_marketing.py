@@ -168,6 +168,7 @@ def main():
             thumbnail_url=post.get("thumbnail_url", ""),
             blog_url="seedsup.tistory.com",
             timestamp=timestamp,
+            content=content,   # ← 플랫폼별 서브타이틀에 Gemini 텍스트 사용
         )
         logger.info(f"  → 썸네일 {len(thumb_paths)}개 생성 완료")
     except Exception as e:
