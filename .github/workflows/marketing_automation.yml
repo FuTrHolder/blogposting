@@ -25,7 +25,7 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30   # TTS + 영상 합성으로 시간 증가
 
     steps:
       - name: 📥 코드 체크아웃
@@ -37,8 +37,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: 🎬 FFmpeg 설치
-        run: sudo apt-get install -y ffmpeg
+      - name: 🎬 FFmpeg + 한글 폰트 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
+          # Noto Sans CJK 설치 확인
+          fc-list :lang=ko | head -3
 
       - name: 📦 패키지 설치
         run: pip install -r marketing/requirements.txt
