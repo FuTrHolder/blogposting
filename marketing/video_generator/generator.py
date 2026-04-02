@@ -2,7 +2,7 @@
 YouTube Shorts / TikTok 영상 생성기
 슬라이드 스크립트 JSON → MP4 (세로형 9:16, 1080x1920)
 
-의존성: Pillow, moviepy, requests
+의존성: Pillow, moviepy==1.0.3, requests
 무료 폰트: NanumGothic (Google Fonts) 자동 다운로드
 """
 
@@ -12,8 +12,25 @@ import requests
 import textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip
-from moviepy.video.fx import fadein, fadeout
+
+# moviepy 1.x / 2.x 모두 호환
+try:
+    from moviepy.editor import ImageClip, concatenate_videoclips  # 1.x
+    from moviepy.video.fx.fadein import fadein
+    from moviepy.video.fx.fadeout import fadeout
+
+    def _apply_fade(clip, duration):
+        return fadeout(fadein(clip, duration), duration)
+
+except ImportError:
+    from moviepy import ImageClip, concatenate_videoclips          # 2.x
+
+    def _apply_fade(clip, duration):
+        try:
+            from moviepy.video.fx import FadeIn, FadeOut
+            return clip.with_effects([FadeIn(duration), FadeOut(duration)])
+        except Exception:
+            return clip
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +43,15 @@ OUTPUT_DIR = "videos"
 # 모드별 색상 테마
 THEMES = {
     "morning": {
-        "bg": (15, 23, 42),          # 진한 네이비
-        "accent": (56, 189, 248),    # 하늘색
+        "bg": (15, 23, 42),
+        "accent": (56, 189, 248),
         "title_fg": (255, 255, 255),
         "body_fg": (203, 213, 225),
         "overlay": (30, 64, 175, 180),
     },
     "evening": {
-        "bg": (23, 7, 48),           # 진한 보라
-        "accent": (167, 139, 250),   # 라벤더
+        "bg": (23, 7, 48),
+        "accent": (167, 139, 250),
         "title_fg": (255, 255, 255),
         "body_fg": (216, 180, 254),
         "overlay": (88, 28, 135, 180),
@@ -99,7 +116,6 @@ def _make_slide(
         try:
             bg = thumbnail_img.copy().convert("RGB")
             bg = bg.resize((VIDEO_W, VIDEO_H), Image.LANCZOS)
-            # 어두운 오버레이
             overlay = Image.new("RGBA", (VIDEO_W, VIDEO_H), theme["overlay"])
             img = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
             draw = ImageDraw.Draw(img, "RGBA")
@@ -113,7 +129,7 @@ def _make_slide(
     # 슬라이드 번호
     draw.text((54, 40), f"{slide_num}/{total}", font=font_tag, fill=theme["accent"])
 
-    # 제목 (상단 1/3 영역)
+    # 제목
     title = slide_data.get("title", "")
     title_wrapped = textwrap.wrap(title, width=14)
     y_title = 200
@@ -127,7 +143,7 @@ def _make_slide(
     line_y = y_title + 40
     draw.rectangle([(80, line_y), (VIDEO_W - 80, line_y + 4)], fill=theme["accent"])
 
-    # 본문 (중앙 영역)
+    # 본문
     body = slide_data.get("body", "")
     body_wrapped = textwrap.wrap(body, width=22)
     y_body = line_y + 80
@@ -159,7 +175,7 @@ def _make_slide(
     # 워터마크
     draw.text(
         (VIDEO_W // 2, VIDEO_H - 80),
-        "📊 미국증시 분석 | seedsup.tistory.com",
+        "미국증시 분석 | seedsup.tistory.com",
         font=font_tag,
         fill=(*theme["accent"][:3], 180),
         anchor="mm",
@@ -192,8 +208,8 @@ class VideoGenerator:
         thumbnail_img = None
         if thumbnail_url:
             try:
-                resp = requests.get(thumbnail_url, timeout=10)
                 from io import BytesIO
+                resp = requests.get(thumbnail_url, timeout=10)
                 thumbnail_img = Image.open(BytesIO(resp.content))
             except Exception as e:
                 logger.warning(f"썸네일 다운로드 실패: {e}")
@@ -210,12 +226,11 @@ class VideoGenerator:
                 thumbnail_img=thumbnail_img if i == 1 else None,
                 blog_url=blog_url,
             )
-            # 임시 PNG 저장
             tmp_path = os.path.join(self.output_dir, f"_slide_{i:02d}.png")
             img.save(tmp_path, "PNG")
 
             clip = ImageClip(tmp_path, duration=SLIDE_DURATION)
-            clip = clip.fx(fadein, FADE_DURATION).fx(fadeout, FADE_DURATION)
+            clip = _apply_fade(clip, FADE_DURATION)
             clips.append(clip)
 
         # 영상 합치기
