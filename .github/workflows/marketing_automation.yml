@@ -12,11 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       force_crawl:
-        description: "강제 크롤링 (중복 방지 무시)"
+        description: "강제 크롤링 (중복 방지 무시, true/false)"
         required: false
         default: "false"
-        type: choice
-        options: ["false", "true"]
 
 jobs:
   marketing:
@@ -95,21 +93,3 @@ jobs:
             marketing/images/*.jpg
             marketing/images/*.png
           retention-days: 7
-```
-
-5. `Commit changes` 클릭
-
----
-
-## 방법 2 — `marketing/requirements.txt` 도 누락 확인
-
-zip 파일을 보니 `marketing/requirements.txt`가 없습니다. 위와 같은 방식으로 `marketing/requirements.txt` 파일도 추가해 주세요.
-```
-requests>=2.31.0
-feedparser>=6.0.11
-beautifulsoup4>=4.12.0
-Pillow>=10.3.0
-moviepy>=1.0.3
-google-api-python-client>=2.100.0
-google-auth>=2.23.0
-google-auth-oauthlib>=1.1.0
