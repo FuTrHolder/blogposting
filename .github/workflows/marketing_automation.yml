@@ -1,0 +1,115 @@
+name: 📣 마케팅 자동화 (SNS 자동 업로드)
+
+on:
+  workflow_run:
+    workflows: ["미국 증시 블로그 원고 이메일 발송"]
+    types: [completed]
+    branches: [main]
+
+  schedule:
+    - cron: "*/30 * * * *"
+
+  workflow_dispatch:
+    inputs:
+      force_crawl:
+        description: "강제 크롤링 (중복 방지 무시)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  marketing:
+    name: "📣 SNS 자동 업로드"
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 🎬 FFmpeg 설치
+        run: sudo apt-get install -y ffmpeg
+
+      - name: 📦 패키지 설치
+        run: pip install -r marketing/requirements.txt
+
+      - name: 📁 디렉토리 준비
+        run: mkdir -p marketing/videos marketing/images marketing/fonts
+
+      - name: 💾 상태 파일 복원
+        uses: actions/cache@v4
+        with:
+          path: marketing/last_post_state.json
+          key: marketing-state-${{ runner.os }}
+          restore-keys: |
+            marketing-state-
+
+      - name: 📣 마케팅 자동화 실행
+        working-directory: marketing
+        env:
+          FORCE_CRAWL: ${{ github.event.inputs.force_crawl || 'false' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          TIKTOK_OPEN_ID: ${{ secrets.TIKTOK_OPEN_ID }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          INSTAGRAM_VIDEO_URL: ${{ secrets.INSTAGRAM_VIDEO_URL }}
+          INSTAGRAM_IMAGE_URL: ${{ secrets.INSTAGRAM_IMAGE_URL }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          X_ENABLED: ${{ secrets.X_ENABLED || 'false' }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python main_marketing.py
+
+      - name: 📎 아티팩트 저장
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: marketing-outputs-${{ github.run_id }}
+          path: |
+            marketing/videos/*.mp4
+            marketing/images/*.jpg
+            marketing/images/*.png
+          retention-days: 7
+```
+
+5. `Commit changes` 클릭
+
+---
+
+## 방법 2 — `marketing/requirements.txt` 도 누락 확인
+
+zip 파일을 보니 `marketing/requirements.txt`가 없습니다. 위와 같은 방식으로 `marketing/requirements.txt` 파일도 추가해 주세요.
+```
+requests>=2.31.0
+feedparser>=6.0.11
+beautifulsoup4>=4.12.0
+Pillow>=10.3.0
+moviepy>=1.0.3
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
