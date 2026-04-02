@@ -429,7 +429,7 @@ class KakaoStoryPublisher(PlatformPublisher):
         kakao_text = content.get("kakao_post", "")
         blog_url = content.get("blog_url", "")
         blog_title = content.get("blog_title", "")
-        thumb_path = media_paths.get("facebook")  # 1200×630 썸네일 재활용
+        thumb_path = media_paths.get("kakao") or media_paths.get("facebook")  # 카카오 전용 썸네일 우선
 
         subject = f"[카카오 스토리채널 원고] {blog_title}"
         html = f"""<html><body style="font-family:sans-serif;line-height:1.8;max-width:600px;margin:0 auto;">
