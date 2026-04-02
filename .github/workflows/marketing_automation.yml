@@ -1,31 +1,44 @@
 name: 📣 마케팅 자동화 (SNS 자동 업로드)
 
 on:
+  # 블로그 원고 이메일 발송 워크플로우 완료 후 즉시 실행
   workflow_run:
     workflows: ["미국 증시 블로그 원고 이메일 발송"]
     types: [completed]
     branches: [main]
 
+  # 30분마다 폴링 (새 글 감지)
   schedule:
     - cron: "*/30 * * * *"
 
+  # 수동 실행 (테스트용)
   workflow_dispatch:
     inputs:
       force_crawl:
-        description: "강제 크롤링 (중복 방지 무시, true/false)"
+        description: "강제 재실행 (이미 처리된 글도 다시 실행, true/false)"
         required: false
         default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   marketing:
     name: "📣 SNS 자동 업로드"
+    # workflow_run은 성공 시에만 실행, 나머지는 항상 실행
     if: |
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     runs-on: ubuntu-latest
-    timeout-minutes: 30   # TTS + 영상 합성으로 시간 증가
+    timeout-minutes: 30   # TTS + 영상 합성 포함
+
+    # GITHUB_TOKEN 권한 명시 (Gist 읽기/쓰기에 필요)
+    permissions:
+      contents: read
+      gists: write   # ← Gist 쓰기 권한 필수
 
     steps:
       - name: 📥 코드 체크아웃
@@ -41,7 +54,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fonts-noto-cjk
-          # Noto Sans CJK 설치 확인
+          echo "✅ Noto Sans CJK 폰트 확인:"
           fc-list :lang=ko | head -3
 
       - name: 📦 패키지 설치
@@ -50,44 +63,57 @@ jobs:
       - name: 📁 디렉토리 준비
         run: mkdir -p marketing/videos marketing/images marketing/fonts
 
-      - name: 💾 상태 파일 복원
-        uses: actions/cache@v4
-        with:
-          path: marketing/last_post_state.json
-          key: marketing-state-${{ runner.os }}
-          restore-keys: |
-            marketing-state-
-
       - name: 📣 마케팅 자동화 실행
         working-directory: marketing
         env:
+          # ── Gist 상태 관리 ────────────────────────────────────────────
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 자동 제공
+          GIST_ID: ${{ secrets.GIST_ID }}            # 최초 실행 후 저장 권장
+
+          # ── 강제 재실행 옵션 ─────────────────────────────────────────
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl || 'false' }}
+
+          # ── AI 콘텐츠 생성 ───────────────────────────────────────────
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+
+          # ── YouTube ──────────────────────────────────────────────────
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+
+          # ── TikTok (비즈니스 계정 필요) ──────────────────────────────
           TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
           TIKTOK_OPEN_ID: ${{ secrets.TIKTOK_OPEN_ID }}
+
+          # ── Facebook ─────────────────────────────────────────────────
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
           FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
+
+          # ── Instagram ────────────────────────────────────────────────
           INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_VIDEO_URL: ${{ secrets.INSTAGRAM_VIDEO_URL }}
           INSTAGRAM_IMAGE_URL: ${{ secrets.INSTAGRAM_IMAGE_URL }}
+
+          # ── Threads ──────────────────────────────────────────────────
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+
+          # ── X (유료 $100/월, X_ENABLED=true 시 활성화) ───────────────
           X_ENABLED: ${{ secrets.X_ENABLED || 'false' }}
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+
+          # ── 카카오 (이메일 대체 발송) ────────────────────────────────
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python main_marketing.py
 
-      - name: 📎 아티팩트 저장
+      - name: 📎 생성 파일 아티팩트 저장
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -97,3 +123,5 @@ jobs:
             marketing/images/*.jpg
             marketing/images/*.png
           retention-days: 7
+          # 파일이 없어도 오류 발생 안 함
+          if-no-files-found: ignore
