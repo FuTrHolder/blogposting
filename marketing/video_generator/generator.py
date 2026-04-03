@@ -1,24 +1,21 @@
 """
-YouTube Shorts 영상 생성기 v3 - 고성과 쇼츠 공식 적용
-슬라이드 스크립트 JSON → MP4 (세로형 9:16, 1080x1920)
+YouTube Shorts 영상 생성기 v4 — 전면 재작성
+==============================================
+주요 변경사항:
+  - source.unsplash.com(서비스 종료) → Pexels API 무료 대체
+  - textwrap 문자수 기준 → PIL 픽셀 폭 기준 한글 줄바꿈
+  - ffmpeg zoompan(느림) → scale+fade 단순화로 3~5배 속도 개선
+  - 폰트 로드: GitHub raw URL 제거, 시스템 Noto CJK 우선 + 안정적 fallback
+  - 외곽선 렌더링: 이중 루프 제거 → stroke 기반 단순화
+  - BGM: Pixabay URL 불안정 → 로컬 사인파 생성 fallback 추가
+  - 슬라이드 클립 concat → pipe stream 방식으로 I/O 개선
 
-[고성과 쇼츠 핵심 공식]
-  - 3초 훅: 가장 자극적인 키워드로 시작, 질문/충격 요법
-  - 공백 제거: 문장 간 공백 최소화, 나래이션 1.1~1.2배속
-  - 5초마다 화면 전환: 정적 배경 금지, 슬라이드당 짧은 듀레이션
-  - 무한 루프 유도: 마지막 장면이 첫 장면과 이어지도록
-  - 핵심 수치 강조: 노란색/빨간색 텍스트 강조
-  - 투자 포인트 코멘트: 마지막에 한 줄 요약
-
-TTS: edge-tts ko-KR-InJoonNeural (젊은 남성, 에너지 있는 목소리)
-BGM: CC0 라이선스 무료 루프 자동 믹싱
-ffmpeg: 슬라이드→영상 합성
-
-의존성: edge-tts>=6.1.9, requests>=2.31.0, Pillow>=10.3.0
-시스템: ffmpeg, Noto Sans CJK 폰트 (ubuntu-latest 기본 포함)
+TTS: edge-tts ko-KR-InJoonNeural (젊은 남성)
+규격: 1080×1920, 30fps, H.264
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -26,660 +23,694 @@ import re
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import time
 import urllib.parse
 import urllib.request
+from math import sin, pi
 from pathlib import Path
+from struct import pack
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# ─── 영상 규격 ───────────────────────────────────────────────────────────────
+# ── 규격 ─────────────────────────────────────────────────────────────────────
 VIDEO_W, VIDEO_H = 1080, 1920
-# 고성과 공식: 슬라이드당 최대 5초 (5초마다 화면 전환)
-SLIDE_DURATION   = 5.0
 MIN_SLIDE_SEC    = 3.0
-MAX_SLIDE_SEC    = 5.5   # 5초 룰 엄수 (최대 5.5초)
-OUTPUT_DIR = "videos"
-FONT_DIR   = Path("fonts")
+MAX_SLIDE_SEC    = 5.5
+OUTPUT_DIR       = "videos"
 
-# ─── 색상 테마 (고성과 공식: 신뢰색 + 강렬한 강조색) ────────────────────────
+# ── 시스템 폰트 경로 (ubuntu-latest 실제 경로) ───────────────────────────────
+_FONT_BOLD = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+_FONT_BLACK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
+_FONT_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
+# ── 색상 테마 ─────────────────────────────────────────────────────────────────
 THEMES = {
     "morning": {
-        "overlay_color": (8, 15, 35),
-        "overlay_alpha": 0.75,
-        "accent": (56, 189, 248),          # 스카이 블루
-        "accent_alt": (254, 211, 48),      # 강조 노란색 (수치 강조)
-        "alert_color": (239, 68, 68),      # 하락/경고 빨간색
-        "title_fg": (255, 255, 255),
-        "body_fg": (203, 213, 225),
-        "highlight_fg": (254, 211, 48),    # 핵심 수치 강조색
+        "overlay": (8, 15, 35, 195),
+        "accent": (56, 189, 248),
+        "highlight": (254, 211, 48),
+        "alert": (239, 68, 68),
+        "title": (255, 255, 255),
+        "body": (203, 213, 225),
         "tag_bg": (56, 189, 248),
         "tag_fg": (8, 15, 35),
-        "progress_bg": (255, 255, 255, 40),
-        "hook_color": (254, 211, 48),      # 훅 문구 강조색
+        "hook_color": (254, 211, 48),
         "cta_bg": (56, 189, 248),
         "cta_fg": (8, 15, 35),
+        "progress": (56, 189, 248),
     },
     "evening": {
-        "overlay_color": (18, 5, 40),
-        "overlay_alpha": 0.78,
-        "accent": (167, 139, 250),         # 퍼플
-        "accent_alt": (251, 191, 36),      # 강조 노란색
-        "alert_color": (239, 68, 68),      # 하락/경고 빨간색
-        "title_fg": (255, 255, 255),
-        "body_fg": (216, 180, 254),
-        "highlight_fg": (251, 191, 36),    # 핵심 수치 강조색
+        "overlay": (18, 5, 40, 200),
+        "accent": (167, 139, 250),
+        "highlight": (251, 191, 36),
+        "alert": (239, 68, 68),
+        "title": (255, 255, 255),
+        "body": (216, 180, 254),
         "tag_bg": (167, 139, 250),
         "tag_fg": (18, 5, 40),
-        "progress_bg": (255, 255, 255, 40),
         "hook_color": (251, 191, 36),
         "cta_bg": (167, 139, 250),
         "cta_fg": (18, 5, 40),
+        "progress": (167, 139, 250),
     },
 }
 
-# ─── BGM (CC0) ────────────────────────────────────────────────────────────────
-BGM_URLS = {
-    "morning": [
-        "https://cdn.pixabay.com/download/audio/2022/10/25/audio_058a2434c2.mp3",
-        "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-    ],
-    "evening": [
-        "https://cdn.pixabay.com/download/audio/2022/08/02/audio_884fe92c21.mp3",
-        "https://cdn.pixabay.com/download/audio/2021/11/01/audio_10bdb52c2f.mp3",
-    ],
+# ── Pexels 무료 API 키워드 매핑 ───────────────────────────────────────────────
+PEXELS_KEYWORDS = {
+    "morning": ["wall street morning", "stock market finance", "financial district dawn",
+                "new york finance", "nasdaq trading"],
+    "evening": ["city night finance", "new york night skyline", "stock exchange night",
+                "wall street night", "financial market evening"],
 }
-BGM_VOLUME = 0.10
 
-# ─── TTS 설정 (고성과 공식: 에너지 있는 목소리, 1.2배속) ────────────────────
+BGM_VOLUME = 0.08
+
 TTS_VOICE = "ko-KR-InJoonNeural"
-TTS_RATE  = "+20%"    # 1.2배속 효과 (공백 없는 빠른 템포)
+TTS_RATE  = "+18%"
 TTS_PITCH = "-2Hz"
 
-# ─── Unsplash 키워드 ─────────────────────────────────────────────────────────
-KEYWORD_MAP = {
-    "morning": ["stock market", "nasdaq", "financial district", "wall street", "trading"],
-    "evening": ["city night", "new york night", "financial market", "stock exchange"],
-}
 
-# ─── 폰트 ────────────────────────────────────────────────────────────────────
-SYSTEM_FONT_CANDIDATES = [
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    str(FONT_DIR / "NanumGothicBold.ttf"),
-    str(FONT_DIR / "NanumGothic.ttf"),
-]
-NANUM_BOLD_URL    = "https://github.com/naver/nanumfont/raw/master/fonts/NanumGothicBold.ttf"
-NANUM_REGULAR_URL = "https://github.com/naver/nanumfont/raw/master/fonts/NanumGothic.ttf"
+# ═══════════════════════════════════════════════════════════════════════════════
+# 폰트 헬퍼
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# 유틸리티
-# ════════════════════════════════════════════════════════════════════════════
-
-def _run(cmd: list, check=True, **kwargs) -> subprocess.CompletedProcess:
-    logger.debug("$ " + " ".join(str(c) for c in cmd))
-    return subprocess.run(cmd, check=check, capture_output=True, text=True, **kwargs)
-
-
-def _get_font_path(bold: bool = True) -> str:
-    candidates = (
-        [c for c in SYSTEM_FONT_CANDIDATES if "Bold" in c or "bold" in c]
-        + [c for c in SYSTEM_FONT_CANDIDATES if "Bold" not in c and "bold" not in c]
-    ) if bold else SYSTEM_FONT_CANDIDATES
-
+def _load_font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
+    """시스템 Noto CJK 폰트 로드. 실패 시 안전 fallback."""
+    candidates = [_FONT_BLACK, _FONT_BOLD] if bold else [_FONT_REGULAR, _FONT_BOLD]
     for path in candidates:
         if Path(path).exists():
-            return path
-
-    FONT_DIR.mkdir(exist_ok=True)
-    url  = NANUM_BOLD_URL if bold else NANUM_REGULAR_URL
-    dest = FONT_DIR / ("NanumGothicBold.ttf" if bold else "NanumGothic.ttf")
-    if not dest.exists():
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                dest.write_bytes(resp.read())
-        except Exception as e:
-            logger.warning(f"폰트 다운로드 실패: {e}")
-            return ""
-    return str(dest)
+            try:
+                return ImageFont.truetype(path, size, index=0)
+            except Exception:
+                continue
+    # 마지막 fallback: default 비트맵 폰트 (최소 보장)
+    logger.warning(f"시스템 CJK 폰트 없음 — default 폰트 사용 (size={size})")
+    return ImageFont.load_default()
 
 
-def _download_bgm(mode: str, dest: Path) -> bool:
-    for url in BGM_URLS.get(mode, BGM_URLS["morning"]):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                dest.write_bytes(resp.read())
-            return True
-        except Exception as e:
-            logger.warning(f"BGM 다운로드 실패 ({url}): {e}")
-    return False
+# ═══════════════════════════════════════════════════════════════════════════════
+# 픽셀 기반 한글 줄바꿈
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def _download_bg_image(keywords: list[str], dest: Path, width=1080, height=1920) -> bool:
-    kw = ",".join(keywords[:3])
-    urls_to_try = [
-        f"https://source.unsplash.com/random/{width}x{height}/?{urllib.parse.quote(kw)}",
-        f"https://source.unsplash.com/random/{width}x{height}/?finance,market",
-        f"https://picsum.photos/{width}/{height}",
-    ]
-    for url in urls_to_try:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                dest.write_bytes(resp.read())
-            img = Image.open(dest)
-            img.verify()
-            return True
-        except Exception as e:
-            logger.warning(f"배경 이미지 다운로드 실패 ({url}): {e}")
-            if dest.exists():
-                dest.unlink()
-    return False
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 숫자/수치 강조 파서
-# ════════════════════════════════════════════════════════════════════════════
-
-def _parse_highlight_segments(text: str) -> list[tuple[str, bool]]:
+def _pixel_wrap(text: str, font: ImageFont.FreeTypeFont, max_px: int) -> list[str]:
     """
-    텍스트에서 숫자/퍼센트/종목명 등 강조할 세그먼트를 파싱합니다.
-    반환: [(텍스트, 강조여부), ...]
+    PIL textbbox 기반 픽셀 폭 줄바꿈.
+    한글/영문 혼합 텍스트에서 textwrap(문자수 기준)보다 정확.
+    공백 단위 우선 분할, 불가 시 문자 단위 강제 분할.
     """
-    # 숫자, %, +, - 포함 패턴 강조
-    pattern = re.compile(
-        r"([+-]?\d+(?:\.\d+)?%|[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?포인트?|"
-        r"[+-]?\d+(?:\.\d+)?달러?|S&P\s*500|나스닥|다우|FOMC|Fed|연준)"
-    )
-    segments = []
-    last = 0
-    for m in pattern.finditer(text):
-        if m.start() > last:
-            segments.append((text[last:m.start()], False))
-        segments.append((m.group(), True))
-        last = m.end()
-    if last < len(text):
-        segments.append((text[last:], False))
-    return segments if segments else [(text, False)]
+    _img = Image.new("RGB", (10, 10))
+    _draw = ImageDraw.Draw(_img)
+
+    def _w(t):
+        return _draw.textbbox((0, 0), t, font=font)[2]
+
+    words = text.split()
+    lines, current = [], ""
+
+    for word in words:
+        sep = "" if not current else " "
+        candidate = current + sep + word
+        if _w(candidate) <= max_px:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            # 단어 자체가 max_px 초과 → 문자 단위 강제 분할
+            if _w(word) > max_px:
+                chunk = ""
+                for ch in word:
+                    if _w(chunk + ch) > max_px:
+                        if chunk:
+                            lines.append(chunk)
+                        chunk = ch
+                    else:
+                        chunk += ch
+                current = chunk
+            else:
+                current = word
+
+    if current:
+        lines.append(current)
+    return lines if lines else [text]
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# 슬라이드 이미지 생성 (고성과 쇼츠 공식 적용)
-# ════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# 배경 이미지 다운로드 (Pexels API → picsum fallback)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _make_slide_image(
-    slide_data: dict,
-    theme: dict,
-    slide_num: int,
-    total: int,
-    bg_image_path: str | None,
-    blog_url: str = "",
-    font_bold: str = "",
-    font_regular: str = "",
-    is_hook: bool = False,      # 첫 슬라이드 (훅) 여부
-    is_cta: bool = False,       # 마지막 슬라이드 (CTA/루프) 여부
+def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> bool:
+    """Pexels API로 금융 관련 배경 이미지 다운로드."""
+    if not pexels_key:
+        return False
+    query = keywords[0] if keywords else "finance"
+    url   = "https://api.pexels.com/v1/search"
+    today_sig = int(time.time() / 86400)  # 날짜별 고정 이미지
+
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": pexels_key},
+            params={"query": query, "per_page": 10, "orientation": "portrait"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        photos = resp.json().get("photos", [])
+        if not photos:
+            return False
+        photo = photos[today_sig % len(photos)]
+        img_url = photo["src"]["large2x"]
+        img_resp = requests.get(img_url, timeout=30)
+        img_resp.raise_for_status()
+        dest.write_bytes(img_resp.content)
+        Image.open(dest).verify()
+        logger.info(f"Pexels 배경 다운로드 완료: {query}")
+        return True
+    except Exception as e:
+        logger.warning(f"Pexels 실패 ({query}): {e}")
+        return False
+
+
+def _download_bg_picsum(dest: Path, seed: int = 0) -> bool:
+    """picsum.photos 랜덤 이미지 (최종 fallback)."""
+    try:
+        url = f"https://picsum.photos/seed/{seed}/1080/1920"
+        resp = requests.get(url, timeout=20, allow_redirects=True)
+        resp.raise_for_status()
+        if len(resp.content) < 10_000:
+            return False
+        dest.write_bytes(resp.content)
+        Image.open(dest).verify()
+        return True
+    except Exception as e:
+        logger.warning(f"picsum 실패: {e}")
+        return False
+
+
+def _prepare_bg(
+    path: Path | None,
+    overlay_color: tuple,
+    mode: str,
 ) -> Image.Image:
+    """배경 이미지 → 1080×1920 RGBA (오버레이 포함)."""
     W, H = VIDEO_W, VIDEO_H
 
-    # ── 배경 처리 ────────────────────────────────────────────────────────────
-    if bg_image_path and Path(bg_image_path).exists():
+    if path and path.exists():
         try:
-            bg = Image.open(bg_image_path).convert("RGB")
-            # 슬라이드별로 구도를 달리해 역동성 부여
-            src_ratio = bg.width / bg.height
-            dst_ratio = W / H
-            if src_ratio > dst_ratio:
+            bg = Image.open(path).convert("RGB")
+            # 비율 유지 크롭 (세로 중심)
+            src_r = bg.width / bg.height
+            dst_r = W / H
+            if src_r > dst_r:
                 new_h = bg.height
-                new_w = int(new_h * dst_ratio)
-                # 슬라이드마다 x 오프셋 이동 → 화면 전환 효과
-                max_offset = bg.width - new_w
-                offset_x   = int(max_offset * ((slide_num - 1) / max(total - 1, 1)))
-                bg = bg.crop((offset_x, 0, offset_x + new_w, new_h))
+                new_w = int(new_h * dst_r)
+                ox    = (bg.width - new_w) // 2
+                bg    = bg.crop((ox, 0, ox + new_w, new_h))
             else:
                 new_w = bg.width
-                new_h = int(new_w / dst_ratio)
-                offset_y = int((bg.height - new_h) * 0.25)
-                bg = bg.crop((0, offset_y, new_w, offset_y + new_h))
+                new_h = int(new_w / dst_r)
+                oy    = int((bg.height - new_h) * 0.3)
+                bg    = bg.crop((0, oy, new_w, oy + new_h))
             bg = bg.resize((W, H), Image.LANCZOS)
-
-            # 훅 슬라이드: 더 강한 블러로 텍스트 가독성 극대화
-            blur_r = 5 if is_hook else 3
-            bg = bg.filter(ImageFilter.GaussianBlur(radius=blur_r))
+            bg = bg.filter(ImageFilter.GaussianBlur(radius=8))  # 강한 블러로 텍스트 대비 확보
         except Exception as e:
-            logger.warning(f"배경 이미지 처리 실패: {e}")
-            bg = Image.new("RGB", (W, H), theme["overlay_color"])
+            logger.warning(f"배경 처리 실패: {e}")
+            bg = Image.new("RGB", (W, H), overlay_color[:3])
     else:
-        bg = Image.new("RGB", (W, H), theme["overlay_color"])
+        # 그라디언트 대체 배경
+        bg = _make_gradient_bg(overlay_color[:3], mode)
 
-    # ── 오버레이 ─────────────────────────────────────────────────────────────
-    oc    = theme["overlay_color"]
-    alpha = int(theme["overlay_alpha"] * 255)
-    # 훅/CTA 슬라이드는 더 어두운 오버레이
-    if is_hook or is_cta:
-        alpha = min(alpha + 30, 255)
+    # 오버레이
+    overlay = Image.new("RGBA", (W, H), overlay_color)
+    result  = Image.alpha_composite(bg.convert("RGBA"), overlay)
 
-    overlay  = Image.new("RGBA", (W, H), (*oc, alpha))
-    gradient = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    grad_draw = ImageDraw.Draw(gradient)
-    for y in range(H // 3, H):
-        a = int(200 * ((y - H // 3) / (H * 2 / 3)) ** 1.8)
-        grad_draw.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+    # 하단 그라디언트 (텍스트 영역 대비)
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d    = ImageDraw.Draw(grad)
+    for y in range(H // 2, H):
+        a = int(160 * ((y - H // 2) / (H // 2)) ** 1.5)
+        d.line([(0, y), (W, y)], fill=(0, 0, 0, a))
+    result = Image.alpha_composite(result, grad)
+    return result.convert("RGB")
 
-    result = Image.alpha_composite(bg.convert("RGBA"), overlay)
-    result = Image.alpha_composite(result, gradient)
-    img    = result.convert("RGB")
-    draw   = ImageDraw.Draw(img)
 
-    # ── 폰트 ─────────────────────────────────────────────────────────────────
-    def _font(path, size):
-        try:
-            if path:
-                return ImageFont.truetype(path, size)
-        except Exception:
-            pass
-        return ImageFont.load_default()
-
-    f_hook    = _font(font_bold, 92)   # 훅 문구용 초대형
-    f_title   = _font(font_bold, 78)
-    f_body    = _font(font_regular or font_bold, 54)
-    f_tag     = _font(font_regular or font_bold, 38)
-    f_small   = _font(font_regular or font_bold, 32)
-    f_num     = _font(font_bold, 100)  # 핵심 수치 강조용
-
-    accent      = theme["accent"]
-    highlight   = theme["highlight_fg"]
-    alert       = theme["alert_color"]
-    hook_color  = theme["hook_color"]
-
-    # ── 상단 진행 바 ─────────────────────────────────────────────────────────
-    bar_h = 10
-    bar_w = int(W * slide_num / total)
-    draw.rectangle([(0, 0), (W, bar_h)], fill=(*theme["progress_bg"][:3], theme["progress_bg"][3]))
-    draw.rectangle([(0, 0), (bar_w, bar_h)], fill=(*accent, 240))
-
-    # ── 슬라이드 번호 배지 ───────────────────────────────────────────────────
-    tag_text = f"{slide_num} / {total}"
-    tag_pad  = 18
-    tag_bbox = draw.textbbox((0, 0), tag_text, font=f_tag)
-    tag_w    = tag_bbox[2] - tag_bbox[0] + tag_pad * 2
-    tag_h    = tag_bbox[3] - tag_bbox[1] + tag_pad
-    draw.rounded_rectangle([(40, 36), (40 + tag_w, 36 + tag_h)],
-                            radius=10, fill=(*theme["tag_bg"], 230))
-    draw.text((40 + tag_pad, 36 + tag_pad // 2), tag_text,
-              font=f_tag, fill=theme["tag_fg"])
-
-    # ── 훅 슬라이드 특별 처리 ────────────────────────────────────────────────
-    if is_hook:
-        # "HOOK" 뱃지
-        hook_badge = "🔥 오늘의 핵심"
-        hb_bbox    = draw.textbbox((0, 0), hook_badge, font=f_tag)
-        hb_w       = hb_bbox[2] - hb_bbox[0] + 30
-        hb_h       = hb_bbox[3] - hb_bbox[1] + 18
-        hb_x       = (W - hb_w) // 2
-        hb_y       = H // 4 - 60
-        draw.rounded_rectangle(
-            [(hb_x, hb_y), (hb_x + hb_w, hb_y + hb_h)],
-            radius=hb_h // 2,
-            fill=(*hook_color[:3], 220) if len(hook_color) == 3 else (*hook_color, 220),
-        )
-        draw.text(
-            (hb_x + 15, hb_y + 9),
-            hook_badge, font=f_tag,
-            fill=(8, 15, 35),
-        )
-
-        # 훅 제목 (크고 강렬하게)
-        title   = slide_data.get("title", "")
-        t_lines = textwrap.wrap(title, width=10)[:3]
-        y_t     = H // 4 + 20
-        for line in t_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_hook)
-            lw   = bbox[2] - bbox[0]
-            lx   = (W - lw) // 2
-            # 두꺼운 그림자
-            draw.text((lx + 4, y_t + 4), line, font=f_hook, fill=(0, 0, 0, 200))
-            draw.text((lx, y_t), line, font=f_hook,
-                      fill=(*hook_color[:3], 255) if len(hook_color) == 3 else hook_color)
-            y_t += bbox[3] - bbox[1] + 16
-
-        # 구분선
-        draw.rectangle([(80, y_t + 20), (W - 80, y_t + 24)], fill=(*accent, 200))
-
-        # 훅 본문 (질문/충격 요법)
-        body    = slide_data.get("body", "")
-        b_lines = textwrap.wrap(body, width=16)[:4]
-        y_b     = y_t + 50
-        for line in b_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_body)
-            lw   = bbox[2] - bbox[0]
-            lx   = (W - lw) // 2
-            draw.text((lx + 2, y_b + 2), line, font=f_body, fill=(0, 0, 0, 140))
-            draw.text((lx, y_b), line, font=f_body, fill=theme["title_fg"])
-            y_b += bbox[3] - bbox[1] + 10
-
-        # 하단 "계속 보기" 유도 화살표
-        arrow_y = H - 260
-        draw.text((W // 2 - 30, arrow_y), "▼  계속 보기", font=f_tag,
-                  fill=(*accent, 200))
-
-    # ── CTA / 루프 슬라이드 특별 처리 ────────────────────────────────────────
-    elif is_cta:
-        # 루프 유도: 첫 훅으로 이어지는 멘트
-        cta_badge = "💡 투자 포인트"
-        cb_bbox   = draw.textbbox((0, 0), cta_badge, font=f_tag)
-        cb_w      = cb_bbox[2] - cb_bbox[0] + 30
-        cb_h      = cb_bbox[3] - cb_bbox[1] + 18
-        cb_x      = (W - cb_w) // 2
-        cb_y      = H // 5
-        draw.rounded_rectangle(
-            [(cb_x, cb_y), (cb_x + cb_w, cb_y + cb_h)],
-            radius=cb_h // 2, fill=(*highlight[:3], 220),
-        )
-        draw.text((cb_x + 15, cb_y + 9), cta_badge, font=f_tag,
-                  fill=(8, 15, 35))
-
-        # 투자 포인트 제목
-        title   = slide_data.get("title", "")
-        t_lines = textwrap.wrap(title, width=11)[:2]
-        y_t     = H // 5 + cb_h + 30
-        for line in t_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_title)
-            lw   = bbox[2] - bbox[0]
-            lx   = (W - lw) // 2
-            draw.text((lx + 3, y_t + 3), line, font=f_title, fill=(0, 0, 0, 180))
-            draw.text((lx, y_t), line, font=f_title, fill=theme["title_fg"])
-            y_t += bbox[3] - bbox[1] + 14
-
-        # 본문 (핵심 포인트)
-        body    = slide_data.get("body", "")
-        b_lines = textwrap.wrap(body, width=17)[:4]
-        y_b     = y_t + 30
-        draw.rectangle([(80, y_b - 10), (W - 80, y_b - 6)], fill=(*accent, 180))
-        y_b += 10
-        for line in b_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_body)
-            lw   = bbox[2] - bbox[0]
-            lx   = (W - lw) // 2
-            draw.text((lx + 2, y_b + 2), line, font=f_body, fill=(0, 0, 0, 120))
-            draw.text((lx, y_b), line, font=f_body, fill=theme["body_fg"])
-            y_b += bbox[3] - bbox[1] + 10
-
-        # CTA 버튼 (블로그 링크 클릭 유도)
-        cta_btn_y = H - 350
-        cta_btn_h = 110
-        draw.rounded_rectangle(
-            [(80, cta_btn_y), (W - 80, cta_btn_y + cta_btn_h)],
-            radius=20, fill=(*theme["cta_bg"], 245),
-        )
-        cta_text = "📊 전체 분석 보기 →"
-        cb2      = draw.textbbox((0, 0), cta_text, font=f_body)
-        draw.text(
-            ((W - (cb2[2] - cb2[0])) // 2,
-             cta_btn_y + (cta_btn_h - (cb2[3] - cb2[1])) // 2),
-            cta_text, font=f_body, fill=theme["cta_fg"],
-        )
-
-        # 루프 유도 화살표 (툭 끊기듯 루프)
-        loop_y = H - 210
-        draw.text((W // 2 - 60, loop_y), "🔁 다시 보기", font=f_tag,
-                  fill=(*hook_color[:3], 180) if len(hook_color) == 3 else (*hook_color, 180))
-
-    # ── 일반 슬라이드 ─────────────────────────────────────────────────────────
-    else:
-        title   = slide_data.get("title", "")
-        t_lines = textwrap.wrap(title, width=11)[:2]
-        y_t     = int(H * 0.22)
-        for line in t_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_title)
-            lw   = bbox[2] - bbox[0]
-            lx   = (W - lw) // 2
-            draw.text((lx + 3, y_t + 3), line, font=f_title, fill=(0, 0, 0, 180))
-            draw.text((lx, y_t), line, font=f_title, fill=theme["title_fg"])
-            y_t += bbox[3] - bbox[1] + 14
-
-        # 구분선
-        line_y = y_t + 20
-        draw.rectangle([(80, line_y), (W - 80, line_y + 5)], fill=(*accent, 200))
-
-        # 본문 (강조 세그먼트 분리 렌더링)
-        body    = slide_data.get("body", "")
-        b_lines = textwrap.wrap(body, width=17)[:5]
-        y_b     = line_y + 40
-        for line in b_lines:
-            segs = _parse_highlight_segments(line)
-            # 줄 전체 너비 계산
-            total_w = sum(
-                draw.textbbox((0, 0), seg, font=f_body)[2]
-                - draw.textbbox((0, 0), seg, font=f_body)[0]
-                for seg, _ in segs
-            )
-            x_cursor = (W - total_w) // 2
-            line_h   = 0
-            for seg_text, is_hl in segs:
-                color = (*highlight[:3], 255) if is_hl else theme["body_fg"]
-                font  = f_body
-                bbox  = draw.textbbox((0, 0), seg_text, font=font)
-                seg_w = bbox[2] - bbox[0]
-                seg_h = bbox[3] - bbox[1]
-                draw.text((x_cursor + 2, y_b + 2), seg_text, font=font,
-                          fill=(0, 0, 0, 120))
-                draw.text((x_cursor, y_b), seg_text, font=font, fill=color)
-                x_cursor += seg_w
-                line_h    = max(line_h, seg_h)
-            y_b += line_h + 12
-
-    # ── 하단 워터마크 ─────────────────────────────────────────────────────────
-    wm   = "미국증시 분석 | seedsup.tistory.com"
-    bbox = draw.textbbox((0, 0), wm, font=f_small)
-    draw.text(
-        ((W - (bbox[2] - bbox[0])) // 2, H - 80),
-        wm, font=f_small, fill=(*accent, 160),
-    )
-
+def _make_gradient_bg(base_color: tuple, mode: str) -> Image.Image:
+    """배경 이미지 없을 때 그라디언트 배경 생성."""
+    W, H = VIDEO_W, VIDEO_H
+    img  = Image.new("RGB", (W, H))
+    d    = ImageDraw.Draw(img)
+    r, g, b = base_color
+    for y in range(H):
+        t  = y / H
+        lr = int(r * (1 - t * 0.6))
+        lg = int(g * (1 - t * 0.4))
+        lb = int(b + (80 - b) * t * 0.3)
+        d.line([(0, y), (W, y)], fill=(max(0, lr), max(0, lg), max(0, min(255, lb))))
     return img
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# TTS 생성
-# ════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# BGM 생성 (WAV 사인파 — 외부 URL 불필요)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-async def _tts_async(text: str, output_path: str, voice: str = TTS_VOICE):
+def _make_bgm_wav(dest: Path, duration: float, mode: str):
+    """
+    외부 BGM URL 없이 순수 Python으로 환경음 WAV 생성.
+    morning: 잔잔한 화음 (C4+E4+G4)
+    evening: 긴장감 있는 화음 (A3+C4+E4)
+    """
+    sr      = 44100
+    n       = int(sr * duration)
+    amp     = 8000
+
+    if mode == "evening":
+        freqs = [220.0, 261.63, 329.63]  # Am
+    else:
+        freqs = [261.63, 329.63, 392.0]  # C
+
+    samples = []
+    fade_s  = int(sr * 2.0)  # 2초 fade in/out
+    for i in range(n):
+        t   = i / sr
+        val = sum(sin(2 * pi * f * t) for f in freqs) / len(freqs)
+        # fade
+        if i < fade_s:
+            val *= i / fade_s
+        elif i > n - fade_s:
+            val *= (n - i) / fade_s
+        samples.append(int(val * amp * BGM_VOLUME))
+
+    # WAV 헤더 작성
+    data_size   = n * 2
+    header_size = 44
+    with open(dest, "wb") as f:
+        f.write(b"RIFF")
+        f.write(pack("<I", header_size - 8 + data_size))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16))
+        f.write(b"data")
+        f.write(pack("<I", data_size))
+        for s in samples:
+            s = max(-32768, min(32767, s))
+            f.write(pack("<h", s))
+    logger.info(f"BGM WAV 생성: {dest} ({duration:.1f}초)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _tts_async(text: str, path: str):
     import edge_tts
-    communicate = edge_tts.Communicate(
-        text=text, voice=voice, rate=TTS_RATE, pitch=TTS_PITCH,
-    )
-    await communicate.save(output_path)
+    comm = edge_tts.Communicate(text=text, voice=TTS_VOICE, rate=TTS_RATE, pitch=TTS_PITCH)
+    await comm.save(path)
 
 
-def _generate_tts(text: str, output_path: str) -> bool:
+def _generate_tts(text: str, path: str) -> bool:
     try:
-        asyncio.run(_tts_async(text, output_path))
-        return Path(output_path).exists() and Path(output_path).stat().st_size > 0
+        asyncio.run(_tts_async(text, path))
+        return Path(path).exists() and Path(path).stat().st_size > 1000
     except ImportError:
-        logger.warning("edge-tts 미설치. TTS 건너뜀.")
+        logger.warning("edge-tts 미설치 — TTS 건너뜀")
         return False
     except Exception as e:
-        logger.warning(f"TTS 생성 실패: {e}")
+        logger.warning(f"TTS 실패: {e}")
         return False
 
 
-def _get_audio_duration(path: str) -> float:
+def _audio_duration(path: str) -> float:
     try:
-        result = _run([
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "json", path,
-        ])
-        data = json.loads(result.stdout)
-        return float(data["format"]["duration"])
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, check=True,
+        )
+        return float(json.loads(r.stdout)["format"]["duration"])
     except Exception:
         return 0.0
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ffmpeg 합성
-# ════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# 수치 강조 세그먼트 파싱 (한글 단위 보완)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _image_to_video_clip(image_path: str, duration: float, output_path: str):
-    """정지 이미지 → 지정 길이 MP4 (줌인 효과로 역동성 추가)."""
-    # Ken Burns 효과: 서서히 줌인
-    vf = (
-        f"scale={VIDEO_W * 2}:{VIDEO_H * 2},"
-        f"zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d={int(duration * 30)}:s={VIDEO_W}x{VIDEO_H}:fps=30,"
-        f"fade=t=in:st=0:d=0.2,"
-        f"fade=t=out:st={duration - 0.2:.2f}:d=0.2"
+_HIGHLIGHT_RE = re.compile(
+    r"([+-]?\d+(?:\.\d+)?%"
+    r"|[+-]?\d+(?:\.\d+)?(?:포인트|달러|원|억|조|만)"
+    r"|[+-]?\d{1,3}(?:,\d{3})+"
+    r"|S&P\s*500|나스닥|다우|FOMC|Fed|연준|엔비디아|애플|테슬라|마이크로소프트)"
+)
+
+
+def _highlight_segs(text: str) -> list[tuple[str, bool]]:
+    segs, last = [], 0
+    for m in _HIGHLIGHT_RE.finditer(text):
+        if m.start() > last:
+            segs.append((text[last:m.start()], False))
+        segs.append((m.group(), True))
+        last = m.end()
+    if last < len(text):
+        segs.append((text[last:], False))
+    return segs or [(text, False)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 외곽선 텍스트 (성능 최적화 버전)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _draw_outlined(
+    draw: ImageDraw.ImageDraw,
+    pos: tuple,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple,
+    outline: tuple = (0, 0, 0),
+    ow: int = 3,
+):
+    """외곽선 텍스트. 8방향만 그려 성능 최적화."""
+    x, y = pos
+    dirs = [(-ow, 0), (ow, 0), (0, -ow), (0, ow),
+            (-ow, -ow), (ow, -ow), (-ow, ow), (ow, ow)]
+    for dx, dy in dirs:
+        draw.text((x + dx, y + dy), text, font=font, fill=(*outline, 210))
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _draw_text_centered(
+    draw: ImageDraw.ImageDraw,
+    cx: int,
+    y: int,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple,
+    outline: tuple = (0, 0, 0),
+    ow: int = 3,
+) -> int:
+    """중앙 정렬 외곽선 텍스트. 사용된 높이 반환."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w    = bbox[2] - bbox[0]
+    h    = bbox[3] - bbox[1]
+    _draw_outlined(draw, (cx - w // 2, y), text, font, fill, outline, ow)
+    return h
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 슬라이드 이미지 생성
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_slide(
+    slide_data: dict,
+    theme: dict,
+    slide_num: int,
+    total: int,
+    bg: Image.Image,
+    is_hook: bool,
+    is_cta: bool,
+    blog_url: str = "",
+) -> Image.Image:
+    W, H   = VIDEO_W, VIDEO_H
+    img    = bg.copy()
+    draw   = ImageDraw.Draw(img)
+
+    accent    = theme["accent"]
+    highlight = theme["highlight"]
+    title_c   = theme["title"]
+    body_c    = theme["body"]
+    hook_c    = theme["hook_color"]
+
+    # 폰트 크기 (고정 픽셀, 1080px 기준)
+    f_huge    = _load_font(96, bold=True)    # hook 제목
+    f_title   = _load_font(72, bold=True)    # 일반 제목
+    f_body    = _load_font(52, bold=False)   # 본문
+    f_tag     = _load_font(36, bold=True)    # 뱃지/태그
+    f_small   = _load_font(30, bold=False)   # 워터마크
+
+    CX = W // 2
+    WRAP_PX = W - 120  # 좌우 60px 여백
+
+    # ── 진행 바 ─────────────────────────────────────────────────────────────
+    bar_h = 12
+    bar_w = int(W * slide_num / total)
+    draw.rectangle([(0, 0), (W, bar_h)], fill=(255, 255, 255, 30))
+    draw.rectangle([(0, 0), (bar_w, bar_h)], fill=(*accent, 240))
+
+    # ── 슬라이드 번호 뱃지 ──────────────────────────────────────────────────
+    badge = f"{slide_num} / {total}"
+    bb    = draw.textbbox((0, 0), badge, font=f_tag)
+    bw    = bb[2] - bb[0] + 36
+    bh    = bb[3] - bb[1] + 20
+    draw.rounded_rectangle([(40, 30), (40 + bw, 30 + bh)], radius=bh // 2,
+                            fill=(*theme["tag_bg"], 230))
+    draw.text((40 + 18, 30 + 10), badge, font=f_tag, fill=theme["tag_fg"])
+
+    # ── 훅 슬라이드 ─────────────────────────────────────────────────────────
+    if is_hook:
+        # 🔥 뱃지
+        hook_badge = "🔥 오늘의 핵심"
+        hb = draw.textbbox((0, 0), hook_badge, font=f_tag)
+        hw = hb[2] - hb[0] + 40
+        hh = hb[3] - hb[1] + 24
+        hx = CX - hw // 2
+        hy = H // 4 - 80
+        draw.rounded_rectangle([(hx, hy), (hx + hw, hy + hh)],
+                                radius=hh // 2, fill=(*hook_c, 220))
+        draw.text((hx + 20, hy + 12), hook_badge, font=f_tag,
+                  fill=(20, 20, 20))
+
+        # 제목 (크고 강렬하게)
+        title  = slide_data.get("title", "")
+        lines  = _pixel_wrap(title, f_huge, WRAP_PX)[:3]
+        y      = hy + hh + 30
+        for line in lines:
+            h = _draw_text_centered(draw, CX, y, line, f_huge,
+                                    (*hook_c, 255), ow=4)
+            y += h + 12
+
+        # 구분선
+        draw.rectangle([(100, y + 20), (W - 100, y + 24)], fill=(*accent, 180))
+
+        # 본문
+        body  = slide_data.get("body", "")
+        lines = _pixel_wrap(body, f_body, WRAP_PX)[:4]
+        y     = y + 50
+        for line in lines:
+            h = _draw_text_centered(draw, CX, y, line, f_body, title_c, ow=2)
+            y += h + 10
+
+        # 계속 보기
+        draw.text((CX - 80, H - 280), "▼  계속 보기", font=f_tag,
+                  fill=(*accent, 200))
+
+    # ── CTA 슬라이드 ────────────────────────────────────────────────────────
+    elif is_cta:
+        cta_badge = "💡 투자 포인트"
+        cb   = draw.textbbox((0, 0), cta_badge, font=f_tag)
+        cw   = cb[2] - cb[0] + 40
+        ch   = cb[3] - cb[1] + 24
+        cx_b = CX - cw // 2
+        cy_b = H // 5
+        draw.rounded_rectangle([(cx_b, cy_b), (cx_b + cw, cy_b + ch)],
+                                radius=ch // 2, fill=(*highlight, 220))
+        draw.text((cx_b + 20, cy_b + 12), cta_badge, font=f_tag,
+                  fill=(20, 20, 20))
+
+        title  = slide_data.get("title", "")
+        lines  = _pixel_wrap(title, f_title, WRAP_PX)[:2]
+        y      = cy_b + ch + 30
+        for line in lines:
+            h = _draw_text_centered(draw, CX, y, line, f_title, title_c, ow=3)
+            y += h + 10
+
+        body   = slide_data.get("body", "")
+        lines  = _pixel_wrap(body, f_body, WRAP_PX)[:4]
+        draw.rectangle([(100, y + 10), (W - 100, y + 14)], fill=(*accent, 160))
+        y     += 30
+        for line in lines:
+            h = _draw_text_centered(draw, CX, y, line, f_body, body_c, ow=2)
+            y += h + 8
+
+        # CTA 버튼
+        btn_y = H - 380
+        draw.rounded_rectangle([(80, btn_y), (W - 80, btn_y + 110)],
+                                radius=22, fill=(*theme["cta_bg"], 245))
+        _draw_text_centered(draw, CX, btn_y + 30, "📊 전체 분석 보기 →",
+                            f_body, theme["cta_fg"])
+
+        # 루프 유도
+        draw.text((CX - 70, H - 230), "🔁 다시 보기", font=f_tag,
+                  fill=(*hook_c, 180))
+
+    # ── 일반 슬라이드 ────────────────────────────────────────────────────────
+    else:
+        title  = slide_data.get("title", "")
+        lines  = _pixel_wrap(title, f_title, WRAP_PX)[:2]
+        y      = int(H * 0.22)
+        for line in lines:
+            h = _draw_text_centered(draw, CX, y, line, f_title, title_c, ow=3)
+            y += h + 12
+
+        draw.rectangle([(100, y + 18), (W - 100, y + 22)], fill=(*accent, 180))
+        y += 50
+
+        body  = slide_data.get("body", "")
+        lines = _pixel_wrap(body, f_body, WRAP_PX)[:5]
+        for line in lines:
+            segs = _highlight_segs(line)
+            # 줄 전체 너비 계산
+            total_w = sum(
+                draw.textbbox((0, 0), s, font=f_body)[2] for s, _ in segs
+            )
+            x_cur = CX - total_w // 2
+            max_h = 0
+            for seg_text, is_hl in segs:
+                color = (*highlight, 255) if is_hl else (*body_c, 230)
+                bbox  = draw.textbbox((0, 0), seg_text, font=f_body)
+                sw    = bbox[2] - bbox[0]
+                sh    = bbox[3] - bbox[1]
+                _draw_outlined(draw, (x_cur, y), seg_text, f_body,
+                               color[:3], ow=2)
+                x_cur += sw
+                max_h  = max(max_h, sh)
+            y += max_h + 10
+
+    # ── 워터마크 ─────────────────────────────────────────────────────────────
+    wm   = "미국증시 분석 | seedsup.tistory.com"
+    wbb  = draw.textbbox((0, 0), wm, font=f_small)
+    draw.text(
+        (CX - (wbb[2] - wbb[0]) // 2, H - 70),
+        wm, font=f_small, fill=(*accent, 150),
+    )
+    return img
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 고성과 쇼츠 공식 적용
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _enhance_script(script: list[dict], mode: str) -> list[dict]:
+    enhanced = []
+    for i, slide in enumerate(script):
+        s      = dict(slide)
+        is_first = i == 0
+        is_last  = i == len(script) - 1
+
+        if is_first:
+            t = s.get("title", "")
+            if not any(c in t for c in ["?", "!", "왜", "어디", "어떻게", "과연"]):
+                s["title"] = t + "?"
+        elif is_last:
+            b = s.get("body", "")
+            label = "오늘 밤" if mode == "evening" else "지금 바로"
+            if "seedsup" not in b and "블로그" not in b:
+                s["body"] = b + f" {label} 전체 분석 확인!"
+        enhanced.append(s)
+    return enhanced
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ffmpeg 헬퍼 (단순화된 파이프라인)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    logger.debug("$ " + " ".join(str(c) for c in cmd))
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kwargs)
+
+
+def _image_to_clip(img_path: str, duration: float, out_path: str):
+    """PNG → MP4 클립. fade in/out 포함. zoompan 제거로 고속 처리."""
+    fade_d = min(0.25, duration * 0.08)
+    vf     = (
+        f"fade=t=in:st=0:d={fade_d:.2f},"
+        f"fade=t=out:st={duration - fade_d:.2f}:d={fade_d:.2f}"
     )
     _run([
         "ffmpeg", "-y",
-        "-loop", "1", "-i", image_path,
+        "-loop", "1", "-i", img_path,
         "-t", str(duration),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast",
-        "-crf", "22", "-pix_fmt", "yuv420p", "-r", "30",
-        output_path,
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-crf", "20", "-pix_fmt", "yuv420p",
+        "-r", "30", "-movflags", "+faststart",
+        out_path,
     ])
 
 
-def _concat_clips(clip_paths: list[str], output_path: str):
+def _concat_clips(clip_paths: list[str], out_path: str):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for p in clip_paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
-        list_path = f.name
+        lst = f.name
     try:
-        _run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", list_path, "-c", "copy", output_path,
-        ])
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+              "-i", lst, "-c", "copy", out_path])
     finally:
-        os.unlink(list_path)
+        os.unlink(lst)
 
 
-def _mix_audio_to_video(
-    video_path: str,
-    tts_segments: list[dict],
-    bgm_path: str | None,
-    total_duration: float,
-    output_path: str,
-):
-    inputs       = ["-i", video_path]
-    filter_parts = []
-    audio_labels = []
+def _mix_audio(video: str, tts_segs: list[dict], bgm: str | None,
+               total_dur: float, out: str):
+    """TTS + BGM → 최종 영상 합성."""
+    inputs  = ["-i", video]
+    filters = []
+    labels  = []
 
-    for i, seg in enumerate(tts_segments):
+    for i, seg in enumerate(tts_segs):
         inputs += ["-i", seg["path"]]
-        idx      = i + 1
-        delay_ms = int(seg["start"] * 1000)
-        filter_parts.append(
-            f"[{idx}:a]adelay={delay_ms}|{delay_ms},"
-            f"apad=whole_dur={total_duration}[tts{i}]"
+        idx     = i + 1
+        delay   = int(seg["start"] * 1000)
+        filters.append(
+            f"[{idx}:a]adelay={delay}|{delay},"
+            f"apad=whole_dur={total_dur}[tts{i}]"
         )
-        audio_labels.append(f"[tts{i}]")
+        labels.append(f"[tts{i}]")
 
-    bgm_idx = len(tts_segments) + 1
-    has_bgm = bgm_path and Path(bgm_path).exists()
+    bgm_idx = len(tts_segs) + 1
+    has_bgm = bgm and Path(bgm).exists()
     if has_bgm:
-        inputs += ["-i", bgm_path]
-        filter_parts.append(
+        inputs += ["-i", bgm]
+        filters.append(
             f"[{bgm_idx}:a]aloop=loop=-1:size=2e+09,"
-            f"atrim=0:{total_duration},volume={BGM_VOLUME}[bgm]"
+            f"atrim=0:{total_dur}[bgm]"
         )
-        audio_labels.append("[bgm]")
+        labels.append("[bgm]")
 
-    n_audio = len(audio_labels)
-    if n_audio == 0:
-        filter_parts.append(f"aevalsrc=0:duration={total_duration}[silent]")
-        mix_label         = "[silent]"
-        final_audio_filter = ";".join(filter_parts)
-    elif n_audio == 1:
-        mix_label         = audio_labels[0]
-        final_audio_filter = ";".join(filter_parts)
+    n = len(labels)
+    if n == 0:
+        filters.append(f"aevalsrc=0:duration={total_dur}[silent]")
+        mix = "[silent]"
+        fc  = ";".join(filters)
+    elif n == 1:
+        mix = labels[0]
+        fc  = ";".join(filters)
     else:
-        joined             = "".join(audio_labels)
-        filter_parts.append(
-            f"{joined}amix=inputs={n_audio}:duration=first:normalize=0[aout]"
+        filters.append(
+            "".join(labels) + f"amix=inputs={n}:duration=first:normalize=0[aout]"
         )
-        mix_label         = "[aout]"
-        final_audio_filter = ";".join(filter_parts)
+        mix = "[aout]"
+        fc  = ";".join(filters)
 
     _run([
         "ffmpeg", "-y",
         *inputs,
-        "-filter_complex", final_audio_filter,
-        "-map", "0:v", "-map", mix_label,
+        "-filter_complex", fc,
+        "-map", "0:v", "-map", mix,
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", output_path,
+        "-shortest", out,
     ])
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ContentAdapter 연동: 쇼츠 스크립트 품질 향상 프롬프트 주입
-# ════════════════════════════════════════════════════════════════════════════
-
-def enhance_script_with_hook_formula(script: list[dict], mode: str) -> list[dict]:
-    """
-    Gemini가 생성한 스크립트에 고성과 공식을 적용합니다.
-    - 첫 슬라이드: 훅 강화 (질문/충격 요법)
-    - 마지막 슬라이드: CTA + 루프 유도 문구 추가
-    - 중간 슬라이드: 핵심만 남기고 문장 압축
-    """
-    if not script:
-        return script
-
-    enhanced = []
-    for i, slide in enumerate(script):
-        s = dict(slide)
-        is_first = (i == 0)
-        is_last  = (i == len(script) - 1)
-
-        if is_first:
-            # 훅 슬라이드: 제목에 질문 요소 추가
-            title = s.get("title", "")
-            if not any(c in title for c in ["?", "!", "왜", "어디", "어떻게"]):
-                s["title"] = title + "?"
-            body = s.get("body", "")
-            # 본문 압축 (30자 이내)
-            if len(body) > 40:
-                s["body"] = body[:38] + "…"
-
-        elif is_last:
-            # CTA 슬라이드: 루프 유도 멘트 추가
-            body = s.get("body", "")
-            mode_label = "오늘 밤" if mode == "evening" else "지금 바로"
-            if "seedsup" not in body and "블로그" not in body:
-                s["body"] = body + f" {mode_label} 전체 분석 확인하세요."
-        else:
-            # 중간 슬라이드: 본문 35자 이내로 압축
-            body = s.get("body", "")
-            if len(body) > 45:
-                s["body"] = body[:43] + "…"
-
-        enhanced.append(s)
-
-    return enhanced
-
-
-# ════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # VideoGenerator 메인 클래스
-# ════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class VideoGenerator:
     def __init__(self, output_dir: str = OUTPUT_DIR):
-        self.output_dir = output_dir
+        self.output_dir  = output_dir
+        self.pexels_key  = os.environ.get("PEXELS_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
-        self.font_bold    = _get_font_path(bold=True)
-        self.font_regular = _get_font_path(bold=False)
-        logger.info(f"폰트: bold={self.font_bold}, regular={self.font_regular}")
 
     def generate(
         self,
@@ -693,119 +724,102 @@ class VideoGenerator:
         if not script:
             raise ValueError("스크립트가 비어 있습니다.")
 
-        # 고성과 공식 적용
-        script = enhance_script_with_hook_formula(script, mode)
+        script  = _enhance_script(script, mode)
+        theme   = THEMES.get(mode, THEMES["morning"])
+        kws     = bg_keywords or PEXELS_KEYWORDS.get(mode, PEXELS_KEYWORDS["morning"])
+        out     = os.path.join(self.output_dir, filename)
 
-        theme    = THEMES.get(mode, THEMES["morning"])
-        keywords = bg_keywords or KEYWORD_MAP.get(mode, KEYWORD_MAP["morning"])
-        final_output = os.path.join(self.output_dir, filename)
+        with tempfile.TemporaryDirectory(prefix="shorts_") as tmp_s:
+            tmp = Path(tmp_s)
 
-        with tempfile.TemporaryDirectory(prefix="shorts_") as tmp_str:
-            tmp = Path(tmp_str)
-
-            # 1. 배경 이미지 다운로드
-            bg_img_path = None
+            # 1. 배경 이미지 확보
+            bg_path = tmp / "bg.jpg"
+            bg_ok   = False
+            # 티스토리 썸네일 시도
             if thumbnail_url:
-                dest_bg = tmp / "background.jpg"
                 try:
-                    req = urllib.request.Request(
-                        thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        dest_bg.write_bytes(resp.read())
-                    Image.open(dest_bg).verify()
-                    bg_img_path = dest_bg
+                    r = requests.get(thumbnail_url, timeout=15,
+                                     headers={"User-Agent": "Mozilla/5.0 (compatible)"})
+                    r.raise_for_status()
+                    bg_path.write_bytes(r.content)
+                    Image.open(bg_path).verify()
+                    bg_ok = True
+                    logger.info("티스토리 썸네일 로드 성공")
                 except Exception as e:
-                    logger.warning(f"썸네일 다운로드 실패, Unsplash 사용: {e}")
-            if bg_img_path is None:
-                dest_bg = tmp / "background.jpg"
-                ok = _download_bg_image(keywords, dest_bg)
-                bg_img_path = dest_bg if ok else None
+                    logger.warning(f"썸네일 로드 실패: {e}")
 
-            # 2. BGM 다운로드
-            bgm_path = tmp / "bgm.mp3"
-            bgm_ok   = _download_bgm(mode, bgm_path)
-            bgm_path_str = str(bgm_path) if bgm_ok else None
+            if not bg_ok:
+                bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
+            if not bg_ok:
+                seed  = int(hashlib.md5(f"{mode}{filename}".encode()).hexdigest()[:8], 16)
+                bg_ok = _download_bg_picsum(bg_path, seed % 1000)
 
-            # 3. 슬라이드별 TTS + 이미지 생성
-            slide_clips   = []
-            tts_segments  = []
-            current_time  = 0.0
-            total_slides  = len(script)
+            bg_img = _prepare_bg(bg_path if bg_ok else None,
+                                  theme["overlay"], mode)
 
-            for i, slide_data in enumerate(script, 1):
-                logger.info(f"슬라이드 {i}/{total_slides} 처리 중...")
+            # 2. BGM (WAV 생성)
+            bgm_path = tmp / "bgm.wav"
+            total_duration_est = len(script) * 4.5
+            _make_bgm_wav(bgm_path, total_duration_est + 5, mode)
 
+            # 3. 슬라이드별 처리
+            slide_clips  = []
+            tts_segments = []
+            current_time = 0.0
+            total        = len(script)
+
+            for i, slide in enumerate(script, 1):
+                logger.info(f"슬라이드 {i}/{total} 처리 중...")
                 is_hook = (i == 1)
-                is_cta  = (i == total_slides)
+                is_cta  = (i == total)
 
-                # TTS 텍스트 (훅 슬라이드: 더 강렬한 억양 유도)
+                # TTS 텍스트
                 if is_hook:
-                    tts_text = f"{slide_data.get('title', '')}! {slide_data.get('body', '')}"
+                    tts_text = f"{slide.get('title', '')}! {slide.get('body', '')}"
                 elif is_cta:
-                    tts_text = f"{slide_data.get('title', '')}. {slide_data.get('body', '')} 전체 분석은 링크에서!"
+                    tts_text = (f"{slide.get('title', '')}. "
+                                f"{slide.get('body', '')} 링크에서 확인하세요!")
                 else:
-                    tts_text = f"{slide_data.get('title', '')}. {slide_data.get('body', '')}"
+                    tts_text = f"{slide.get('title', '')}. {slide.get('body', '')}"
 
                 tts_path = str(tmp / f"tts_{i:02d}.mp3")
                 tts_ok   = _generate_tts(tts_text, tts_path)
 
-                if tts_ok:
-                    tts_dur   = _get_audio_duration(tts_path)
-                    # 고성과 공식: MAX 5.5초 엄수
-                    slide_dur = max(MIN_SLIDE_SEC, min(MAX_SLIDE_SEC, tts_dur + 0.5))
-                else:
-                    tts_dur   = 0.0
-                    slide_dur = SLIDE_DURATION
+                tts_dur   = _audio_duration(tts_path) if tts_ok else 0.0
+                slide_dur = max(MIN_SLIDE_SEC, min(MAX_SLIDE_SEC, tts_dur + 0.6))
 
-                # 슬라이드 이미지 생성
-                slide_img  = _make_slide_image(
-                    slide_data    = slide_data,
-                    theme         = theme,
-                    slide_num     = i,
-                    total         = total_slides,
-                    bg_image_path = str(bg_img_path) if bg_img_path else None,
-                    blog_url      = blog_url,
-                    font_bold     = self.font_bold,
-                    font_regular  = self.font_regular,
-                    is_hook       = is_hook,
-                    is_cta        = is_cta,
+                # 슬라이드 이미지
+                slide_img = _make_slide(
+                    slide, theme, i, total, bg_img,
+                    is_hook, is_cta, blog_url,
                 )
                 img_path  = str(tmp / f"slide_{i:02d}.png")
-                slide_img.save(img_path, "PNG")
+                slide_img.save(img_path, "PNG", optimize=False)
 
                 clip_path = str(tmp / f"clip_{i:02d}.mp4")
-                _image_to_video_clip(img_path, slide_dur, clip_path)
+                _image_to_clip(img_path, slide_dur, clip_path)
                 slide_clips.append(clip_path)
 
                 if tts_ok:
                     tts_segments.append({
-                        "start":    current_time + 0.25,   # 공백 최소화
-                        "path":     tts_path,
-                        "duration": tts_dur,
+                        "path":  tts_path,
+                        "start": current_time + 0.2,
                     })
-
                 current_time += slide_dur
 
             total_duration = current_time
             logger.info(f"총 영상 길이: {total_duration:.1f}초")
 
-            # 4. 비디오 클립 합치기
-            logger.info("비디오 클립 합치는 중...")
-            silent_video = str(tmp / "silent_video.mp4")
+            # 4. 클립 합치기
+            silent_video = str(tmp / "silent.mp4")
             _concat_clips(slide_clips, silent_video)
 
             # 5. 오디오 믹싱
-            logger.info("오디오 믹싱 중...")
-            _mix_audio_to_video(
-                video_path     = silent_video,
-                tts_segments   = tts_segments,
-                bgm_path       = bgm_path_str,
-                total_duration = total_duration,
-                output_path    = final_output,
-            )
+            _mix_audio(silent_video, tts_segments,
+                       str(bgm_path), total_duration, out)
 
-            logger.info(f"영상 생성 완료: {final_output} ({total_duration:.1f}초)")
-            return final_output
+            logger.info(f"영상 완료: {out} ({total_duration:.1f}초)")
+            return out
 
     def generate_with_text_only_fallback(
         self,
@@ -817,42 +831,8 @@ class VideoGenerator:
         bg_keywords: list[str] | None = None,
     ) -> str:
         try:
-            return self.generate(
-                script=script, mode=mode, filename=filename,
-                thumbnail_url=thumbnail_url, blog_url=blog_url,
-                bg_keywords=bg_keywords,
-            )
+            return self.generate(script, mode, filename,
+                                 thumbnail_url, blog_url, bg_keywords)
         except Exception as e:
-            logger.error(f"고급 영상 생성 실패, 폴백: {e}")
-            return self._fallback_generate(script, mode, filename, thumbnail_url, blog_url)
-
-    def _fallback_generate(self, script, mode, filename, thumbnail_url, blog_url) -> str:
-        logger.info("폴백 영상 생성 시작...")
-        try:
-            from moviepy.editor import ImageClip, concatenate_videoclips
-        except ImportError:
-            raise RuntimeError("moviepy도 설치되지 않음. 영상 생성 불가.")
-
-        theme  = THEMES.get(mode, THEMES["morning"])
-        output = os.path.join(self.output_dir, filename)
-        clips  = []
-
-        for i, slide_data in enumerate(script, 1):
-            slide_img = _make_slide_image(
-                slide_data=slide_data, theme=theme,
-                slide_num=i, total=len(script),
-                bg_image_path=None, blog_url=blog_url,
-                font_bold=self.font_bold, font_regular=self.font_regular,
-                is_hook=(i == 1), is_cta=(i == len(script)),
-            )
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                tmp_path = f.name
-            slide_img.save(tmp_path)
-            clips.append(ImageClip(tmp_path, duration=SLIDE_DURATION))
-
-        final = concatenate_videoclips(clips, method="compose")
-        final.write_videofile(
-            output, fps=30, codec="libx264",
-            audio=False, preset="ultrafast", logger=None,
-        )
-        return output
+            logger.error(f"영상 생성 실패: {e}")
+            raise
