@@ -1,24 +1,26 @@
 """
-SNS 썸네일 생성기 v2
-각 플랫폼 특성에 맞는 고품질 썸네일을 생성합니다.
+SNS 썸네일 생성기 v3 - 클릭을 부르는 고성과 디자인
 
-레퍼런스 스타일 (첨부 이미지):
-  - 배경 사진 위에 반투명 둥근 사각형 카드 오버레이
-  - 굵은 한글 타이포그래피 (날짜 + 제목 키워드)
-  - 플랫폼별 분위기/색상/레이아웃 차별화
+[고성과 썸네일 공식]
+  - 5자 내외 임팩트 메인 카피 (질문/감탄사/핵심 단어)
+  - 핵심 수치는 노란색/빨간색으로 강조
+  - 신뢰색(파랑/네이비) + 강렬한 강조색 대비
+  - 인물/사물을 화면 2/3 크기로 크게 배치
+  - 모바일에서도 직관적으로 읽히는 크고 굵은 서체
+  - 텍스트 뒤 외곽선/그림자로 배경과의 대비 극대화
 
-플랫폼별 특성:
-  facebook  : 1200×630, 정보 전달형, 신뢰감 있는 뉴스 카드 스타일
-  threads   : 1080×1080, 미니멀·심플, 텍스트 중심, 여백 강조
-  instagram : 1080×1080 (피드) / 1080×1350 (세로), 비주얼 임팩트, 감성적
-  kakao     : 1200×630, 따뜻하고 친근한 톤, 이모지 활용, 노란 포인트
+플랫폼별:
+  facebook  : 1200×630, 뉴스 카드 스타일, 파랑 계열
+  threads   : 1080×1080, 미니멀 흑백, 텍스트 중심
+  instagram : 1080×1080, 퍼플/핑크 그라디언트, 비주얼 임팩트
+  kakao     : 1200×630, 카카오 옐로우, 친근한 톤
 
 의존성: Pillow>=10.3.0, requests>=2.31.0
 """
 
 import logging
-import math
 import os
+import re
 import textwrap
 import urllib.request
 from datetime import datetime
@@ -31,9 +33,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "images"
-FONT_DIR = Path("fonts")
+FONT_DIR   = Path("fonts")
 
-# ── 시스템 폰트 후보 (GitHub Actions ubuntu-latest + fonts-noto-cjk) ────────
 FONT_BOLD_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
@@ -45,138 +46,155 @@ FONT_REGULAR_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     str(FONT_DIR / "NanumGothic.ttf"),
 ]
-NANUM_BOLD_URL = "https://github.com/naver/nanumfont/raw/master/fonts/NanumGothicBold.ttf"
+NANUM_BOLD_URL    = "https://github.com/naver/nanumfont/raw/master/fonts/NanumGothicBold.ttf"
 NANUM_REGULAR_URL = "https://github.com/naver/nanumfont/raw/master/fonts/NanumGothic.ttf"
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 플랫폼별 디자인 설정
+# 플랫폼별 디자인 설정 (고성과 공식 반영)
 # ════════════════════════════════════════════════════════════════════════════
 
 PLATFORM_CONFIGS = {
 
-    # ── Facebook ─────────────────────────────────────────────────────────
-    # 분위기: 신뢰감 있는 뉴스/정보 카드. 파란 계열 다크.
-    # 레이아웃: 하단 카드 오버레이, 좌측 컬러 바, 날짜 배지 우상단
+    # ── Facebook ─────────────────────────────────────────────────────────────
+    # 신뢰감 뉴스 카드. 하단 2/3에 텍스트 집중.
     "facebook": {
         "size": (1200, 630),
-        "style": "news_card",
-        "overlay_color": (8, 20, 45),          # 딥 네이비
-        "overlay_alpha": 0.70,
-        "card_color": (8, 20, 45),
-        "card_alpha": 210,                      # 카드 배경 불투명도
-        "card_radius": 24,
-        "card_position": "bottom",              # 카드 위치: bottom / center
-        "card_height_ratio": 0.52,              # 카드 높이 / 전체 높이
-        "accent": (56, 189, 248),               # 스카이 블루
+        "overlay_color": (6, 12, 35),
+        "overlay_alpha": 0.68,
+        "card_color": (6, 12, 35),
+        "card_alpha": 215,
+        "card_radius": 22,
+        "card_position": "bottom",
+        "card_height_ratio": 0.56,
+        "accent": (37, 150, 255),           # 선명한 파랑
+        "accent_highlight": (254, 211, 48), # 강조 노란색
+        "alert_color": (239, 68, 68),       # 경고/하락 빨간색
         "title_color": (255, 255, 255),
         "subtitle_color": (148, 163, 184),
-        "date_bg": (56, 189, 248),
-        "date_fg": (8, 20, 45),
-        "bar_color": (56, 189, 248),
-        "url_color": (56, 189, 248),
-        "title_max_chars": 14,                  # 줄당 최대 글자
+        "number_color": (254, 211, 48),     # 수치 강조
+        "date_bg": (37, 150, 255),
+        "date_fg": (255, 255, 255),
+        "bar_color": (37, 150, 255),
+        "url_color": (148, 163, 184),
+        "main_copy_max": 8,                 # 메인 카피 최대 글자 (모바일 기준)
+        "sub_copy_max": 18,
         "blur_radius": 2,
+        "top_bar": True,
+        "top_bar_color": (37, 150, 255),
     },
 
-    # ── Threads ───────────────────────────────────────────────────────────
-    # 분위기: 미니멀, 여백, 모노크롬. 인스타 계열이지만 더 텍스트 중심.
-    # 레이아웃: 중앙 카드, 흰 배경, 심플한 타이포
+    # ── Threads ───────────────────────────────────────────────────────────────
+    # 미니멀 흑백. 텍스트가 주인공.
     "threads": {
         "size": (1080, 1080),
-        "style": "minimal_card",
-        "overlay_color": (5, 5, 8),
-        "overlay_alpha": 0.78,
+        "overlay_color": (4, 4, 8),
+        "overlay_alpha": 0.82,
         "card_color": (255, 255, 255),
-        "card_alpha": 22,                       # 거의 투명한 흰색 카드
+        "card_alpha": 18,
         "card_radius": 40,
         "card_position": "center",
-        "card_height_ratio": 0.55,
+        "card_height_ratio": 0.60,
         "accent": (255, 255, 255),
+        "accent_highlight": (254, 211, 48),
+        "alert_color": (239, 68, 68),
         "title_color": (255, 255, 255),
         "subtitle_color": (180, 180, 190),
+        "number_color": (254, 211, 48),
         "date_bg": (255, 255, 255),
-        "date_fg": (5, 5, 8),
+        "date_fg": (4, 4, 8),
         "bar_color": (255, 255, 255),
-        "url_color": (160, 160, 170),
-        "title_max_chars": 12,
-        "blur_radius": 4,
-        "monochrome_bg": True,                  # 배경을 흑백 처리
+        "url_color": (140, 140, 155),
+        "main_copy_max": 7,
+        "sub_copy_max": 15,
+        "blur_radius": 5,
+        "monochrome_bg": True,
+        "top_bar": True,
+        "top_bar_color": (255, 255, 255),
     },
 
-    # ── Instagram ─────────────────────────────────────────────────────────
-    # 분위기: 비주얼 임팩트, 감성적, 색감 강조. 그라디언트 포인트.
-    # 레이아웃: 중앙 카드, 퍼플/핑크 그라디언트 액센트
+    # ── Instagram ─────────────────────────────────────────────────────────────
+    # 퍼플/핑크 그라디언트. 비주얼 임팩트 최우선.
     "instagram": {
         "size": (1080, 1080),
-        "style": "gradient_card",
-        "overlay_color": (15, 8, 35),
-        "overlay_alpha": 0.72,
-        "card_color": (20, 10, 50),
-        "card_alpha": 200,
+        "overlay_color": (12, 5, 30),
+        "overlay_alpha": 0.70,
+        "card_color": (18, 8, 50),
+        "card_alpha": 205,
         "card_radius": 36,
         "card_position": "center",
-        "card_height_ratio": 0.58,
-        "accent": (192, 132, 252),              # 퍼플
-        "accent2": (236, 72, 153),              # 핑크 (그라디언트용)
+        "card_height_ratio": 0.62,
+        "accent": (192, 132, 252),          # 퍼플
+        "accent2": (244, 63, 94),           # 핑크 (그라디언트)
+        "accent_highlight": (254, 211, 48),
+        "alert_color": (244, 63, 94),
         "title_color": (255, 255, 255),
         "subtitle_color": (216, 180, 254),
+        "number_color": (254, 211, 48),
         "date_bg": (192, 132, 252),
-        "date_fg": (15, 8, 35),
+        "date_fg": (12, 5, 30),
         "bar_color": (192, 132, 252),
         "url_color": (192, 132, 252),
-        "title_max_chars": 12,
-        "blur_radius": 3,
-        "gradient_bar": True,                   # 상단 그라디언트 바
-    },
-
-    # ── Instagram 세로 (portrait) ──────────────────────────────────────────
-    "instagram_portrait": {
-        "size": (1080, 1350),
-        "style": "gradient_card",
-        "overlay_color": (15, 8, 35),
-        "overlay_alpha": 0.72,
-        "card_color": (20, 10, 50),
-        "card_alpha": 200,
-        "card_radius": 36,
-        "card_position": "center",
-        "card_height_ratio": 0.50,
-        "accent": (192, 132, 252),
-        "accent2": (236, 72, 153),
-        "title_color": (255, 255, 255),
-        "subtitle_color": (216, 180, 254),
-        "date_bg": (192, 132, 252),
-        "date_fg": (15, 8, 35),
-        "bar_color": (192, 132, 252),
-        "url_color": (192, 132, 252),
-        "title_max_chars": 12,
+        "main_copy_max": 7,
+        "sub_copy_max": 14,
         "blur_radius": 3,
         "gradient_bar": True,
     },
 
-    # ── Kakao ─────────────────────────────────────────────────────────────
-    # 분위기: 따뜻하고 친근함, 노란 포인트, 이모지·구어체 텍스트
-    # 레이아웃: 중앙 카드, 카카오 옐로우 강조
+    # ── Instagram 세로 ────────────────────────────────────────────────────────
+    "instagram_portrait": {
+        "size": (1080, 1350),
+        "overlay_color": (12, 5, 30),
+        "overlay_alpha": 0.70,
+        "card_color": (18, 8, 50),
+        "card_alpha": 205,
+        "card_radius": 36,
+        "card_position": "center",
+        "card_height_ratio": 0.52,
+        "accent": (192, 132, 252),
+        "accent2": (244, 63, 94),
+        "accent_highlight": (254, 211, 48),
+        "alert_color": (244, 63, 94),
+        "title_color": (255, 255, 255),
+        "subtitle_color": (216, 180, 254),
+        "number_color": (254, 211, 48),
+        "date_bg": (192, 132, 252),
+        "date_fg": (12, 5, 30),
+        "bar_color": (192, 132, 252),
+        "url_color": (192, 132, 252),
+        "main_copy_max": 7,
+        "sub_copy_max": 14,
+        "blur_radius": 3,
+        "gradient_bar": True,
+    },
+
+    # ── Kakao ────────────────────────────────────────────────────────────────
+    # 카카오 옐로우. 따뜻하고 친근한 톤.
     "kakao": {
         "size": (1200, 630),
-        "style": "warm_card",
-        "overlay_color": (30, 20, 5),
-        "overlay_alpha": 0.68,
-        "card_color": (25, 16, 4),
-        "card_alpha": 215,
+        "overlay_color": (28, 18, 2),
+        "overlay_alpha": 0.70,
+        "card_color": (22, 14, 2),
+        "card_alpha": 220,
         "card_radius": 28,
         "card_position": "center",
-        "card_height_ratio": 0.70,
-        "accent": (254, 229, 0),                # 카카오 옐로우
+        "card_height_ratio": 0.72,
+        "accent": (254, 229, 0),            # 카카오 옐로우
+        "accent_highlight": (255, 255, 255),
+        "alert_color": (255, 100, 50),
         "title_color": (255, 255, 255),
         "subtitle_color": (254, 229, 0),
+        "number_color": (254, 229, 0),
         "date_bg": (254, 229, 0),
-        "date_fg": (25, 16, 4),
+        "date_fg": (22, 14, 2),
         "bar_color": (254, 229, 0),
         "url_color": (254, 229, 0),
-        "title_max_chars": 14,
+        "main_copy_max": 9,
+        "sub_copy_max": 18,
         "blur_radius": 2,
-        "warm_tint": True,                      # 배경에 따뜻한 황금빛 틴트
+        "warm_tint": True,
+        "top_bar": True,
+        "top_bar_color": (254, 229, 0),
     },
 }
 
@@ -186,7 +204,6 @@ PLATFORM_CONFIGS = {
 # ════════════════════════════════════════════════════════════════════════════
 
 def _get_font(bold: bool = True, size: int = 60) -> ImageFont.FreeTypeFont:
-    """한글 지원 폰트 로드. 없으면 NanumGothic 자동 다운로드."""
     candidates = FONT_BOLD_CANDIDATES if bold else FONT_REGULAR_CANDIDATES
     for path in candidates:
         if Path(path).exists():
@@ -194,9 +211,8 @@ def _get_font(bold: bool = True, size: int = 60) -> ImageFont.FreeTypeFont:
                 return ImageFont.truetype(path, size)
             except Exception:
                 continue
-    # 폴백: NanumGothic 다운로드
     FONT_DIR.mkdir(exist_ok=True)
-    url = NANUM_BOLD_URL if bold else NANUM_REGULAR_URL
+    url  = NANUM_BOLD_URL if bold else NANUM_REGULAR_URL
     dest = FONT_DIR / ("NanumGothicBold.ttf" if bold else "NanumGothic.ttf")
     if not dest.exists():
         try:
@@ -212,42 +228,56 @@ def _get_font(bold: bool = True, size: int = 60) -> ImageFont.FreeTypeFont:
         return ImageFont.load_default()
 
 
-def _draw_rounded_rect(draw: ImageDraw.Draw, xy, radius: int, fill):
-    """PIL에서 모서리가 둥근 사각형을 RGBA fill로 그립니다."""
+def _draw_rounded_rect(draw, xy, radius: int, fill):
     x0, y0, x1, y1 = xy
     r = min(radius, (x1 - x0) // 2, (y1 - y0) // 2)
     draw.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=fill)
 
 
-def _draw_text_centered(
-    draw: ImageDraw.Draw,
+def _draw_text_with_outline(
+    draw,
     text: str,
-    font: ImageFont.FreeTypeFont,
+    font,
     color: tuple,
-    cx: int,
+    x: int,
     y: int,
-    shadow: bool = True,
-    shadow_color=(0, 0, 0, 140),
-) -> int:
-    """텍스트를 cx 기준 가운데 정렬로 그리고 다음 y좌표 반환."""
-    bbox = draw.textbbox((0, 0), text, font=font)
-    w = bbox[2] - bbox[0]
-    x = cx - w // 2
-    if shadow:
-        draw.text((x + 3, y + 3), text, font=font, fill=shadow_color)
+    outline_color=(0, 0, 0),
+    outline_width: int = 3,
+):
+    """외곽선 있는 텍스트 렌더링 (모바일 가독성 극대화)."""
+    for dx in range(-outline_width, outline_width + 1):
+        for dy in range(-outline_width, outline_width + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x + dx, y + dy), text, font=font,
+                          fill=(*outline_color, 200))
     draw.text((x, y), text, font=font, fill=color)
-    return y + (bbox[3] - bbox[1]) + 16
 
 
-def _apply_warm_tint(img: Image.Image, strength: float = 0.25) -> Image.Image:
-    """이미지에 따뜻한 황금빛 틴트 적용 (카카오용)."""
-    tint = Image.new("RGBA", img.size, (255, 180, 50, int(255 * strength)))
+def _parse_number_segments(text: str) -> list[tuple[str, bool]]:
+    """수치/퍼센트/지수명을 강조 세그먼트로 파싱."""
+    pattern = re.compile(
+        r"([+-]?\d+(?:\.\d+)?%|[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?"
+        r"포인트?|S&P\s*500|나스닥|다우|FOMC|연준|Fed)"
+    )
+    segs = []
+    last = 0
+    for m in pattern.finditer(text):
+        if m.start() > last:
+            segs.append((text[last:m.start()], False))
+        segs.append((m.group(), True))
+        last = m.end()
+    if last < len(text):
+        segs.append((text[last:], False))
+    return segs or [(text, False)]
+
+
+def _apply_warm_tint(img: Image.Image, strength: float = 0.20) -> Image.Image:
+    tint   = Image.new("RGBA", img.size, (255, 175, 40, int(255 * strength)))
     result = Image.alpha_composite(img.convert("RGBA"), tint)
     return result.convert("RGB")
 
 
-def _apply_monochrome(img: Image.Image, strength: float = 0.85) -> Image.Image:
-    """이미지를 부분 흑백 처리 (Threads 미니멀용)."""
+def _apply_monochrome(img: Image.Image, strength: float = 0.88) -> Image.Image:
     gray = img.convert("L").convert("RGB")
     return Image.blend(img.convert("RGB"), gray, strength)
 
@@ -258,48 +288,39 @@ def _prepare_background(
     height: int,
     cfg: dict,
 ) -> Image.Image:
-    """배경 이미지 처리: 리사이즈 + 블러 + 오버레이 + 플랫폼별 효과."""
     if bg_img:
-        # 커버 크롭 (Fill 방식)
         src_ratio = bg_img.width / bg_img.height
         dst_ratio = width / height
         if src_ratio > dst_ratio:
-            new_h = bg_img.height
-            new_w = int(new_h * dst_ratio)
-            offset = (bg_img.width - new_w) // 2
-            bg = bg_img.crop((offset, 0, offset + new_w, new_h))
+            new_h    = bg_img.height
+            new_w    = int(new_h * dst_ratio)
+            offset   = (bg_img.width - new_w) // 2
+            bg       = bg_img.crop((offset, 0, offset + new_w, new_h))
         else:
-            new_w = bg_img.width
-            new_h = int(new_w / dst_ratio)
-            offset = (bg_img.height - new_h) // 3  # 상단 1/3 위치
-            bg = bg_img.crop((0, offset, new_w, offset + new_h))
+            new_w    = bg_img.width
+            new_h    = int(new_w / dst_ratio)
+            offset   = (bg_img.height - new_h) // 3
+            bg       = bg_img.crop((0, offset, new_w, offset + new_h))
         bg = bg.resize((width, height), Image.LANCZOS)
 
-        # 플랫폼별 배경 효과
         if cfg.get("monochrome_bg"):
-            bg = _apply_monochrome(bg, strength=0.88)
+            bg = _apply_monochrome(bg)
         if cfg.get("warm_tint"):
-            bg = _apply_warm_tint(bg, strength=0.20)
-
-        # 가우시안 블러
+            bg = _apply_warm_tint(bg)
         blur_r = cfg.get("blur_radius", 2)
         if blur_r > 0:
             bg = bg.filter(ImageFilter.GaussianBlur(radius=blur_r))
 
-        # 다크 오버레이
-        oc = cfg["overlay_color"]
-        oa = int(cfg["overlay_alpha"] * 255)
+        oc      = cfg["overlay_color"]
+        oa      = int(cfg["overlay_alpha"] * 255)
         overlay = Image.new("RGBA", (width, height), (*oc, oa))
-        result = Image.alpha_composite(bg.convert("RGBA"), overlay)
+        result  = Image.alpha_composite(bg.convert("RGBA"), overlay)
         return result.convert("RGB")
     else:
         return Image.new("RGB", (width, height), cfg["overlay_color"])
 
 
 def _extract_date_from_title(title: str) -> str:
-    """제목에서 날짜 패턴 추출. 없으면 오늘 날짜."""
-    import re
-    # "25.10.14" / "2025.10.14" / "25년 10월" 등
     m = re.search(r"(\d{2,4})[.\-/년](\d{1,2})[.\-/월](\d{0,2})", title)
     if m:
         y, mo, d = m.group(1), m.group(2), m.group(3)
@@ -309,178 +330,87 @@ def _extract_date_from_title(title: str) -> str:
     return datetime.now().strftime("%y.%m.%d")
 
 
-def _make_subtitle_from_content(
-    platform: str,
-    post_text: str,
-    title: str,
-) -> str:
+def _build_impact_copy(title: str, platform_post: str, platform: str) -> tuple[str, str]:
     """
-    각 플랫폼 특성에 맞는 서브타이틀 텍스트 생성.
-    post_text: 해당 플랫폼의 SNS 게시물 텍스트 (Gemini 생성)
+    고성과 공식: 블로그 제목과 SNS 포스트에서
+    임팩트 있는 메인 카피(5-8자)와 서브 카피를 추출합니다.
+
+    반환: (메인_카피, 서브_카피)
     """
-    # 첫 줄 또는 첫 30자 이내의 핵심 문구 추출
-    first_line = post_text.strip().split("\n")[0] if post_text else ""
-    # 해시태그 이전 텍스트만
-    clean = first_line.split("#")[0].strip()
-    # 이모지 이전 핵심 문구
-    max_len = {
-        "facebook": 28,
-        "threads": 22,
-        "instagram": 22,
-        "instagram_portrait": 22,
-        "kakao": 28,
-    }.get(platform, 24)
-    return clean[:max_len] if clean else ""
+    max_main = {"facebook": 8, "threads": 7, "instagram": 7,
+                "instagram_portrait": 7, "kakao": 9}.get(platform, 8)
+    max_sub  = {"facebook": 18, "threads": 15, "instagram": 14,
+                "instagram_portrait": 14, "kakao": 18}.get(platform, 16)
+
+    # 제목에서 핵심 키워드/수치 추출
+    # 수치 패턴: +2.3%, -180포인트, 등
+    num_match = re.search(r"[+-]?\d+(?:\.\d+)?%|[+-]?\d+(?:\.\d+)?포인트", title)
+
+    # 훅 패턴 추출 (물음표/느낌표 이전 핵심 문구)
+    hook_match = re.search(r"[:：\?？!！](.{3,12})", title)
+
+    if num_match and len(num_match.group()) <= max_main:
+        main_copy = num_match.group()
+    elif hook_match and len(hook_match.group(1).strip()) <= max_main:
+        main_copy = hook_match.group(1).strip()
+    else:
+        # 제목 앞 부분에서 핵심 단어 추출
+        clean = re.sub(r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", title).strip()
+        clean = re.sub(r"미국\s*증시\s*[:：]?\s*", "", clean).strip()
+        main_copy = clean[:max_main]
+
+    # 서브 카피: SNS 포스트 첫 줄 (해시태그 제외)
+    if platform_post:
+        first_line = platform_post.strip().split("\n")[0]
+        sub_copy   = first_line.split("#")[0].strip()[:max_sub]
+    else:
+        # 제목 뒷부분 활용
+        sub_copy = title[len(main_copy):][:max_sub].strip(" :：-")
+
+    return main_copy or title[:max_main], sub_copy or ""
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 플랫폼별 썸네일 렌더러
+# 썸네일 렌더러 (고성과 공식)
 # ════════════════════════════════════════════════════════════════════════════
 
 def _render_thumbnail(
     platform: str,
     bg_img: Image.Image | None,
     title: str,
-    subtitle: str,
+    main_copy: str,
+    sub_copy: str,
     date_str: str,
     blog_url: str,
     mode: str,
 ) -> Image.Image:
-    """
-    단일 플랫폼 썸네일 렌더링.
-    레퍼런스 이미지 스타일: 배경 사진 + 반투명 둥근 카드 + 굵은 한글
-    """
-    cfg = PLATFORM_CONFIGS[platform]
-    W, H = cfg["size"]
-
-    # ── 배경 준비 ──────────────────────────────────────────────────────
-    base = _prepare_background(bg_img, W, H, cfg)
-    canvas = base.convert("RGBA")
-    draw = ImageDraw.Draw(canvas, "RGBA")
-
-    # ── 폰트 크기 계산 ─────────────────────────────────────────────────
-    # 이미지 너비에 비례해서 폰트 크기 결정
+    cfg   = PLATFORM_CONFIGS[platform]
+    W, H  = cfg["size"]
     scale = W / 1200
-    f_date = _get_font(bold=True,  size=int(38 * scale))
-    f_title = _get_font(bold=True,  size=int(72 * scale))
-    f_sub = _get_font(bold=False, size=int(36 * scale))
-    f_url = _get_font(bold=False, size=int(28 * scale))
 
-    # ── 카드 영역 계산 ─────────────────────────────────────────────────
-    card_margin_x = int(W * 0.065)
-    card_h = int(H * cfg["card_height_ratio"])
-    card_radius = cfg["card_radius"]
+    base   = _prepare_background(bg_img, W, H, cfg)
+    canvas = base.convert("RGBA")
+    draw   = ImageDraw.Draw(canvas, "RGBA")
 
-    if cfg["card_position"] == "bottom":
-        card_y0 = H - card_h - int(H * 0.04)
-        card_y1 = H - int(H * 0.04)
-    else:  # center
-        card_y0 = (H - card_h) // 2
-        card_y1 = card_y0 + card_h
+    accent       = cfg["accent"]
+    highlight    = cfg["accent_highlight"]
+    alert        = cfg["alert_color"]
 
-    card_x0 = card_margin_x
-    card_x1 = W - card_margin_x
+    # ── 폰트 크기 (모바일 가독성: 더 크게) ─────────────────────────────────
+    f_main_copy = _get_font(bold=True,  size=int(96 * scale))   # 메인 카피 (임팩트)
+    f_sub_copy  = _get_font(bold=True,  size=int(44 * scale))   # 서브 카피
+    f_date      = _get_font(bold=True,  size=int(36 * scale))
+    f_small     = _get_font(bold=False, size=int(26 * scale))
 
-    # ── 카드 배경 그리기 ───────────────────────────────────────────────
-    cc = cfg["card_color"]
-    ca = cfg["card_alpha"]
-    _draw_rounded_rect(draw, (card_x0, card_y0, card_x1, card_y1),
-                       card_radius, (*cc, ca))
+    # ── 상단 컬러 바 ─────────────────────────────────────────────────────────
+    if cfg.get("top_bar"):
+        bar_color = cfg.get("top_bar_color", accent)
+        draw.rectangle([(0, 0), (W, int(10 * scale))], fill=(*bar_color, 255))
 
-    # ── 좌측 액센트 바 (카드 내부) ────────────────────────────────────
-    bar_w = int(8 * scale)
-    bar_inset = int(card_radius * 0.5)
-    accent = cfg["accent"]
-    draw.rounded_rectangle(
-        [card_x0 + bar_inset, card_y0 + bar_inset,
-         card_x0 + bar_inset + bar_w, card_y1 - bar_inset],
-        radius=bar_w // 2,
-        fill=(*accent, 230)
-    )
-
-    # ── 카드 내부 텍스트 시작 y 위치 ──────────────────────────────────
-    text_x0 = card_x0 + bar_inset + bar_w + int(24 * scale)
-    text_x1 = card_x1 - int(24 * scale)
-    text_cx = (text_x0 + text_x1) // 2
-    inner_top = card_y0 + int(30 * scale)
-    y = inner_top
-
-    # ── 날짜 배지 ─────────────────────────────────────────────────────
-    date_pad_x, date_pad_y = int(18 * scale), int(8 * scale)
-    date_bbox = draw.textbbox((0, 0), date_str, font=f_date)
-    date_badge_w = (date_bbox[2] - date_bbox[0]) + date_pad_x * 2
-    date_badge_h = (date_bbox[3] - date_bbox[1]) + date_pad_y * 2
-    date_x = card_x1 - int(card_margin_x * 0.3) - date_badge_w
-    date_y = card_y0 + int(20 * scale)
-
-    dbg = cfg["date_bg"]
-    draw.rounded_rectangle(
-        [date_x, date_y, date_x + date_badge_w, date_y + date_badge_h],
-        radius=date_badge_h // 2,
-        fill=(*dbg, 240)
-    )
-    draw.text(
-        (date_x + date_pad_x, date_y + date_pad_y),
-        date_str, font=f_date, fill=cfg["date_fg"]
-    )
-    y = max(y, date_y + date_badge_h + int(20 * scale))
-
-    # ── 제목 텍스트 (굵은 한글) ────────────────────────────────────────
-    # 레퍼런스 이미지처럼 제목 키워드를 크게, 줄 바꿔서 표시
-    max_chars = cfg["title_max_chars"]
-    # 날짜 패턴이 제목에 있으면 제거 후 핵심 키워드만
-    import re
-    clean_title = re.sub(r"\d{2,4}[.\-/]\d{1,2}[.\-/]\d{0,2}\s*", "", title).strip()
-    if not clean_title:
-        clean_title = title
-
-    title_lines = textwrap.wrap(clean_title, width=max_chars)[:3]  # 최대 3줄
-    for line in title_lines:
-        bbox = draw.textbbox((0, 0), line, font=f_title)
-        lw = bbox[2] - bbox[0]
-        lx = text_cx - lw // 2
-        # 그림자
-        draw.text((lx + 3, y + 3), line, font=f_title, fill=(0, 0, 0, 160))
-        draw.text((lx, y), line, font=f_title, fill=cfg["title_color"])
-        y += (bbox[3] - bbox[1]) + int(12 * scale)
-
-    # ── 구분선 ────────────────────────────────────────────────────────
-    y += int(12 * scale)
-    line_x0 = text_x0 + int(20 * scale)
-    line_x1 = text_x1 - int(20 * scale)
-    draw.rectangle(
-        [line_x0, y, line_x1, y + int(3 * scale)],
-        fill=(*accent, 160)
-    )
-    y += int(20 * scale)
-
-    # ── 서브타이틀 ────────────────────────────────────────────────────
-    if subtitle:
-        sub_lines = textwrap.wrap(subtitle, width=int(max_chars * 1.5))[:2]
-        for line in sub_lines:
-            bbox = draw.textbbox((0, 0), line, font=f_sub)
-            lw = bbox[2] - bbox[0]
-            lx = text_cx - lw // 2
-            draw.text((lx + 2, y + 2), line, font=f_sub, fill=(0, 0, 0, 100))
-            draw.text((lx, y), line, font=f_sub, fill=cfg["subtitle_color"])
-            y += (bbox[3] - bbox[1]) + int(8 * scale)
-
-    # ── 하단 URL ──────────────────────────────────────────────────────
-    url_text = f"seedsup.tistory.com"
-    url_y = card_y1 - int(40 * scale)
-    bbox = draw.textbbox((0, 0), url_text, font=f_url)
-    uw = bbox[2] - bbox[0]
-    draw.text(
-        (text_cx - uw // 2, url_y),
-        url_text, font=f_url, fill=(*cfg["url_color"], 200)
-    )
-
-    # ── 플랫폼별 추가 장식 ────────────────────────────────────────────
-
-    # Instagram / Instagram Portrait: 퍼플-핑크 그라디언트 상단 바
+    # ── Instagram/Instagram Portrait: 퍼플-핑크 그라디언트 상단 바 ────────────
     if cfg.get("gradient_bar") and "accent2" in cfg:
-        bar_h_px = int(10 * scale)
-        accent2 = cfg["accent2"]
+        accent2  = cfg["accent2"]
+        bar_h_px = int(12 * scale)
         for px in range(W):
             t = px / W
             r = int(accent[0] * (1 - t) + accent2[0] * t)
@@ -488,20 +418,116 @@ def _render_thumbnail(
             b = int(accent[2] * (1 - t) + accent2[2] * t)
             draw.line([(px, 0), (px, bar_h_px)], fill=(r, g, b, 255))
 
-    # Threads: 상단 미니멀 바 (흰색)
-    if cfg.get("monochrome_bg"):
-        draw.rectangle([(0, 0), (W, int(6 * scale))], fill=(255, 255, 255, 180))
+    # ── 카드 영역 ─────────────────────────────────────────────────────────────
+    card_margin_x = int(W * 0.06)
+    card_h        = int(H * cfg["card_height_ratio"])
+    card_radius   = cfg["card_radius"]
 
-    # Facebook: 상단 진행/브랜드 바
-    if platform == "facebook":
-        draw.rectangle([(0, 0), (W, int(8 * scale))], fill=(*accent, 255))
+    if cfg["card_position"] == "bottom":
+        card_y0 = H - card_h - int(H * 0.04)
+        card_y1 = H - int(H * 0.03)
+    else:
+        card_y0 = (H - card_h) // 2
+        card_y1 = card_y0 + card_h
 
-    # Kakao: 상단 노란 바 + 카카오 로고 텍스트
+    card_x0 = card_margin_x
+    card_x1 = W - card_margin_x
+
+    cc = cfg["card_color"]
+    ca = cfg["card_alpha"]
+    _draw_rounded_rect(draw, (card_x0, card_y0, card_x1, card_y1),
+                       card_radius, (*cc, ca))
+
+    # 좌측 액센트 바
+    bar_w    = int(8 * scale)
+    bar_ins  = int(card_radius * 0.5)
+    draw.rounded_rectangle(
+        [card_x0 + bar_ins, card_y0 + bar_ins,
+         card_x0 + bar_ins + bar_w, card_y1 - bar_ins],
+        radius=bar_w // 2, fill=(*accent, 235),
+    )
+
+    # ── 카드 내부 레이아웃 ───────────────────────────────────────────────────
+    text_x0 = card_x0 + bar_ins + bar_w + int(22 * scale)
+    text_x1 = card_x1 - int(22 * scale)
+    text_cx  = (text_x0 + text_x1) // 2
+    inner_top = card_y0 + int(28 * scale)
+    y = inner_top
+
+    # ── 날짜 배지 ─────────────────────────────────────────────────────────────
+    date_pad_x, date_pad_y = int(16 * scale), int(8 * scale)
+    date_bbox   = draw.textbbox((0, 0), date_str, font=f_date)
+    badge_w     = (date_bbox[2] - date_bbox[0]) + date_pad_x * 2
+    badge_h     = (date_bbox[3] - date_bbox[1]) + date_pad_y * 2
+    date_x      = card_x1 - int(card_margin_x * 0.3) - badge_w
+    date_y      = card_y0 + int(18 * scale)
+    dbg         = cfg["date_bg"]
+    dfg         = cfg["date_fg"]
+    draw.rounded_rectangle(
+        [date_x, date_y, date_x + badge_w, date_y + badge_h],
+        radius=badge_h // 2, fill=(*dbg, 245),
+    )
+    draw.text((date_x + date_pad_x, date_y + date_pad_y),
+              date_str, font=f_date, fill=dfg)
+    y = max(y, date_y + badge_h + int(18 * scale))
+
+    # ── 메인 카피 (고성과 공식: 크고 임팩트 있게) ────────────────────────────
+    # 수치 포함 여부 체크 (수치면 강조색 사용)
+    has_number = bool(re.search(r"[+-]?\d+(?:\.\d+)?[%포]", main_copy))
+    mc_color   = highlight if has_number else cfg["title_color"]
+
+    mc_lines = textwrap.wrap(main_copy, width=cfg["main_copy_max"])[:2]
+    for line in mc_lines:
+        mc_bbox = draw.textbbox((0, 0), line, font=f_main_copy)
+        mc_w    = mc_bbox[2] - mc_bbox[0]
+        mc_x    = text_cx - mc_w // 2
+        _draw_text_with_outline(draw, line, f_main_copy, mc_color, mc_x, y,
+                                outline_color=(0, 0, 0), outline_width=4)
+        y += mc_bbox[3] - mc_bbox[1] + int(10 * scale)
+
+    # ── 구분선 ───────────────────────────────────────────────────────────────
+    y += int(10 * scale)
+    draw.rectangle(
+        [text_x0 + int(10 * scale), y, text_x1 - int(10 * scale), y + int(3 * scale)],
+        fill=(*accent, 180),
+    )
+    y += int(18 * scale)
+
+    # ── 서브 카피 (수치 세그먼트 강조) ────────────────────────────────────────
+    if sub_copy:
+        sc_lines = textwrap.wrap(sub_copy, width=cfg["sub_copy_max"])[:2]
+        for line in sc_lines:
+            segs   = _parse_number_segments(line)
+            seg_ws = []
+            for seg_text, is_hl in segs:
+                b = draw.textbbox((0, 0), seg_text, font=f_sub_copy)
+                seg_ws.append(b[2] - b[0])
+            total_w  = sum(seg_ws)
+            x_cursor = text_cx - total_w // 2
+
+            for j, (seg_text, is_hl) in enumerate(segs):
+                color = (*cfg["number_color"], 255) if is_hl else (*cfg["subtitle_color"], 230)
+                bbox  = draw.textbbox((0, 0), seg_text, font=f_sub_copy)
+                seg_h = bbox[3] - bbox[1]
+                _draw_text_with_outline(draw, seg_text, f_sub_copy,
+                                        color[:3] + (255,), x_cursor, y,
+                                        outline_width=2)
+                x_cursor += seg_ws[j]
+            y += seg_h + int(8 * scale)
+
+    # ── 하단 URL ─────────────────────────────────────────────────────────────
+    url_text = "seedsup.tistory.com"
+    url_y    = card_y1 - int(38 * scale)
+    url_bbox = draw.textbbox((0, 0), url_text, font=f_small)
+    url_x    = text_cx - (url_bbox[2] - url_bbox[0]) // 2
+    draw.text((url_x, url_y), url_text, font=f_small,
+              fill=(*cfg["url_color"], 180))
+
+    # ── Kakao: 하단 채널 텍스트 ──────────────────────────────────────────────
     if platform == "kakao":
-        draw.rectangle([(0, 0), (W, int(10 * scale))], fill=(*accent, 255))
         f_logo = _get_font(bold=True, size=int(22 * scale))
         draw.text(
-            (int(W * 0.5), int(H * 0.97)),
+            (W // 2, int(H * 0.96)),
             "📊 카카오 스토리채널",
             font=f_logo,
             fill=(*accent, 200),
@@ -512,18 +538,17 @@ def _render_thumbnail(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SNSThumbnailGenerator (메인 클래스)
+# SNSThumbnailGenerator
 # ════════════════════════════════════════════════════════════════════════════
 
 class SNSThumbnailGenerator:
     """
     플랫폼별 맞춤 SNS 썸네일 생성기.
-    generate_all() 호출 시 facebook / threads / instagram / kakao 썸네일을
-    각 플랫폼 특성에 맞는 스타일로 생성합니다.
+    고성과 공식: 임팩트 메인 카피 + 수치 강조 + 외곽선 텍스트.
     """
 
     def __init__(self, hf_token: str = "", output_dir: str = OUTPUT_DIR):
-        self.hf_token = hf_token
+        self.hf_token   = hf_token
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
@@ -534,26 +559,16 @@ class SNSThumbnailGenerator:
         thumbnail_url: str = "",
         blog_url: str = "seedsup.tistory.com",
         timestamp: str = "",
-        content: dict | None = None,  # Gemini 생성 플랫폼별 텍스트 (옵션)
+        content: dict | None = None,
     ) -> dict[str, str]:
-        """
-        모든 플랫폼 썸네일 생성 → {platform: 파일경로} 반환.
-
-        content dict 키: facebook_post, threads_post, instagram_post, kakao_post
-        (없으면 title에서 자동 추출)
-        """
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         content = content or {}
 
-        # ── 배경 이미지 로드 ──────────────────────────────────────────
-        bg_img = self._load_bg_image(thumbnail_url)
-
-        # ── 날짜 추출 ─────────────────────────────────────────────────
+        bg_img   = self._load_bg_image(thumbnail_url)
         date_str = _extract_date_from_title(title)
 
-        # ── 플랫폼별 생성 ─────────────────────────────────────────────
-        platforms_to_generate = [
+        platforms = [
             "facebook",
             "threads",
             "instagram",
@@ -561,36 +576,41 @@ class SNSThumbnailGenerator:
             "kakao",
         ]
 
-        # 플랫폼별 서브타이틀 텍스트 매핑
-        subtitle_map = {
-            "facebook": _make_subtitle_from_content(
-                "facebook", content.get("facebook_post", ""), title),
-            "threads": _make_subtitle_from_content(
-                "threads", content.get("threads_post", ""), title),
-            "instagram": _make_subtitle_from_content(
-                "instagram", content.get("instagram_post", ""), title),
-            "instagram_portrait": _make_subtitle_from_content(
-                "instagram", content.get("instagram_post", ""), title),
-            "kakao": _make_subtitle_from_content(
-                "kakao", content.get("kakao_post", ""), title),
-        }
+        # 플랫폼별 임팩트 카피 생성
+        copy_map: dict[str, tuple[str, str]] = {}
+        for platform in platforms:
+            post_key = {
+                "facebook":           "facebook_post",
+                "threads":            "threads_post",
+                "instagram":          "instagram_post",
+                "instagram_portrait": "instagram_post",
+                "kakao":              "kakao_post",
+            }.get(platform, "")
+            platform_post = content.get(post_key, "")
+            copy_map[platform] = _build_impact_copy(title, platform_post, platform)
+            logger.info(
+                f"[{platform}] 메인카피: '{copy_map[platform][0]}' / "
+                f"서브카피: '{copy_map[platform][1][:20]}...'"
+            )
 
-        paths = {}
-        for platform in platforms_to_generate:
+        paths: dict[str, str] = {}
+        for platform in platforms:
             try:
                 logger.info(f"[{platform}] 썸네일 생성 중...")
+                main_copy, sub_copy = copy_map[platform]
                 img = _render_thumbnail(
-                    platform=platform,
-                    bg_img=bg_img,
-                    title=title,
-                    subtitle=subtitle_map.get(platform, ""),
-                    date_str=date_str,
-                    blog_url=blog_url,
-                    mode=mode,
+                    platform  = platform,
+                    bg_img    = bg_img,
+                    title     = title,
+                    main_copy = main_copy,
+                    sub_copy  = sub_copy,
+                    date_str  = date_str,
+                    blog_url  = blog_url,
+                    mode      = mode,
                 )
                 filename = f"thumb_{platform}_{mode}_{timestamp}.jpg"
-                path = os.path.join(self.output_dir, filename)
-                img.save(path, "JPEG", quality=93, optimize=True)
+                path     = os.path.join(self.output_dir, filename)
+                img.save(path, "JPEG", quality=94, optimize=True)
                 paths[platform] = path
                 logger.info(f"  → 저장: {path}")
             except Exception as e:
@@ -599,18 +619,16 @@ class SNSThumbnailGenerator:
         return paths
 
     def _load_bg_image(self, thumbnail_url: str) -> Image.Image | None:
-        """배경 이미지 로드."""
         if not thumbnail_url:
             return None
         try:
             resp = requests.get(
-                thumbnail_url,
-                timeout=15,
+                thumbnail_url, timeout=15,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             resp.raise_for_status()
             img = Image.open(BytesIO(resp.content)).convert("RGB")
-            logger.info(f"배경 이미지 로드 완료: {thumbnail_url} ({img.size})")
+            logger.info(f"배경 이미지 로드 완료: {img.size}")
             return img
         except Exception as e:
             logger.warning(f"배경 이미지 로드 실패: {e}")
