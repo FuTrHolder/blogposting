@@ -66,7 +66,7 @@ jobs:
         working-directory: marketing
         env:
           # ── Gist 상태 관리 ────────────────────────────────────────────
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 자동 제공
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}  # Gist 쓰기용 PAT (gist scope 필요)
           GIST_ID: ${{ secrets.GIST_ID }}            # 최초 실행 후 저장 권장
 
           # ── 강제 재실행 옵션 ─────────────────────────────────────────
