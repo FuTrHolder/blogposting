@@ -37,8 +37,7 @@ jobs:
 
     # GITHUB_TOKEN 권한 명시 (Gist 읽기/쓰기에 필요)
     permissions:
-      contents: read
-      gists: write   # ← Gist 쓰기 권한 필수
+      contents: write  # read + Gist 읽기/쓰기 포함 (gists 키는 유효하지 않음)
 
     steps:
       - name: 📥 코드 체크아웃
