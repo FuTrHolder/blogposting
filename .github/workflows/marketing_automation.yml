@@ -1,17 +1,14 @@
 name: 📣 마케팅 자동화 (SNS 자동 업로드)
 
 on:
-  # 블로그 원고 이메일 발송 워크플로우 완료 후 즉시 실행
   workflow_run:
     workflows: ["미국 증시 블로그 원고 이메일 발송"]
     types: [completed]
     branches: [main]
 
-  # 30분마다 폴링 (새 글 감지)
   schedule:
     - cron: "*/30 * * * *"
 
-  # 수동 실행 (테스트용)
   workflow_dispatch:
     inputs:
       force_crawl:
@@ -26,18 +23,16 @@ on:
 jobs:
   marketing:
     name: "📣 SNS 자동 업로드"
-    # workflow_run은 성공 시에만 실행, 나머지는 항상 실행
     if: |
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     runs-on: ubuntu-latest
-    timeout-minutes: 30   # TTS + 영상 합성 포함
+    timeout-minutes: 30
 
-    # GITHUB_TOKEN 권한 명시 (Gist 읽기/쓰기에 필요)
     permissions:
-      contents: write  # read + Gist 읽기/쓰기 포함 (gists 키는 유효하지 않음)
+      contents: write
 
     steps:
       - name: 📥 코드 체크아웃
@@ -66,24 +61,25 @@ jobs:
         working-directory: marketing
         env:
           # ── Gist 상태 관리 ────────────────────────────────────────────
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}  # Gist 쓰기용 PAT (gist scope 필요)
-          GIST_ID: ${{ secrets.GIST_ID }}            # 최초 실행 후 저장 권장
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
 
-          # ── 강제 재실행 옵션 ─────────────────────────────────────────
+          # ── 강제 재실행 ───────────────────────────────────────────────
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl || 'false' }}
 
           # ── AI 콘텐츠 생성 ───────────────────────────────────────────
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
 
+          # ── 이미지 소스 (무료 API) ────────────────────────────────────
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          # Unsplash Source는 API 키 불필요 (자동 사용)
+
           # ── YouTube ──────────────────────────────────────────────────
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-
-          # ── TikTok (비즈니스 계정 필요) ──────────────────────────────
-          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
-          TIKTOK_OPEN_ID: ${{ secrets.TIKTOK_OPEN_ID }}
 
           # ── Facebook ─────────────────────────────────────────────────
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
@@ -98,18 +94,17 @@ jobs:
           # ── Threads ──────────────────────────────────────────────────
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          # THREADS_IMAGE_URL: Threads 이미지 포함 게시 시 공개 URL 필요
+          # (INSTAGRAM_IMAGE_URL을 공유하거나 별도 설정)
+          THREADS_IMAGE_URL: ${{ secrets.THREADS_IMAGE_URL }}
 
-          # ── X (유료 $100/월, X_ENABLED=true 시 활성화) ───────────────
-          X_ENABLED: ${{ secrets.X_ENABLED || 'false' }}
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_SECRET: ${{ secrets.X_API_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-
-          # ── 카카오 (이메일 대체 발송) ────────────────────────────────
+          # ── 카카오 메일 발송 (카카오 텍스트 + 썸네일 + 영상) ──────────
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+
+          # X(Twitter) 완전 제거됨
+
         run: python main_marketing.py
 
       - name: 📎 생성 파일 아티팩트 저장
@@ -122,5 +117,4 @@ jobs:
             marketing/images/*.jpg
             marketing/images/*.png
           retention-days: 7
-          # 파일이 없어도 오류 발생 안 함
           if-no-files-found: ignore
