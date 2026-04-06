@@ -1,26 +1,180 @@
 """
-content_adapter/adapter.py 패치 내용
-=====================================
-SYSTEM_PROMPT에 thumbnail_copy 필드 추가.
-Gemini가 썸네일용 임팩트 카피를 직접 생성 → 정규식 기반 추출보다 품질 향상.
+content_adapter/adapter.py
+Gemini API를 사용해 티스토리 블로그 포스팅을 각 SNS 플랫폼에 맞게 재가공합니다.
 """
 
-# SYSTEM_PROMPT의 JSON 응답 형식에 아래 필드 추가:
-THUMBNAIL_COPY_FIELD = '''  "thumbnail_copy": "썸네일 메인 카피 (8자 이내, 첫 줄)\\n서브 카피 (20자 이내, 둘째 줄)",'''
+import logging
+import time
+import json
+import requests
 
-# 교체 대상 (기존):
-OLD = '  "thumbnail_prompt": "SNS 썸네일용 Stable Diffusion 영문 프롬프트"'
+logger = logging.getLogger(__name__)
 
-# 교체 후:
-NEW = '''  "thumbnail_copy": "썸네일 메인 카피 (8자 이내, 첫 줄)\\n서브 카피 (20자 이내, 둘째 줄)",
-  "thumbnail_prompt": "SNS 썸네일용 Stable Diffusion 영문 프롬프트"'''
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
 
-# adapter.py의 SYSTEM_PROMPT 문자열에서 OLD를 NEW로 replace() 하면 됩니다.
-# thumbnail_copy 작성 규칙을 SYSTEM_PROMPT에 추가:
-THUMB_COPY_RULE = """
+SYSTEM_PROMPT = """당신은 SNS 마케팅 전문가입니다.
+주어진 블로그 포스팅 내용을 각 플랫폼에 최적화된 형식으로 재가공해주세요.
+
+반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이 순수 JSON만):
+{
+  "blog_title": "원본 블로그 제목",
+  "blog_url": "원본 블로그 URL",
+  "mode": "morning 또는 evening",
+  "youtube_script": [
+    {
+      "slide": 1,
+      "title": "훅 제목 (15자 이내)",
+      "body": "슬라이드 본문 (50자 이내)"
+    }
+  ],
+  "facebook_post": "페이스북 게시글 (이모지 포함, 300자 이내, 해시태그 5개)",
+  "instagram_post": "인스타그램 게시글 (이모지 풍부, 200자 이내, 해시태그 10개)",
+  "threads_post": "쓰레드 게시글 (간결, 150자 이내, 해시태그 3개)",
+  "x_post": "X 트윗 (280자 이내, 핵심만)",
+  "kakao_post": "카카오 스토리 게시글 (친근한 어투, 200자 이내)",
+  "tiktok_script": [
+    {
+      "slide": 1,
+      "title": "훅 제목",
+      "body": "본문"
+    }
+  ],
+  "thumbnail_copy": "썸네일 메인 카피 (8자 이내)\\n서브 카피 (20자 이내)",
+  "thumbnail_prompt": "SNS 썸네일용 Stable Diffusion 영문 프롬프트"
+}
+
 thumbnail_copy 작성 규칙:
 - 첫 줄: 숫자/수치 또는 핵심 훅 키워드 (8자 이내, 한글 기준)
   예: "-2.3% 급락", "나스닥 반등?", "연준 충격"
 - 둘째 줄: 클릭 유도 서브 카피 (20자 이내)
   예: "지금 사야 할까?", "오늘 밤 대응 전략은"
+
+youtube_script / tiktok_script 작성 규칙:
+- 총 5~7장면
+- 1장면: 강렬한 훅 (궁금증 유발)
+- 2~마지막-1장면: 핵심 정보 전달
+- 마지막 장면: CTA (블로그 방문 유도)
 """
+
+
+class ContentAdapter:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def _call_gemini(self, prompt: str, max_retries: int = 3) -> dict:
+        url = f"{GEMINI_API_URL}?key={self.api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.75,
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = requests.post(url, json=payload, timeout=60)
+                resp.raise_for_status()
+                data = resp.json()
+                raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+                # JSON 파싱 (코드블록 방어)
+                if "```" in raw:
+                    for part in raw.split("```"):
+                        part = part.strip()
+                        if part.startswith("json"):
+                            part = part[4:].strip()
+                        try:
+                            return json.loads(part)
+                        except json.JSONDecodeError:
+                            continue
+
+                return json.loads(raw)
+
+            except requests.exceptions.HTTPError as e:
+                if resp.status_code == 429:
+                    wait = 30 * attempt
+                    logger.warning(f"Gemini 한도 초과. {wait}초 대기...")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"Gemini API 오류: {e}")
+                    raise
+            except Exception as e:
+                logger.warning(f"Gemini 호출 실패 (시도 {attempt}): {e}")
+                if attempt < max_retries:
+                    time.sleep(10)
+                else:
+                    raise
+
+        raise RuntimeError("Gemini API 최대 재시도 초과")
+
+    def generate_all(self, post: dict) -> dict:
+        """
+        티스토리 블로그 포스팅을 각 SNS 플랫폼용 콘텐츠로 변환합니다.
+
+        Args:
+            post: TistoryCrawler.get_post_as_dict() 반환값
+                  (title, url, summary, full_text, tags, mode 등 포함)
+
+        Returns:
+            플랫폼별 콘텐츠 딕셔너리
+        """
+        title     = post.get("title", "")
+        url       = post.get("url", "")
+        summary   = post.get("summary", "")
+        full_text = post.get("full_text", "")
+        tags      = post.get("tags", [])
+        mode      = post.get("mode", "morning")
+
+        tags_str = ", ".join(tags) if tags else "미국증시, 주식"
+
+        prompt = f"""아래 티스토리 블로그 포스팅을 각 SNS 플랫폼에 맞게 재가공해주세요.
+
+[블로그 정보]
+제목: {title}
+URL: {url}
+모드: {mode} (morning=전일 마감 리뷰 / evening=프리마켓 & 이슈)
+태그: {tags_str}
+
+[포스팅 요약]
+{summary}
+
+[포스팅 전문 (앞부분)]
+{full_text[:2000]}
+
+위 내용을 바탕으로 각 SNS 플랫폼에 최적화된 콘텐츠를 JSON 형식으로 생성해주세요.
+blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
+"""
+
+        logger.info(f"ContentAdapter: Gemini API 호출 중 (모드: {mode})...")
+        result = self._call_gemini(prompt)
+
+        # 필수 필드 보정 (Gemini가 누락할 경우 대비)
+        result.setdefault("blog_title", title)
+        result.setdefault("blog_url", url)
+        result.setdefault("mode", mode)
+
+        # youtube_script가 없으면 tiktok_script로 대체
+        if not result.get("youtube_script") and result.get("tiktok_script"):
+            result["youtube_script"] = result["tiktok_script"]
+        elif not result.get("youtube_script"):
+            result["youtube_script"] = [
+                {"slide": 1, "title": title[:15], "body": summary[:50]},
+                {"slide": 2, "title": "자세한 분석", "body": "블로그에서 확인하세요!"},
+            ]
+
+        if not result.get("tiktok_script"):
+            result["tiktok_script"] = result.get("youtube_script", [])
+
+        logger.info(
+            f"ContentAdapter 완료: "
+            f"YouTube {len(result.get('youtube_script', []))}장, "
+            f"플랫폼 텍스트 생성됨"
+        )
+        return result
