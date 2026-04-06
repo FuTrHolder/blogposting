@@ -1,18 +1,13 @@
 """
-SNS 썸네일 생성기 v4 — 전면 재작성
+SNS 썸네일 생성기 v5
 =====================================
-주요 변경사항:
-  - 폰트: GitHub raw URL 제거 → 시스템 Noto CJK 직접 사용 (index=0 명시)
-  - 임팩트 카피: 정규식 기반 → content_adapter의 thumbnail_copy 필드 우선 사용
-  - 배경 이미지: Pexels API 무료 + 그라디언트 fallback (단색 박스 제거)
-  - 플랫폼별 레이아웃 구조 차별화
-      Facebook  : 와이드 뉴스 카드 (1200×630)
-      Threads   : 미니멀 흑백 스퀘어 (1080×1080)
-      Instagram : 비주얼 임팩트 스퀘어 (1080×1080) — 퍼플 그라디언트
-      Instagram Portrait: 세로 피드 (1080×1350)
-      Kakao     : 옐로우 스토리 카드 (1200×630)
-  - 텍스트 렌더링: 픽셀 기반 줄바꿈 + 8방향 외곽선
-  - 이미지 없을 때: 그라디언트 배경 생성 (단색 박스 불가)
+개선사항:
+  - 썸네일 이미지 품질 대폭 개선:
+      1순위: Gemini Imagen API (gemini-nano-banana 모델)로 카툰 스타일 이미지 생성
+      2순위: Pexels/Pixabay/Unsplash 무료 이미지 + 블로그 제목/키워드 오버레이
+      3순위: 그라디언트 배경 + 키워드 텍스트
+  - 쓰레드 썸네일 업로드 방식 개선 (이미지 URL 직접 업로드 지원)
+  - 이모지 제거로 텍스트 깨짐 방지
 """
 
 import logging
@@ -21,21 +16,37 @@ import re
 import time
 from datetime import datetime
 from io import BytesIO
-from math import sin, pi
 from pathlib import Path
-from struct import pack
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageEnhance
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "images"
 
-# ── 시스템 폰트 (ubuntu-latest 정확한 경로) ──────────────────────────────────
+# ── 시스템 폰트 ──────────────────────────────────────────────────────────────
 _FONT_BLACK   = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
 _FONT_BOLD    = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 _FONT_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
+# ── 이모지 제거 ───────────────────────────────────────────────────────────────
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000027BF"
+    "\U0001F900-\U0001F9FF"
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "]+",
+    flags=re.UNICODE,
+)
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -43,7 +54,6 @@ _FONT_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _font(size: int, weight: str = "bold") -> ImageFont.FreeTypeFont:
-    """weight: 'black' | 'bold' | 'regular'"""
     if weight == "black":
         paths = [_FONT_BLACK, _FONT_BOLD]
     elif weight == "bold":
@@ -63,16 +73,16 @@ def _font(size: int, weight: str = "bold") -> ImageFont.FreeTypeFont:
 # 픽셀 기반 줄바꿈
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _pixel_wrap(text: str, fnt: ImageFont.FreeTypeFont, max_px: int,
-                max_lines: int = 3) -> list[str]:
+def _pixel_wrap(text: str, fnt, max_px: int, max_lines: int = 3) -> list[str]:
     _img  = Image.new("RGB", (10, 10))
     _draw = ImageDraw.Draw(_img)
 
     def _w(t):
         return _draw.textbbox((0, 0), t, font=fnt)[2]
 
-    words = text.split()
-    lines, cur = [], ""
+    words  = text.split()
+    lines  = []
+    cur    = ""
     for word in words:
         if len(lines) >= max_lines:
             break
@@ -83,21 +93,7 @@ def _pixel_wrap(text: str, fnt: ImageFont.FreeTypeFont, max_px: int,
         else:
             if cur:
                 lines.append(cur)
-            if len(lines) >= max_lines:
-                break
-            if _w(word) > max_px:
-                chunk = ""
-                for ch in word:
-                    if _w(chunk + ch) > max_px and chunk:
-                        lines.append(chunk)
-                        chunk = ch
-                        if len(lines) >= max_lines:
-                            break
-                    else:
-                        chunk += ch
-                cur = chunk
-            else:
-                cur = word
+            cur = word
     if cur and len(lines) < max_lines:
         lines.append(cur)
     return lines or [text[:20]]
@@ -116,7 +112,6 @@ def _outlined(draw, pos, text, fnt, fill, outline=(0, 0, 0), ow=3):
 
 
 def _center_text(draw, cx, y, text, fnt, fill, outline=(0, 0, 0), ow=3) -> int:
-    """중앙 정렬 외곽선 텍스트. 렌더 높이 반환."""
     bb = draw.textbbox((0, 0), text, font=fnt)
     w  = bb[2] - bb[0]
     h  = bb[3] - bb[1]
@@ -125,34 +120,161 @@ def _center_text(draw, cx, y, text, fnt, fill, outline=(0, 0, 0), ow=3) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 수치 강조 파싱
+# 이미지 소스 1: Gemini Imagen (gemini-2.0-flash-exp 이미지 생성)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_NUM_RE = re.compile(
-    r"([+-]?\d+(?:\.\d+)?%"
-    r"|[+-]?\d+(?:\.\d+)?(?:포인트|달러|원|억|조|만)"
-    r"|S&P\s*500|나스닥|다우|FOMC|Fed|연준)"
-)
+def _generate_with_gemini_imagen(prompt: str, gemini_key: str) -> Image.Image | None:
+    """
+    Gemini API의 이미지 생성 기능으로 카툰 스타일 썸네일 생성.
+    현재 무료 사용 가능한 gemini-2.0-flash-exp-image-generation 모델 사용.
+    """
+    if not gemini_key:
+        return None
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key={gemini_key}"
 
-def _num_segs(text: str) -> list[tuple[str, bool]]:
-    segs, last = [], 0
-    for m in _NUM_RE.finditer(text):
-        if m.start() > last:
-            segs.append((text[last:m.start()], False))
-        segs.append((m.group(), True))
-        last = m.end()
-    if last < len(text):
-        segs.append((text[last:], False))
-    return segs or [(text, False)]
+    # 카툰/일러스트 스타일 프롬프트
+    full_prompt = (
+        f"{prompt}, "
+        "cartoon style illustration, flat design, vibrant colors, "
+        "financial news cartoon, clean and professional, "
+        "no text, no watermark, 16:9 aspect ratio"
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        if resp.status_code != 200:
+            logger.warning(f"Gemini Imagen 실패 ({resp.status_code}): {resp.text[:200]}")
+            return None
+
+        data = resp.json()
+        for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+            if part.get("inlineData", {}).get("mimeType", "").startswith("image/"):
+                import base64
+                img_bytes = base64.b64decode(part["inlineData"]["data"])
+                img       = Image.open(BytesIO(img_bytes)).convert("RGB")
+                logger.info(f"Gemini Imagen 생성 성공: {img.size}")
+                return img
+
+        logger.warning("Gemini Imagen 응답에 이미지 없음")
+        return None
+    except Exception as e:
+        logger.warning(f"Gemini Imagen 오류: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 배경 이미지 처리
+# 이미지 소스 2: Pexels 무료 이미지
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_pexels_image(query: str, W: int, H: int, pexels_key: str) -> Image.Image | None:
+    if not pexels_key:
+        return None
+    orient = "landscape" if W > H else "portrait"
+    try:
+        r = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": pexels_key},
+            params={"query": query, "per_page": 8, "orientation": orient},
+            timeout=12,
+        )
+        r.raise_for_status()
+        photos = r.json().get("photos", [])
+        if not photos:
+            return None
+        idx = int(time.time() / 86400) % len(photos)
+        ir  = requests.get(photos[idx]["src"]["large2x"], timeout=20)
+        ir.raise_for_status()
+        return Image.open(BytesIO(ir.content)).convert("RGB")
+    except Exception as e:
+        logger.warning(f"Pexels 실패 ({query}): {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 이미지 소스 3: Pixabay 무료 이미지 (API 키 필요)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_pixabay_image(query: str, W: int, H: int, pixabay_key: str) -> Image.Image | None:
+    if not pixabay_key:
+        return None
+    orient = "horizontal" if W > H else "vertical"
+    try:
+        r = requests.get(
+            "https://pixabay.com/api/",
+            params={
+                "key": pixabay_key,
+                "q": query,
+                "image_type": "photo",
+                "orientation": orient,
+                "per_page": 10,
+                "safesearch": "true",
+                "category": "business",
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        hits = r.json().get("hits", [])
+        if not hits:
+            return None
+        idx = int(time.time() / 86400) % len(hits)
+        ir  = requests.get(hits[idx]["largeImageURL"], timeout=20)
+        ir.raise_for_status()
+        return Image.open(BytesIO(ir.content)).convert("RGB")
+    except Exception as e:
+        logger.warning(f"Pixabay 실패 ({query}): {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 이미지 소스 4: Unsplash Source API (무료, API 키 불필요)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_unsplash_image(query: str, W: int, H: int, mode: str) -> Image.Image | None:
+    """
+    Unsplash source API (source.unsplash.com) - 무료, API 키 불필요.
+    날짜 기반 sig로 매일 다른 이미지.
+    """
+    today_sig = datetime.now().strftime(f"%Y%m%d_{mode}")
+    kw        = query.replace(" ", ",")
+    url       = f"https://source.unsplash.com/{W}x{H}/?{kw}&sig={today_sig}"
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"},
+                         allow_redirects=True)
+        if r.status_code == 200 and len(r.content) > 10000:
+            return Image.open(BytesIO(r.content)).convert("RGB")
+    except Exception as e:
+        logger.warning(f"Unsplash 실패: {e}")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 이미지 크롭/리사이즈
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _crop_fit(img: Image.Image, W: int, H: int) -> Image.Image:
+    sw, sh = img.size
+    if sw / sh > W / H:
+        nh = sh; nw = int(nh * W / H)
+        ox = (sw - nw) // 2
+        img = img.crop((ox, 0, ox + nw, nh))
+    else:
+        nw = sw; nh = int(nw * H / W)
+        oy = (sh - nh) // 3
+        img = img.crop((0, oy, nw, oy + nh))
+    return img.resize((W, H), Image.LANCZOS)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 그라디언트 배경 (fallback)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_gradient(W: int, H: int, colors: list[tuple]) -> Image.Image:
-    """수직 그라디언트 배경 (2~3색)."""
     img  = Image.new("RGB", (W, H))
     d    = ImageDraw.Draw(img)
     n    = len(colors) - 1
@@ -169,58 +291,40 @@ def _make_gradient(W: int, H: int, colors: list[tuple]) -> Image.Image:
     return img
 
 
-def _load_bg_image(url: str) -> Image.Image | None:
-    if not url:
-        return None
-    try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible)"})
-        r.raise_for_status()
-        img = Image.open(BytesIO(r.content)).convert("RGB")
-        logger.info(f"배경 이미지 로드: {img.size}")
-        return img
-    except Exception as e:
-        logger.warning(f"배경 이미지 로드 실패: {e}")
-        return None
+# ═══════════════════════════════════════════════════════════════════════════════
+# 키워드 추출 (이미지 검색용)
+# ═══════════════════════════════════════════════════════════════════════════════
 
+def _extract_image_query(title: str, mode: str, content: dict) -> str:
+    """블로그 제목에서 이미지 검색 키워드 추출."""
+    keyword_map = {
+        "나스닥": "nasdaq stock market trading",
+        "S&P": "SP500 wall street finance",
+        "반도체": "semiconductor chip technology",
+        "빅테크": "big tech silicon valley",
+        "연준": "federal reserve bank economy",
+        "금리": "interest rate finance banking",
+        "AI": "artificial intelligence technology",
+        "엔비디아": "nvidia technology semiconductor",
+        "애플": "apple technology innovation",
+        "테슬라": "electric vehicle technology",
+        "유가": "oil energy market",
+        "급락": "stock market crash red",
+        "반등": "stock market recovery green",
+        "상승": "bull market stock exchange",
+        "하락": "bear market finance",
+        "고용": "employment jobs economy",
+        "인플레": "inflation economy money",
+        "FOMC": "federal reserve meeting economy",
+    }
 
-def _fetch_pexels_bg(query: str, W: int, H: int) -> Image.Image | None:
-    key = os.environ.get("PEXELS_API_KEY", "")
-    if not key:
-        return None
-    orient = "landscape" if W > H else "portrait"
-    try:
-        r = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": key},
-            params={"query": query, "per_page": 5, "orientation": orient},
-            timeout=12,
-        )
-        r.raise_for_status()
-        photos = r.json().get("photos", [])
-        if not photos:
-            return None
-        idx     = int(time.time() / 86400) % len(photos)
-        img_url = photos[idx]["src"]["large2x"]
-        ir      = requests.get(img_url, timeout=20)
-        ir.raise_for_status()
-        return Image.open(BytesIO(ir.content)).convert("RGB")
-    except Exception as e:
-        logger.warning(f"Pexels 썸네일 배경 실패 ({query}): {e}")
-        return None
+    for ko, en in keyword_map.items():
+        if ko in title:
+            return en
 
-
-def _crop_fit(img: Image.Image, W: int, H: int) -> Image.Image:
-    """비율 유지 중앙 크롭."""
-    sw, sh = img.size
-    if sw / sh > W / H:
-        nh = sh; nw = int(nh * W / H)
-        ox = (sw - nw) // 2
-        img = img.crop((ox, 0, ox + nw, nh))
-    else:
-        nw = sw; nh = int(nw * H / W)
-        oy = (sh - nh) // 3
-        img = img.crop((0, oy, nw, oy + nh))
-    return img.resize((W, H), Image.LANCZOS)
+    if mode == "morning":
+        return "wall street stock exchange morning finance"
+    return "stock market trading floor night city"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -238,402 +342,168 @@ def _extract_date(title: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 임팩트 카피 생성
+# 핵심 키워드 추출 (제목 오버레이용)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_copy(title: str, platform_post: str, thumbnail_copy: str,
-                platform: str) -> tuple[str, str]:
-    """
-    우선순위:
-    1. content_adapter의 thumbnail_copy (Gemini가 직접 생성)
-    2. 정규식으로 제목에서 수치/후킹 추출
-    3. 제목 앞부분 잘라내기
-    """
-    MAX = {"facebook": 9, "threads": 8, "instagram": 8,
-           "instagram_portrait": 8, "kakao": 10}
-    max_main = MAX.get(platform, 8)
+def _extract_headline(title: str, mode: str) -> tuple[str, str]:
+    """제목에서 헤드라인 키워드와 서브텍스트 추출."""
+    # 날짜 패턴 제거
+    clean = re.sub(r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", title)
+    clean = re.sub(r"\d{1,2}/\d{1,2}\s*", "", clean)
+    clean = re.sub(r"미국\s*증시\s*[:：]?\s*", "", clean)
+    clean = _strip_emoji(clean).strip()
 
-    # 1순위: thumbnail_copy
-    if thumbnail_copy:
-        parts = thumbnail_copy.strip().split("\n", 1)
-        main  = parts[0].strip()[:max_main]
-        sub   = parts[1].strip()[:22] if len(parts) > 1 else ""
-        if not sub and platform_post:
-            sub = platform_post.split("\n")[0].split("#")[0].strip()[:22]
-        return main, sub
+    # 숫자/수치 추출
+    num_m = re.search(r"[+-]?\d+(?:\.\d+)?%", clean)
 
-    # 2순위: 수치 패턴
-    num_m = re.search(r"[+-]?\d+(?:\.\d+)?%", title)
-    if num_m and len(num_m.group()) <= max_main:
-        main = num_m.group()
+    if mode == "evening":
+        sub = "오늘 밤 프리마켓"
     else:
-        # 날짜·"미국증시" 등 제거
-        clean = re.sub(r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", title)
-        clean = re.sub(r"미국\s*증시\s*[:：]?\s*", "", clean).strip()
-        # 물음표/느낌표 앞 핵심어
-        hook  = re.search(r"([가-힣a-zA-Z0-9 ]{3,12})[?!！？]", clean)
-        main  = hook.group(1).strip()[:max_main] if hook else clean[:max_main]
+        sub = "전일 마감 분석"
 
-    # 서브 카피
-    sub = ""
-    if platform_post:
-        sub = platform_post.split("\n")[0].split("#")[0].strip()[:22]
-    if not sub:
-        sub = title[len(main):][:22].strip(" :：-")
-
-    return main or title[:max_main], sub
+    if num_m:
+        return num_m.group(), clean[:22] if len(clean) > 4 else sub
+    elif len(clean) > 4:
+        # 훅 키워드 (물음표, 느낌표 앞)
+        hook = re.search(r"([가-힣a-zA-Z0-9 ]{3,12})[?!！？]", clean)
+        if hook:
+            return hook.group(1).strip()[:10], clean[:22]
+        return clean[:10], sub
+    return "증시 분석", sub
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 플랫폼별 렌더러
+# 이미지에 텍스트 오버레이 추가 (고품질)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _render_facebook(
-    bg: Image.Image | None,
-    title: str, main_copy: str, sub_copy: str,
-    date_str: str, mode: str,
+def _overlay_text_on_image(
+    img: Image.Image,
+    title: str,
+    mode: str,
+    platform: str,
+    date_str: str,
+    blog_url: str = "seedsup.tistory.com",
 ) -> Image.Image:
-    """1200×630 뉴스 카드. 하단 카드에 텍스트 집중."""
-    W, H   = 1200, 630
+    """
+    이미지 위에 블로그 제목 / 날짜 / URL을 오버레이.
+    이미지 하단 1/3에 반투명 그라디언트 + 텍스트.
+    """
+    W, H   = img.size
+    result = img.copy().convert("RGBA")
+    draw   = ImageDraw.Draw(result)
+
     accent = (37, 150, 255) if mode == "morning" else (140, 100, 220)
     hl     = (254, 211, 48)
 
-    if bg:
-        bg_r = _crop_fit(bg, W, H)
-        bg_r = bg_r.filter(ImageFilter.GaussianBlur(radius=5))
-        img  = Image.alpha_composite(
-            bg_r.convert("RGBA"),
-            Image.new("RGBA", (W, H), (*((6, 12, 35)), 170)),
-        ).convert("RGB")
-    else:
-        img = _make_gradient(W, H, [(6, 12, 35), (15, 30, 70), (6, 12, 35)])
-
-    draw = ImageDraw.Draw(img)
+    # 하단 그라디언트 오버레이 (텍스트 가독성)
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd   = ImageDraw.Draw(grad)
+    grad_start = int(H * 0.45)
+    for y in range(grad_start, H):
+        alpha = int(220 * ((y - grad_start) / (H - grad_start)) ** 0.7)
+        gd.line([(0, y), (W, y)], fill=(6, 10, 30, min(alpha, 225)))
+    result = Image.alpha_composite(result, grad)
+    draw   = ImageDraw.Draw(result)
 
     # 상단 컬러 바
-    draw.rectangle([(0, 0), (W, 10)], fill=accent)
+    draw.rectangle([(0, 0), (W, 8)], fill=(*accent, 255))
 
-    # 하단 카드
-    card_y = int(H * 0.38)
-    draw.rounded_rectangle([(30, card_y), (W - 30, H - 20)],
-                            radius=18, fill=(6, 12, 35, 220))
+    # 폰트
+    f_headline = _font(int(H * 0.07), "black")
+    f_sub      = _font(int(H * 0.038), "bold")
+    f_small    = _font(int(H * 0.028), "regular")
+    f_date     = _font(int(H * 0.032), "bold")
 
-    # 좌측 액센트 바
-    draw.rounded_rectangle([(42, card_y + 12), (50, H - 32)],
-                            radius=4, fill=(*accent, 230))
+    CX   = W // 2
+    WRAPW = int(W * 0.88)
 
-    CX = W // 2
-    WRAP_W = W - 160
+    # 날짜 뱃지 (상단 우측)
+    db  = draw.textbbox((0, 0), date_str, font=f_date)
+    dw  = db[2] - db[0] + 24
+    dh  = db[3] - db[1] + 14
+    draw.rounded_rectangle([(W - 20 - dw, 18), (W - 20, 18 + dh)],
+                            radius=dh // 2, fill=(*accent, 230))
+    draw.text((W - 20 - dw + 12, 18 + 7), date_str, font=f_date, fill=(255, 255, 255))
 
-    f_main = _font(int(90 * W / 1200), "black")
-    f_sub  = _font(int(42 * W / 1200), "bold")
-    f_tag  = _font(int(34 * W / 1200), "bold")
-    f_sm   = _font(int(26 * W / 1200), "regular")
+    # 모드 뱃지 (상단 좌측)
+    mode_txt = "마감 리뷰" if mode == "morning" else "프리마켓"
+    mb       = draw.textbbox((0, 0), mode_txt, font=f_date)
+    mw       = mb[2] - mb[0] + 24
+    mh       = mb[3] - mb[1] + 14
+    draw.rounded_rectangle([(20, 18), (20 + mw, 18 + mh)],
+                            radius=mh // 2, fill=(*hl, 230))
+    draw.text((32, 18 + 7), mode_txt, font=f_date, fill=(20, 20, 20))
 
-    # 날짜 뱃지
-    db   = draw.textbbox((0, 0), date_str, font=f_tag)
-    dw   = db[2] - db[0] + 30
-    dh   = db[3] - db[1] + 18
-    draw.rounded_rectangle([(W - 60 - dw, card_y + 18), (W - 30, card_y + 18 + dh)],
-                            radius=dh // 2, fill=(*accent, 240))
-    draw.text((W - 45 - (db[2] - db[0]), card_y + 27), date_str,
-              font=f_tag, fill=(255, 255, 255))
+    # 제목 (하단 영역)
+    title_clean = _strip_emoji(title)
+    # 날짜 제거
+    title_clean = re.sub(r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", title_clean)
+    title_clean = re.sub(r"미국\s*증시\s*[:：]?\s*", "", title_clean).strip()
 
-    y = card_y + 30
-
-    # 메인 카피
-    has_num = bool(re.search(r"[+-]?\d", main_copy))
-    mc_col  = (*hl, 255) if has_num else (255, 255, 255, 255)
-    lines   = _pixel_wrap(main_copy, f_main, WRAP_W, max_lines=2)
+    text_y = int(H * 0.52)
+    lines  = _pixel_wrap(title_clean, f_headline, WRAPW, max_lines=3)
     for line in lines:
-        h = _center_text(draw, CX, y, line, f_main, mc_col[:3], ow=4)
-        y += h + 8
+        h = _center_text(draw, CX, text_y, line, f_headline, (255, 255, 255), ow=4)
+        text_y += h + 6
 
     # 구분선
-    draw.rectangle([(120, y + 10), (W - 120, y + 14)], fill=(*accent, 160))
-    y += 30
-
-    # 서브 카피 (수치 강조)
-    sc_lines = _pixel_wrap(sub_copy, f_sub, WRAP_W, max_lines=2)
-    for line in sc_lines:
-        segs = _num_segs(line)
-        total_w = sum(draw.textbbox((0, 0), s, font=f_sub)[2] for s, _ in segs)
-        xc = CX - total_w // 2
-        max_h = 0
-        for st, is_hl in segs:
-            c  = (*hl, 255) if is_hl else (200, 215, 235, 230)
-            bb = draw.textbbox((0, 0), st, font=f_sub)
-            sw = bb[2] - bb[0]
-            sh = bb[3] - bb[1]
-            _outlined(draw, (xc, y), st, f_sub, c[:3], ow=2)
-            xc   += sw
-            max_h = max(max_h, sh)
-        y += max_h + 6
+    draw.rectangle([(int(W * 0.1), text_y + 8), (int(W * 0.9), text_y + 11)],
+                   fill=(*accent, 160))
+    text_y += 20
 
     # URL
-    wm  = "seedsup.tistory.com"
-    wbb = draw.textbbox((0, 0), wm, font=f_sm)
-    draw.text((CX - (wbb[2] - wbb[0]) // 2, H - 50), wm,
-              font=f_sm, fill=(*accent, 160))
+    wbb = draw.textbbox((0, 0), blog_url, font=f_small)
+    draw.text((CX - (wbb[2] - wbb[0]) // 2, text_y + 4),
+              blog_url, font=f_small, fill=(*accent, 200))
 
-    return img
+    return result.convert("RGB")
 
 
-def _render_threads(
-    bg: Image.Image | None,
-    title: str, main_copy: str, sub_copy: str,
-    date_str: str, mode: str,
+# ═══════════════════════════════════════════════════════════════════════════════
+# 플랫폼별 썸네일 생성
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_platform_size(platform: str) -> tuple[int, int]:
+    sizes = {
+        "facebook":           (1200, 630),
+        "threads":            (1080, 1080),
+        "instagram":          (1080, 1080),
+        "instagram_portrait": (1080, 1350),
+        "kakao":              (1200, 630),
+    }
+    return sizes.get(platform, (1200, 630))
+
+
+def _build_thumbnail(
+    bg_image: Image.Image | None,
+    title: str,
+    mode: str,
+    platform: str,
+    date_str: str,
+    blog_url: str,
 ) -> Image.Image:
-    """1080×1080 미니멀 흑백. 텍스트 중심."""
-    W, H   = 1080, 1080
-    accent = (255, 255, 255)
-    hl     = (254, 211, 48)
+    """
+    배경 이미지 + 텍스트 오버레이로 고품질 썸네일 생성.
+    배경 없을 시 그라디언트로 대체.
+    """
+    W, H = _get_platform_size(platform)
 
-    if bg:
-        bg_r = _crop_fit(bg, W, H)
-        # 흑백 처리
-        bg_r = bg_r.convert("L").convert("RGB")
-        bg_r = bg_r.filter(ImageFilter.GaussianBlur(radius=7))
-        img  = Image.alpha_composite(
-            bg_r.convert("RGBA"),
-            Image.new("RGBA", (W, H), (4, 4, 8, 210)),
-        ).convert("RGB")
+    accent = (37, 150, 255) if mode == "morning" else (140, 100, 220)
+
+    if bg_image:
+        img = _crop_fit(bg_image.copy(), W, H)
+        # 색감 약간 보정 (선명도 향상)
+        img = ImageEnhance.Contrast(img).enhance(1.1)
+        img = ImageEnhance.Saturation(img).enhance(1.15)
     else:
-        img = _make_gradient(W, H, [(4, 4, 8), (20, 20, 35), (4, 4, 8)])
+        if mode == "morning":
+            img = _make_gradient(W, H, [(6, 20, 60), (15, 50, 110), (6, 20, 60)])
+        else:
+            img = _make_gradient(W, H, [(20, 5, 55), (50, 15, 100), (20, 5, 55)])
 
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (W, 10)], fill=accent)
-
-    CX     = W // 2
-    WRAP_W = W - 160
-
-    f_main = _font(int(100), "black")
-    f_sub  = _font(int(48), "bold")
-    f_tag  = _font(int(36), "bold")
-    f_sm   = _font(int(28), "regular")
-
-    # 날짜 뱃지
-    db  = draw.textbbox((0, 0), date_str, font=f_tag)
-    dw  = db[2] - db[0] + 30
-    dh  = db[3] - db[1] + 18
-    draw.rounded_rectangle([(CX - dw // 2, 30), (CX + dw // 2, 30 + dh)],
-                            radius=dh // 2, fill=(255, 255, 255, 230))
-    draw.text((CX - (db[2] - db[0]) // 2, 39), date_str,
-              font=f_tag, fill=(4, 4, 8))
-
-    # 중앙 카드
-    card_h = int(H * 0.58)
-    card_y = (H - card_h) // 2
-    draw.rounded_rectangle([(40, card_y), (W - 40, card_y + card_h)],
-                            radius=36, fill=(255, 255, 255, 18))
-
-    y = card_y + 50
-
-    has_num = bool(re.search(r"[+-]?\d", main_copy))
-    mc_col  = (*hl, 255) if has_num else (255, 255, 255, 255)
-    lines   = _pixel_wrap(main_copy, f_main, WRAP_W, max_lines=2)
-    for line in lines:
-        h = _center_text(draw, CX, y, line, f_main, mc_col[:3], ow=5)
-        y += h + 10
-
-    draw.rectangle([(120, y + 12), (W - 120, y + 16)], fill=(255, 255, 255, 150))
-    y += 40
-
-    sc_lines = _pixel_wrap(sub_copy, f_sub, WRAP_W, max_lines=2)
-    for line in sc_lines:
-        h = _center_text(draw, CX, y, line, f_sub, (180, 180, 195), ow=2)
-        y += h + 8
-
-    wm  = "seedsup.tistory.com"
-    wbb = draw.textbbox((0, 0), wm, font=f_sm)
-    draw.text((CX - (wbb[2] - wbb[0]) // 2, H - 55), wm,
-              font=f_sm, fill=(160, 160, 175, 180))
-
-    return img
-
-
-def _render_instagram(
-    bg: Image.Image | None,
-    title: str, main_copy: str, sub_copy: str,
-    date_str: str, mode: str, W: int = 1080, H: int = 1080,
-) -> Image.Image:
-    """Instagram 스퀘어/세로. 퍼플-핑크 그라디언트 강조."""
-    accent = (192, 132, 252) if mode == "morning" else (167, 100, 240)
-    hl     = (254, 211, 48)
-    pink   = (244, 63, 94)
-
-    if bg:
-        bg_r = _crop_fit(bg, W, H)
-        bg_r = bg_r.filter(ImageFilter.GaussianBlur(radius=6))
-        img  = Image.alpha_composite(
-            bg_r.convert("RGBA"),
-            Image.new("RGBA", (W, H), (12, 5, 30, 185)),
-        ).convert("RGB")
-    else:
-        img = _make_gradient(W, H, [(12, 5, 30), (30, 10, 60), (15, 5, 40)])
-
-    draw = ImageDraw.Draw(img)
-
-    # 그라디언트 상단 바 (퍼플→핑크)
-    for px in range(W):
-        t = px / W
-        r = int(accent[0] * (1 - t) + pink[0] * t)
-        g = int(accent[1] * (1 - t) + pink[1] * t)
-        b = int(accent[2] * (1 - t) + pink[2] * t)
-        draw.line([(px, 0), (px, 12)], fill=(r, g, b))
-
-    CX     = W // 2
-    WRAP_W = W - 140
-
-    f_main = _font(int(100 * W / 1080), "black")
-    f_sub  = _font(int(48 * W / 1080), "bold")
-    f_tag  = _font(int(36 * W / 1080), "bold")
-    f_sm   = _font(int(28 * W / 1080), "regular")
-
-    # 날짜 뱃지
-    db  = draw.textbbox((0, 0), date_str, font=f_tag)
-    dw  = db[2] - db[0] + 30
-    dh  = db[3] - db[1] + 18
-    draw.rounded_rectangle([(CX - dw // 2, 30), (CX + dw // 2, 30 + dh)],
-                            radius=dh // 2, fill=(*accent, 230))
-    draw.text((CX - (db[2] - db[0]) // 2, 39), date_str,
-              font=f_tag, fill=(12, 5, 30))
-
-    # 중앙 카드
-    card_h = int(H * 0.60)
-    card_y = (H - card_h) // 2
-    draw.rounded_rectangle([(35, card_y), (W - 35, card_y + card_h)],
-                            radius=36, fill=(18, 8, 50, 210))
-
-    # 좌측 그라디언트 액센트 바
-    for py in range(card_y + 20, card_y + card_h - 20):
-        t = (py - card_y) / card_h
-        r = int(accent[0] * (1 - t) + pink[0] * t)
-        g = int(accent[1] * (1 - t) + pink[1] * t)
-        b = int(accent[2] * (1 - t) + pink[2] * t)
-        draw.line([(48, py), (58, py)], fill=(r, g, b, 230))
-
-    y = card_y + 40
-
-    has_num = bool(re.search(r"[+-]?\d", main_copy))
-    mc_col  = (*hl, 255) if has_num else (255, 255, 255, 255)
-    lines   = _pixel_wrap(main_copy, f_main, WRAP_W, max_lines=2)
-    for line in lines:
-        h = _center_text(draw, CX, y, line, f_main, mc_col[:3], ow=5)
-        y += h + 10
-
-    draw.rectangle([(120, y + 14), (W - 120, y + 18)], fill=(*accent, 160))
-    y += 40
-
-    sc_lines = _pixel_wrap(sub_copy, f_sub, WRAP_W, max_lines=2)
-    for line in sc_lines:
-        segs    = _num_segs(line)
-        total_w = sum(draw.textbbox((0, 0), s, font=f_sub)[2] for s, _ in segs)
-        xc = CX - total_w // 2
-        max_h = 0
-        for st, is_hl in segs:
-            c   = (*hl, 255) if is_hl else (216, 180, 254, 230)
-            bb  = draw.textbbox((0, 0), st, font=f_sub)
-            sw  = bb[2] - bb[0]
-            sh  = bb[3] - bb[1]
-            _outlined(draw, (xc, y), st, f_sub, c[:3], ow=2)
-            xc   += sw
-            max_h = max(max_h, sh)
-        y += max_h + 8
-
-    wm  = "seedsup.tistory.com"
-    wbb = draw.textbbox((0, 0), wm, font=f_sm)
-    draw.text((CX - (wbb[2] - wbb[0]) // 2, H - 55), wm,
-              font=f_sm, fill=(*accent, 160))
-
-    return img
-
-
-def _render_kakao(
-    bg: Image.Image | None,
-    title: str, main_copy: str, sub_copy: str,
-    date_str: str, mode: str,
-) -> Image.Image:
-    """1200×630 카카오 옐로우. 따뜻하고 친근한 톤."""
-    W, H   = 1200, 630
-    yellow = (254, 229, 0)
-    dark   = (22, 14, 2)
-
-    if bg:
-        bg_r = _crop_fit(bg, W, H)
-        # 웜 틴트
-        warm = Image.new("RGB", (W, H), (255, 180, 50))
-        bg_r = Image.blend(bg_r.convert("RGB"), warm, 0.2)
-        bg_r = bg_r.filter(ImageFilter.GaussianBlur(radius=5))
-        img  = Image.alpha_composite(
-            bg_r.convert("RGBA"),
-            Image.new("RGBA", (W, H), (28, 18, 2, 175)),
-        ).convert("RGB")
-    else:
-        img = _make_gradient(W, H, [(28, 18, 2), (55, 35, 5), (28, 18, 2)])
-
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (W, 10)], fill=yellow)
-
-    CX     = W // 2
-    WRAP_W = W - 160
-
-    f_main = _font(int(90 * W / 1200), "black")
-    f_sub  = _font(int(42 * W / 1200), "bold")
-    f_tag  = _font(int(34 * W / 1200), "bold")
-    f_sm   = _font(int(26 * W / 1200), "regular")
-
-    # 날짜 뱃지
-    db  = draw.textbbox((0, 0), date_str, font=f_tag)
-    dw  = db[2] - db[0] + 30
-    dh  = db[3] - db[1] + 18
-    draw.rounded_rectangle([(W - 60 - dw, 20), (W - 30, 20 + dh)],
-                            radius=dh // 2, fill=(*yellow, 240))
-    draw.text((W - 45 - (db[2] - db[0]), 29), date_str,
-              font=f_tag, fill=dark)
-
-    # 중앙 카드
-    card_h = int(H * 0.72)
-    card_y = (H - card_h) // 2
-    draw.rounded_rectangle([(25, card_y), (W - 25, card_y + card_h)],
-                            radius=28, fill=(22, 14, 2, 215))
-    draw.rounded_rectangle([(37, card_y + 12), (45, card_y + card_h - 12)],
-                            radius=4, fill=(*yellow, 230))
-
-    y = card_y + 30
-
-    has_num = bool(re.search(r"[+-]?\d", main_copy))
-    mc_col  = (*yellow, 255) if has_num else (255, 255, 255, 255)
-    lines   = _pixel_wrap(main_copy, f_main, WRAP_W, max_lines=2)
-    for line in lines:
-        h = _center_text(draw, CX, y, line, f_main, mc_col[:3], ow=4)
-        y += h + 8
-
-    draw.rectangle([(120, y + 10), (W - 120, y + 14)], fill=(*yellow, 160))
-    y += 30
-
-    sc_lines = _pixel_wrap(sub_copy, f_sub, WRAP_W, max_lines=2)
-    for line in sc_lines:
-        segs    = _num_segs(line)
-        total_w = sum(draw.textbbox((0, 0), s, font=f_sub)[2] for s, _ in segs)
-        xc  = CX - total_w // 2
-        max_h = 0
-        for st, is_hl in segs:
-            c   = (*yellow, 255) if is_hl else (255, 230, 150, 230)
-            bb  = draw.textbbox((0, 0), st, font=f_sub)
-            sw  = bb[2] - bb[0]
-            sh  = bb[3] - bb[1]
-            _outlined(draw, (xc, y), st, f_sub, c[:3], ow=2)
-            xc   += sw
-            max_h = max(max_h, sh)
-        y += max_h + 6
-
-    wm  = "📊 카카오 스토리채널 | seedsup.tistory.com"
-    wbb = draw.textbbox((0, 0), wm, font=f_sm)
-    draw.text((CX - (wbb[2] - wbb[0]) // 2, H - 48), wm,
-              font=f_sm, fill=(*yellow, 160))
-
-    return img
+    # 텍스트 오버레이
+    result = _overlay_text_on_image(img, title, mode, platform, date_str, blog_url)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -642,8 +512,71 @@ def _render_kakao(
 
 class SNSThumbnailGenerator:
     def __init__(self, hf_token: str = "", output_dir: str = OUTPUT_DIR):
-        self.output_dir = output_dir
+        self.output_dir  = output_dir
+        self.hf_token    = hf_token
+        self.gemini_key  = os.environ.get("GEMINI_API_KEY", "")
+        self.pexels_key  = os.environ.get("PEXELS_API_KEY", "")
+        self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
+
+    def _acquire_base_image(
+        self,
+        title: str,
+        mode: str,
+        thumbnail_url: str,
+        content: dict,
+        W: int,
+        H: int,
+    ) -> Image.Image | None:
+        """
+        우선순위에 따라 배경 이미지 취득:
+        1. Gemini Imagen (카툰 스타일 생성)
+        2. 티스토리 썸네일
+        3. Pexels
+        4. Pixabay
+        5. Unsplash Source
+        6. None (그라디언트 fallback)
+        """
+        # 1. Gemini Imagen
+        if self.gemini_key:
+            img_prompt = content.get("thumbnail_prompt", "")
+            if not img_prompt:
+                img_prompt = _extract_image_query(title, mode, content)
+            cartoon_img = _generate_with_gemini_imagen(img_prompt, self.gemini_key)
+            if cartoon_img:
+                return cartoon_img
+
+        # 2. 티스토리 썸네일
+        if thumbnail_url:
+            try:
+                r = requests.get(thumbnail_url, timeout=15,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                if len(r.content) > 10000:
+                    img = Image.open(BytesIO(r.content)).convert("RGB")
+                    logger.info("티스토리 썸네일 사용")
+                    return img
+            except Exception as e:
+                logger.warning(f"티스토리 썸네일 실패: {e}")
+
+        # 3. Pexels
+        query = _extract_image_query(title, mode, content)
+        img   = _fetch_pexels_image(query, W, H, self.pexels_key)
+        if img:
+            return img
+
+        # 4. Pixabay
+        img = _fetch_pixabay_image(query, W, H, self.pixabay_key)
+        if img:
+            return img
+
+        # 5. Unsplash Source (무료, API 키 불필요)
+        img = _fetch_unsplash_image(query, W, H, mode)
+        if img:
+            return img
+
+        logger.warning("모든 이미지 소스 실패 → 그라디언트 사용")
+        return None
 
     def generate_all(
         self,
@@ -656,54 +589,29 @@ class SNSThumbnailGenerator:
     ) -> dict[str, str]:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        content = content or {}
+        content  = content or {}
+        date_str = _extract_date(title)
 
-        date_str       = _extract_date(title)
-        thumbnail_copy = content.get("thumbnail_copy", "")
-
-        # 배경 이미지 로드 (티스토리 → Pexels → None → 그라디언트)
-        bg_img = _load_bg_image(thumbnail_url)
-        if not bg_img:
-            pexels_q = "finance stock market" if mode == "morning" else "city night finance"
-            bg_img   = _fetch_pexels_bg(pexels_q, 1200, 630)
-
-        platform_map = {
-            "facebook":           "facebook_post",
-            "threads":            "threads_post",
-            "instagram":          "instagram_post",
-            "instagram_portrait": "instagram_post",
-            "kakao":              "kakao_post",
-        }
-
+        platform_list = ["facebook", "threads", "instagram", "instagram_portrait", "kakao"]
         paths: dict[str, str] = {}
 
-        for platform, post_key in platform_map.items():
+        for platform in platform_list:
             try:
                 logger.info(f"[{platform}] 썸네일 생성 중...")
-                ppost    = content.get(post_key, "")
-                main_c, sub_c = _build_copy(title, ppost, thumbnail_copy, platform)
-                logger.info(f"  메인: '{main_c}' / 서브: '{sub_c[:20]}'")
+                W, H = _get_platform_size(platform)
 
-                if platform == "facebook":
-                    img = _render_facebook(bg_img, title, main_c, sub_c, date_str, mode)
-                elif platform == "threads":
-                    img = _render_threads(bg_img, title, main_c, sub_c, date_str, mode)
-                elif platform == "instagram":
-                    img = _render_instagram(bg_img, title, main_c, sub_c, date_str, mode,
-                                            1080, 1080)
-                elif platform == "instagram_portrait":
-                    img = _render_instagram(bg_img, title, main_c, sub_c, date_str, mode,
-                                            1080, 1350)
-                elif platform == "kakao":
-                    img = _render_kakao(bg_img, title, main_c, sub_c, date_str, mode)
-                else:
-                    continue
+                # 배경 이미지 취득
+                bg_img = self._acquire_base_image(title, mode, thumbnail_url, content, W, H)
 
+                # 썸네일 생성
+                img = _build_thumbnail(bg_img, title, mode, platform, date_str, blog_url)
+
+                # 저장
                 filename = f"thumb_{platform}_{mode}_{timestamp}.jpg"
                 path     = os.path.join(self.output_dir, filename)
                 img.save(path, "JPEG", quality=95, optimize=True)
                 paths[platform] = path
-                logger.info(f"  → 저장: {path}")
+                logger.info(f"  → 저장: {path} ({img.size})")
 
             except Exception as e:
                 logger.error(f"[{platform}] 썸네일 생성 실패: {e}", exc_info=True)
