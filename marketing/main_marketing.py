@@ -1,46 +1,18 @@
 """
-마케팅 자동화 메인 스크립트 v4
-변경사항:
-  - X(Twitter) 완전 제거
-  - 카카오 메일만 발송 (카카오 텍스트 + 썸네일 + 숏폼 영상)
-  - Threads [블로그 URL] 플레이스홀더 자동 치환
+마케팅 자동화 메인 스크립트 v5
+변경사항 v5:
+  - VideoGenerator에 blog_content, blog_title 전달 (나래이션 기반 영상 생성)
+  - 기타 기존 로직 동일 유지
 
 실행 흐름:
   1. Gist에서 처리 완료 내역 로드 → 중복 방지
   2. 티스토리 RSS 폴링 → 새 글 감지
   3. 이미 처리된 글이면 즉시 종료
   4. Gemini로 플랫폼별 콘텐츠 생성
-  5. 영상 제작 (YouTube Shorts)
-  6. SNS 썸네일 제작 (Gemini Imagen 또는 무료 이미지 소스)
+  5. 영상 제작 (블로그 본문 기반 나래이션 숏폼)
+  6. SNS 썸네일 제작
   7. 각 플랫폼 자동 발행
   8. 처리 완료 내역을 Gist에 저장
-
-환경변수 (GitHub Secrets):
-  # 자동 제공
-  GITHUB_TOKEN
-
-  # 최초 실행 후 저장 권장
-  GIST_ID
-
-  # 필수
-  GEMINI_API_KEY
-
-  # YouTube
-  YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN
-
-  # SNS (무료)
-  FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN
-  THREADS_USER_ID, THREADS_ACCESS_TOKEN
-  THREADS_IMAGE_URL  (선택: Threads 이미지 게시용 공개 URL)
-  INSTAGRAM_ACCOUNT_ID, INSTAGRAM_ACCESS_TOKEN
-
-  # 카카오 메일 발송
-  GMAIL_ADDRESS, GMAIL_APP_PASSWORD, RECIPIENT_EMAIL
-
-  # 이미지 소스 (선택, 모두 무료)
-  PEXELS_API_KEY      (무료 가입)
-  PIXABAY_API_KEY     (무료 가입)
-  # Unsplash Source는 API 키 불필요 (자동 사용)
 """
 
 import os
@@ -72,7 +44,7 @@ KST = timezone(timedelta(hours=9))
 def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
     thumb_prompt = content.get("thumbnail_prompt", "")
     if thumb_prompt:
-        words = re.findall(r"[a-zA-Z]+", thumb_prompt)
+        words         = re.findall(r"[a-zA-Z]+", thumb_prompt)
         english_words = [w for w in words if len(w) > 3][:5]
         if english_words:
             return english_words
@@ -109,8 +81,8 @@ def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
 # ── 메인 ──────────────────────────────────────────────────────────────────
 
 def main():
-    force   = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
-    now_kst = datetime.now(KST)
+    force     = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
+    now_kst   = datetime.now(KST)
     timestamp = now_kst.strftime("%Y%m%d_%H%M")
 
     logger.info("=" * 60)
@@ -138,10 +110,13 @@ def main():
     post_id    = post.get("post_id", "")
     post_title = post.get("title", "")
     post_url   = post.get("url", "")
+    # 블로그 본문 (나래이션 생성에 사용)
+    blog_content = post.get("full_text", "") or post.get("summary", "")
 
     logger.info(f"  → 최신 글: {post_title}")
     logger.info(f"  → post_id: {post_id}")
     logger.info(f"  → URL: {post_url}")
+    logger.info(f"  → 본문 길이: {len(blog_content)}자")
 
     # ── Gist 중복 체크 ────────────────────────────────────────────────────
     if not force and state.is_already_processed(post_id):
@@ -166,7 +141,7 @@ def main():
         adapter = ContentAdapter(api_key=os.environ["GEMINI_API_KEY"])
         content = adapter.generate_all(post)
         content["blog_thumbnail_url"] = post.get("thumbnail_url", "")
-        logger.info(f"  → 플랫폼별 텍스트 생성 완료")
+        logger.info("  → 플랫폼별 텍스트 생성 완료")
         state.add_log("CONTENT_GENERATED", "Gemini 콘텐츠 생성 완료", post_id=post_id)
     except Exception as e:
         msg = f"Gemini 콘텐츠 생성 실패: {e}"
@@ -181,19 +156,21 @@ def main():
     bg_keywords = _extract_bg_keywords(post, content)
     logger.info(f"  → 배경 이미지 키워드: {bg_keywords}")
 
-    # ── 3. 영상 생성 ──────────────────────────────────────────────────────
-    logger.info("[3/5] 영상 생성 중... (배경 이미지 + TTS + BGM)")
+    # ── 3. 영상 생성 (블로그 본문 기반 나래이션) ─────────────────────────
+    logger.info("[3/5] 영상 생성 중... (본문 기반 나래이션 + TTS, BGM 없음)")
     video_path = None
     try:
-        video_gen     = VideoGenerator(output_dir="videos")
+        video_gen      = VideoGenerator(output_dir="videos")
         video_filename = f"shorts_{post['mode']}_{timestamp}.mp4"
-        video_path    = video_gen.generate_with_text_only_fallback(
+        video_path     = video_gen.generate_with_text_only_fallback(
             script=content.get("youtube_script", []),
             mode=post["mode"],
             filename=video_filename,
             thumbnail_url=post.get("thumbnail_url", ""),
             blog_url=post.get("url", ""),
             bg_keywords=bg_keywords,
+            blog_content=blog_content,      # ← 블로그 본문 전달 (나래이션용)
+            blog_title=post_title,           # ← 블로그 제목 전달
         )
         logger.info(f"  → 영상 저장: {video_path}")
         state.add_log("VIDEO_GENERATED", f"영상 생성 완료: {video_path}", post_id=post_id)
