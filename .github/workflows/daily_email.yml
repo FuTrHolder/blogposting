@@ -1,33 +1,27 @@
 name: 미국 증시 블로그 원고 이메일 발송
 
 on:
-  # ── 오전 9시 KST (UTC 00:00) : 미국 전일 마감 리뷰 ──────────────────────
   schedule:
-  #  - cron: "0 0 * * 2-6"   # 화~토 (월~금 미국 증시 마감 다음날 오전)
-  #  - cron: "0 12 * * 1-5"  # 월~금 (저녁 9시 KST = UTC 12:00)
+    - cron: "0 0 * * 2-6"   # 화~토 오전 9시 KST (UTC 00:00) - 전일 마감 리뷰
+    - cron: "0 12 * * 1-5"  # 월~금 저녁 9시 KST (UTC 12:00) - 프리마켓 & 이슈
 
-  # 수동 실행 (테스트용 - 모드 선택 가능)
   workflow_dispatch:
     inputs:
       post_mode:
         description: "포스팅 모드 (morning=전일 마감리뷰 / evening=프리마켓&이슈)"
         required: false
-        default: ""
+        default: "morning"
         type: choice
         options:
-          - ""
           - morning
           - evening
 
 jobs:
-  # ── 오전 9시 포스팅 : 전일 마감 리뷰 ────────────────────────────────────
   morning-post:
     name: "📊 오전 포스팅 (전일 마감 리뷰)"
-    # UTC 00:00 cron 또는 수동 실행(morning 선택)일 때만 동작
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == '')
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning')
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -58,10 +52,8 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python main.py
 
-  # ── 저녁 9시 포스팅 : 프리마켓 & 이슈 ───────────────────────────────────
   evening-post:
     name: "🌙 저녁 포스팅 (프리마켓 & 당일 이슈)"
-    # UTC 12:00 cron 또는 수동 실행(evening 선택)일 때만 동작
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'evening')
