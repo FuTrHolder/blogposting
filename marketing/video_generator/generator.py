@@ -191,8 +191,10 @@ def generate_narration_script(blog_content: str, title: str, mode: str, api_key:
                 return segs
 
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                time.sleep(30 * attempt)
+            if e.code in (429, 500, 502, 503, 504):
+                wait = (30 if e.code == 429 else 10) * (2 ** (attempt - 1))
+                logger.warning(f"Gemini 나래이션 API {e.code} — {wait}초 후 재시도...")
+                time.sleep(wait)
             else:
                 logger.warning(f"Gemini 나래이션 API 오류 {e.code}")
                 break
@@ -334,20 +336,43 @@ async def _tts_async(text: str, path: str):
     await comm.save(path)
 
 
-def _generate_tts(text: str, path: str) -> bool:
-    """TTS 생성. 반드시 음성 파일이 생성되어야 함."""
-    try:
-        asyncio.run(_tts_async(text, path))
-        exists = Path(path).exists() and Path(path).stat().st_size > 1000
-        if not exists:
-            logger.error(f"TTS 파일 생성 실패: {path}")
-        return exists
-    except ImportError:
-        logger.error("edge-tts 미설치 — pip install edge-tts 필요")
+def _sanitize_tts_text(text: str) -> str:
+    """TTS 전달 전 텍스트 정제: 이모지 제거, 특수문자 정리, 최소 길이 보장."""
+    text = _strip_emoji(text).strip()
+    # 괄호류 제거 (TTS 오류 유발 가능)
+    text = re.sub(r"[<>【】\[\]『』「」]", "", text)
+    # 연속 공백 정리
+    text = re.sub(r"\s+", " ", text).strip()
+    # 최소 10자 미만이면 패딩 (TTS가 너무 짧은 텍스트를 거부함)
+    if len(text) < 10:
+        text = text + ". 자세한 내용은 블로그를 확인해주세요."
+    return text
+
+
+def _generate_tts(text: str, path: str, max_retries: int = 3) -> bool:
+    """TTS 생성. 실패 시 최대 max_retries회 재시도."""
+    clean = _sanitize_tts_text(text)
+    if not clean:
+        logger.error("TTS 텍스트가 비어있음")
         return False
-    except Exception as e:
-        logger.error(f"TTS 생성 오류: {e}")
-        return False
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            asyncio.run(_tts_async(clean, path))
+            if Path(path).exists() and Path(path).stat().st_size > 1000:
+                return True
+            logger.warning(f"TTS 파일 크기 불충분 (시도 {attempt}/{max_retries})")
+        except ImportError:
+            logger.error("edge-tts 미설치 — pip install edge-tts 필요")
+            return False
+        except Exception as e:
+            logger.warning(f"TTS 생성 오류 (시도 {attempt}/{max_retries}): {e}")
+
+        if attempt < max_retries:
+            time.sleep(2 * attempt)
+
+    logger.error(f"TTS 최대 재시도 초과: {clean[:30]}...")
+    return False
 
 
 def _audio_duration(path: str) -> float:
@@ -788,9 +813,11 @@ class VideoGenerator:
 
                 if tts_ok:
                     tts_dur = _audio_duration(tts_path)
+                    if tts_dur < 0.5:   # ffprobe가 0을 반환하는 경우 방어
+                        tts_dur = 4.0
                 else:
-                    tts_dur = 4.0  # fallback 길이
-                    logger.warning(f"슬라이드 {i} TTS 실패 — {tts_dur}초로 대체")
+                    tts_dur = 5.0  # fallback: TTS 실패 시 기본 5초 (4초에서 상향)
+                    logger.warning(f"슬라이드 {i} TTS 실패 — {tts_dur}초 무음으로 대체")
 
                 # 59초 초과 방지
                 remaining = MAX_VIDEO_SEC - current_time
