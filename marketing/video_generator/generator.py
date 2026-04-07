@@ -121,7 +121,7 @@ def _strip_emoji(text: str) -> str:
 # Gemini API: 나래이션 스크립트 생성
 # ═══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL   = "gemini-2.5-flash-lite"
+GEMINI_MODEL   = "gemini-2.5-flash"
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
