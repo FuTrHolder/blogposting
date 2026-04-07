@@ -77,6 +77,9 @@ class ContentAdapter:
             },
         }
 
+        # 재시도 가능한 HTTP 상태코드 (일시적 서버 장애)
+        RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
         for attempt in range(1, max_retries + 1):
             try:
                 resp = requests.post(url, json=payload, timeout=60)
@@ -98,15 +101,38 @@ class ContentAdapter:
                 return json.loads(raw)
 
             except requests.exceptions.HTTPError as e:
-                if resp.status_code == 429:
-                    wait = 30 * attempt
-                    logger.warning(f"Gemini 한도 초과. {wait}초 대기...")
+                status = resp.status_code
+                if status in RETRYABLE_STATUS:
+                    # 지수 백오프: 429는 30s 기준, 나머지는 10s 기준
+                    base = 30 if status == 429 else 10
+                    wait = base * (2 ** (attempt - 1))  # 10s → 20s → 40s
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Gemini API {status} 오류 (시도 {attempt}/{max_retries}). "
+                            f"{wait}초 후 재시도..."
+                        )
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"Gemini API {status} 오류: 최대 재시도 초과")
+                        raise
+                else:
+                    # 400, 401, 403 등 재시도 불가 오류는 즉시 실패
+                    logger.error(f"Gemini API 오류 ({status}): {e}")
+                    raise
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                wait = 10 * (2 ** (attempt - 1))
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Gemini 네트워크 오류 (시도 {attempt}/{max_retries}). "
+                        f"{wait}초 후 재시도... ({e})"
+                    )
                     time.sleep(wait)
                 else:
-                    logger.error(f"Gemini API 오류: {e}")
+                    logger.error(f"Gemini 네트워크 오류: 최대 재시도 초과")
                     raise
             except Exception as e:
-                logger.warning(f"Gemini 호출 실패 (시도 {attempt}): {e}")
+                logger.warning(f"Gemini 호출 실패 (시도 {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     time.sleep(10)
                 else:
