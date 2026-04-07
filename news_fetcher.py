@@ -24,6 +24,12 @@ INDEX_SYMBOLS = {
     "DOW JONES": "^DJI",
 }
 
+# Fear & Greed 엔드포인트 (순서대로 시도)
+_FEAR_GREED_URLS = [
+    "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+    "https://fear-and-greed-index.p.rapidapi.com/v1/fgi",  # 비공식 미러 (헤더 없으면 실패 → skip)
+]
+
 
 class NewsFetcher:
     def __init__(self, alpha_vantage_key: str):
@@ -98,7 +104,6 @@ class NewsFetcher:
             if data:
                 summary[name] = data
 
-        # Fear & Greed 지수 (대안: CNN API)
         summary["fear_greed"] = self._fetch_fear_greed()
         return summary
 
@@ -129,14 +134,53 @@ class NewsFetcher:
             return None
 
     def _fetch_fear_greed(self) -> dict:
-        """CNN Fear & Greed 지수를 가져옵니다 (비공식 API)."""
-        try:
-            url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-            resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-            data = resp.json()
-            score = data["fear_and_greed"]["score"]
-            rating = data["fear_and_greed"]["rating"]
-            return {"score": round(score), "rating": rating}
-        except Exception as e:
-            logger.warning(f"Fear & Greed 지수 조회 실패: {e}")
-            return {"score": None, "rating": "N/A"}
+        """
+        CNN Fear & Greed 지수를 가져옵니다.
+        - 응답이 비어 있거나 파싱 실패해도 {"score": None, "rating": "N/A"} 반환
+        - 여러 User-Agent로 재시도
+        """
+        headers_list = [
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://edition.cnn.com/markets/fear-and-greed",
+            },
+            {"User-Agent": "Mozilla/5.0"},
+        ]
+
+        url = _FEAR_GREED_URLS[0]
+        for headers in headers_list:
+            try:
+                resp = requests.get(url, timeout=10, headers=headers)
+
+                # 빈 응답 방어
+                if not resp.content or resp.status_code != 200:
+                    logger.warning(
+                        f"Fear & Greed 응답 불량 (status={resp.status_code}, "
+                        f"len={len(resp.content)})"
+                    )
+                    continue
+
+                data = resp.json()
+                fg = data.get("fear_and_greed", {})
+                score = fg.get("score")
+                rating = fg.get("rating", "N/A")
+
+                if score is None:
+                    logger.warning("Fear & Greed JSON에 score 없음")
+                    continue
+
+                logger.info(f"Fear & Greed 지수: {round(score)} ({rating})")
+                return {"score": round(score), "rating": rating}
+
+            except requests.exceptions.JSONDecodeError as e:
+                logger.warning(f"Fear & Greed JSON 파싱 실패: {e}")
+            except Exception as e:
+                logger.warning(f"Fear & Greed 조회 실패: {e}")
+
+        logger.warning("Fear & Greed 지수 조회 최종 실패 → N/A 반환")
+        return {"score": None, "rating": "N/A"}
