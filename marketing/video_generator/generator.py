@@ -77,17 +77,38 @@ PEXELS_KEYWORDS = {
     "evening": ["city night finance", "new york night skyline", "stock exchange night"],
 }
 
-# ── 이모지 제거 ───────────────────────────────────────────────────────────────
+# ── 이모지 제거 (한글 보존) ──────────────────────────────────────────────────
+# 주의: \U000024C2-\U0001F251 범위는 한글(AC00-D7FF)을 포함하므로 사용 금지
 _EMOJI_RE = re.compile(
     "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002600-\U000027BF"
-    "\U0001F900-\U0001F9FF"
-    "\U00002702-\U000027B0"
-    "\U000024C2-\U0001F251"
+    "\U0001F600-\U0001F64F"   # 이모티콘
+    "\U0001F300-\U0001F5FF"   # 기호/픽토그램
+    "\U0001F680-\U0001F6FF"   # 교통/지도
+    "\U0001F1E0-\U0001F1FF"   # 국기
+    "\U0001F900-\U0001F9FF"   # 추가 이모지
+    "\U0001FA00-\U0001FA6F"   # 추가 이모지
+    "\U0001FA70-\U0001FAFF"   # 추가 이모지
+    "\U00002702-\U00002705"   # 가위 등 (딩뱃 일부)
+    "\U00002708-\U0000270D"   # 비행기/손 등
+    "\U0000270F"
+    "\U00002712"
+    "\U00002714"
+    "\U00002716"
+    "\U0000271D"
+    "\U00002721"
+    "\U00002728"
+    "\U00002733-\U00002734"
+    "\U00002744"
+    "\U00002747"
+    "\U0000274C"
+    "\U0000274E"
+    "\U00002753-\U00002755"
+    "\U00002757"
+    "\U00002763-\U00002764"
+    "\U00002795-\U00002797"
+    "\U000027A1"
+    "\U000027B0"
+    "\U000027BF"
     "]+",
     flags=re.UNICODE,
 )
@@ -107,25 +128,25 @@ GEMINI_API_URL = (
 )
 
 NARRATION_SYSTEM = """당신은 유튜브 쇼츠 나래이션 작가입니다.
-블로그 본문을 읽고, 59초 이하로 읽을 수 있는 나래이션 스크립트를 작성합니다.
-한국어 평균 발화 속도(초당 약 5~6음절)를 기준으로, 전체 나래이션 길이가 반드시 55초 이하가 되도록 작성합니다.
+블로그 본문을 읽고, 핵심 내용을 요약한 나래이션 스크립트를 작성합니다.
 
 규칙:
-- 나래이션은 자연스러운 구어체로 작성 (문어체 금지)
-- 각 세그먼트는 하나의 핵심 내용을 전달
-- 세그먼트당 나래이션은 8~12초 분량 (약 45~70 음절)
+- 전체 나래이션을 빠르게 읽으면 반드시 55초 이하여야 합니다
+- 자연스러운 구어체로 작성 (문어체, 이모지 금지)
 - 총 5~7개 세그먼트
-- 각 세그먼트에 키워드(3~6자)와 부연설명(15~25자) 포함
-- 첫 번째 세그먼트: 강력한 훅 (시청자 주의 끌기)
+- 각 세그먼트: 나래이션(읽을 텍스트) + 화면에 표시할 요약 문장
+- 나래이션은 8~12초 분량 (약 45~70음절)
+- 화면 요약 문장은 20~35자, 핵심 수치/정보 포함
+- 첫 번째 세그먼트: 강렬한 훅 (시청자 주의 끌기)
 - 마지막 세그먼트: 블로그 방문 유도 CTA
 
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
 {
   "segments": [
     {
-      "narration": "실제 읽을 나래이션 텍스트 (구어체, 45~70음절)",
-      "keyword": "핵심 키워드 (3~6자)",
-      "description": "키워드 부연설명 (15~25자)"
+      "narration": "실제 읽을 나래이션 텍스트 (구어체, 45~70음절, 이모지 없음)",
+      "headline": "화면 상단 굵은 제목 (10~15자, 핵심 수치 포함)",
+      "summary": "화면 중앙 요약 문장 (20~35자, 본문 핵심 내용)"
     }
   ]
 }"""
@@ -208,29 +229,29 @@ def generate_narration_script(blog_content: str, title: str, mode: str, api_key:
 
 
 def _fallback_script(title: str, mode: str) -> list[dict]:
-    """API 실패 시 기본 스크립트."""
+    """API 실패 시 기본 스크립트 (headline/summary 포함)."""
     clean_title = _strip_emoji(title)
     if mode == "morning":
         return [
-            {"narration": f"안녕하세요! 오늘의 미국 증시 마감 분석입니다. {clean_title[:30]}",
-             "keyword": "마감 분석", "description": "미국 전일 증시 마감 결과"},
+            {"narration": f"안녕하세요! 오늘의 미국 증시 마감 분석입니다.",
+             "headline": "미국 증시 마감", "summary": clean_title[:35]},
             {"narration": "주요 지수 흐름과 핵심 이슈를 빠르게 정리해드립니다.",
-             "keyword": "지수 동향", "description": "S&P500, 나스닥, 다우 등락"},
+             "headline": "지수 동향", "summary": "S&P500, 나스닥, 다우 등락 현황"},
             {"narration": "오늘 시장에 영향을 준 경제 지표와 뉴스를 살펴보겠습니다.",
-             "keyword": "경제 지표", "description": "발표된 주요 경제 데이터"},
+             "headline": "경제 지표", "summary": "발표된 주요 경제 데이터 분석"},
             {"narration": "더 자세한 분석은 블로그에서 확인하세요. 구독과 좋아요 부탁드립니다!",
-             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
+             "headline": "블로그 방문", "summary": "seedsup.tistory.com"},
         ]
     else:
         return [
-            {"narration": f"오늘 밤 미국 증시 개장 전 핵심 이슈를 정리했습니다. {clean_title[:20]}",
-             "keyword": "프리마켓", "description": "미국 장 개장 전 선물 동향"},
+            {"narration": "오늘 밤 미국 증시 개장 전 핵심 이슈를 정리했습니다.",
+             "headline": "프리마켓 분석", "summary": clean_title[:35]},
             {"narration": "오늘 발표 예정인 경제 지표와 실적 발표를 확인해보겠습니다.",
-             "keyword": "경제 지표", "description": "오늘 밤 주요 발표 일정"},
+             "headline": "경제 지표", "summary": "오늘 밤 주요 발표 일정"},
             {"narration": "프리마켓 분위기와 오늘 밤 시장 시나리오를 분석해드립니다.",
-             "keyword": "시장 전망", "description": "강세 vs 약세 시나리오"},
+             "headline": "시장 전망", "summary": "강세 vs 약세 시나리오 분석"},
             {"narration": "전체 분석은 블로그를 방문해주세요. 구독과 좋아요 감사합니다!",
-             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
+             "headline": "블로그 방문", "summary": "seedsup.tistory.com"},
         ]
 
 
@@ -409,8 +430,8 @@ def _draw_text_centered(draw, cx, y, text, font, fill, outline=(0, 0, 0), ow=3) 
 
 def _make_slide(
     narration: str,
-    keyword: str,
-    description: str,
+    headline: str,
+    summary: str,
     theme: dict,
     slide_num: int,
     total: int,
@@ -419,11 +440,12 @@ def _make_slide(
     is_cta: bool,
 ) -> Image.Image:
     """
-    슬라이드 이미지 생성:
+    슬라이드 이미지 생성 (v7 — 요약 중심 레이아웃):
     - 상단: 진행 바 + 슬라이드 번호
-    - 중앙 하단: 키워드 강조 박스 (크고 눈에 띄게)
-    - 키워드 아래: 부연설명 텍스트 (배경 박스 포함)
-    - 최하단: 나래이션 자막 (반투명 배경)
+    - 중앙 상부: 굵은 헤드라인 (핵심 수치/포인트)
+    - 중앙: 요약 문장 (본문 내용, 읽기 편한 크기)
+    - 하단: 나래이션 자막 (반투명 배경)
+    - 최하단: 워터마크
     """
     W, H   = VIDEO_W, VIDEO_H
     img    = bg.copy()
@@ -431,154 +453,118 @@ def _make_slide(
 
     accent    = theme["accent"]
     highlight = theme["highlight"]
-    kw_bg     = theme["keyword_bg"]
-    kw_fg     = theme["keyword_fg"]
     title_c   = theme["title_c"]
+    CX        = W // 2
+    WRAP_PX   = W - 100
 
     # 폰트
-    f_progress = _load_font(32, bold=True)
-    f_keyword  = _load_font(110, bold=True)   # 키워드: 매우 크게
-    f_desc     = _load_font(52, bold=False)   # 부연설명
-    f_narr     = _load_font(44, bold=False)   # 나래이션 자막
-    f_badge    = _load_font(36, bold=True)
-
-    CX      = W // 2
-    WRAP_PX = W - 80
+    f_badge    = _load_font(34, bold=True)
+    f_headline = _load_font(88, bold=True)   # 헤드라인: 크고 굵게
+    f_summary  = _load_font(54, bold=False)  # 요약: 읽기 편한 크기
+    f_narr     = _load_font(42, bold=False)  # 자막: 하단
+    f_wm       = _load_font(30, bold=False)
 
     # ── 상단 진행 바 ─────────────────────────────────────────────────────────
     bar_w = int(W * slide_num / total)
-    draw.rectangle([(0, 0), (W, 12)], fill=(255, 255, 255, 50))
-    draw.rectangle([(0, 0), (bar_w, 12)], fill=(*accent, 255))
+    draw.rectangle([(0, 0), (W, 10)], fill=(255, 255, 255, 40))
+    draw.rectangle([(0, 0), (bar_w, 10)], fill=(*accent, 255))
 
     # ── 슬라이드 번호 뱃지 ──────────────────────────────────────────────────
     badge = f"{slide_num} / {total}"
     bb    = draw.textbbox((0, 0), badge, font=f_badge)
-    bw    = bb[2] - bb[0] + 40
-    bh    = bb[3] - bb[1] + 22
-    draw.rounded_rectangle([(40, 30), (40 + bw, 30 + bh)], radius=bh // 2,
-                            fill=(*kw_bg, 230))
-    draw.text((40 + 20, 30 + 11), badge, font=f_badge, fill=kw_fg)
+    bw, bh = bb[2] - bb[0] + 36, bb[3] - bb[1] + 20
+    draw.rounded_rectangle([(40, 28), (40 + bw, 28 + bh)],
+                            radius=bh // 2, fill=(*accent, 200))
+    draw.text((40 + 18, 28 + 10), badge, font=f_badge, fill=(10, 10, 30))
 
-    # ── 훅 배너 (첫 슬라이드) ────────────────────────────────────────────────
-    if is_hook:
-        hook_txt = "오늘의 핵심 분석"
-        hb       = draw.textbbox((0, 0), hook_txt, font=f_badge)
-        hw       = hb[2] - hb[0] + 48
-        hh       = hb[3] - hb[1] + 26
-        hx       = CX - hw // 2
-        hy       = 100
+    # ── 훅/CTA 배너 ──────────────────────────────────────────────────────────
+    banner_txt = ("오늘의 핵심 분석" if is_hook else
+                  "전체 분석 보기" if is_cta else None)
+    if banner_txt:
+        hb  = draw.textbbox((0, 0), banner_txt, font=f_badge)
+        hw  = hb[2] - hb[0] + 48
+        hh  = hb[3] - hb[1] + 24
+        hx  = CX - hw // 2
+        hy  = 28
         draw.rounded_rectangle([(hx, hy), (hx + hw, hy + hh)],
                                 radius=hh // 2, fill=(*highlight, 240))
-        draw.text((hx + 24, hy + 13), hook_txt, font=f_badge, fill=(20, 20, 20))
+        draw.text((hx + 24, hy + 12), banner_txt, font=f_badge, fill=(20, 20, 20))
 
-    # ── CTA 배너 (마지막 슬라이드) ───────────────────────────────────────────
-    if is_cta:
-        cta_txt = "전체 분석 보기"
-        cb      = draw.textbbox((0, 0), cta_txt, font=f_badge)
-        cw      = cb[2] - cb[0] + 48
-        ch      = cb[3] - cb[1] + 26
-        cx_b    = CX - cw // 2
-        cy_b    = 100
-        draw.rounded_rectangle([(cx_b, cy_b), (cx_b + cw, cy_b + ch)],
-                                radius=ch // 2, fill=(*highlight, 240))
-        draw.text((cx_b + 24, cy_b + 13), cta_txt, font=f_badge, fill=(20, 20, 20))
+    # ── 헤드라인 (화면 40% 지점) ─────────────────────────────────────────────
+    hl_clean  = _strip_emoji(headline)
+    hl_lines  = _pixel_wrap(hl_clean, f_headline, WRAP_PX)[:2]
+    hl_line_h = 100
+    hl_total  = len(hl_lines) * hl_line_h
+    hl_y      = int(H * 0.32) - hl_total // 2
 
-    # ── 키워드 강조 박스 (화면 중앙) ─────────────────────────────────────────
-    kw_clean = _strip_emoji(keyword)
-
-    # 키워드 배경 (크고 눈에 띄는 박스)
-    kw_bb = draw.textbbox((0, 0), kw_clean, font=f_keyword)
-    kw_tw = kw_bb[2] - kw_bb[0]
-    kw_th = kw_bb[3] - kw_bb[1]
-    pad_x = 60
-    pad_y = 30
-    kw_box_w = kw_tw + pad_x * 2
-    kw_box_h = kw_th + pad_y * 2
-    kw_x  = CX - kw_box_w // 2
-    kw_y  = int(H * 0.30)
-
-    # 그림자 효과 (진한 배경)
-    shadow_offset = 8
-    draw.rounded_rectangle(
-        [(kw_x + shadow_offset, kw_y + shadow_offset),
-         (kw_x + kw_box_w + shadow_offset, kw_y + kw_box_h + shadow_offset)],
-        radius=20, fill=(0, 0, 0, 120)
-    )
-    # 메인 키워드 박스
-    draw.rounded_rectangle(
-        [(kw_x, kw_y), (kw_x + kw_box_w, kw_y + kw_box_h)],
-        radius=20, fill=(*kw_bg, 245)
-    )
-    # 키워드 텍스트
-    draw.text(
-        (CX - kw_tw // 2, kw_y + pad_y),
-        kw_clean, font=f_keyword, fill=kw_fg
-    )
-
-    # 키워드 하단 라인 장식
-    line_y = kw_y + kw_box_h + 16
-    draw.rectangle(
-        [(CX - 120, line_y), (CX + 120, line_y + 6)],
-        fill=(*highlight, 220)
-    )
-
-    # ── 부연설명 텍스트 (키워드 아래) ────────────────────────────────────────
-    desc_clean = _strip_emoji(description)
-    desc_lines = _pixel_wrap(desc_clean, f_desc, WRAP_PX - 80)
-
-    desc_y      = line_y + 28
-    desc_total_h = len(desc_lines) * 62 + 24
-    desc_box_x  = 60
-    desc_box_w  = W - 120
-
-    # 부연설명 반투명 배경
-    desc_bg_img = Image.new("RGBA", (desc_box_w, desc_total_h), (0, 0, 0, 150))
-    img_rgba    = img.convert("RGBA")
-    img_rgba.paste(desc_bg_img, (desc_box_x, desc_y), desc_bg_img)
-    img         = img_rgba.convert("RGB")
-    draw        = ImageDraw.Draw(img)
-
-    # 부연설명 텍스트
-    ty = desc_y + 12
-    for line in desc_lines:
-        lb = draw.textbbox((0, 0), line, font=f_desc)
-        lw = lb[2] - lb[0]
-        _draw_outlined(
-            draw, (CX - lw // 2, ty),
-            line, f_desc, (255, 255, 220), ow=2
-        )
-        ty += 62
-
-    # ── 나래이션 자막 (하단) ─────────────────────────────────────────────────
-    narr_clean = _strip_emoji(narration)
-    narr_lines = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 40)[:4]
-
-    narr_total_h = len(narr_lines) * 56 + 36
-    narr_y_start = H - narr_total_h - 60
-
-    # 자막 배경 (하단 반투명)
-    narr_bg = Image.new("RGBA", (W, narr_total_h + 20), (0, 0, 0, 185))
+    # 헤드라인 배경 (강조 바)
+    bar_h = hl_total + 40
+    bar_x = 60
+    bar_w2 = W - 120
+    hl_bg = Image.new("RGBA", (bar_w2, bar_h), (*accent, 220))
     img_rgba = img.convert("RGBA")
-    img_rgba.paste(narr_bg, (0, narr_y_start - 10), narr_bg)
+    img_rgba.paste(hl_bg, (bar_x, hl_y - 20), hl_bg)
     img  = img_rgba.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # 자막 텍스트
-    ny = narr_y_start + 8
+    for line in hl_lines:
+        lb = draw.textbbox((0, 0), line, font=f_headline)
+        lw = lb[2] - lb[0]
+        draw.text((CX - lw // 2, hl_y), line, font=f_headline, fill=(10, 10, 30))
+        hl_y += hl_line_h
+
+    # ── 구분선 ───────────────────────────────────────────────────────────────
+    sep_y = hl_y + 24
+    draw.rectangle([(CX - 160, sep_y), (CX + 160, sep_y + 4)],
+                   fill=(*highlight, 200))
+
+    # ── 요약 문장 (구분선 아래) ───────────────────────────────────────────────
+    sm_clean = _strip_emoji(summary)
+    sm_lines = _pixel_wrap(sm_clean, f_summary, WRAP_PX - 60)[:3]
+    sm_line_h = 68
+    sm_total  = len(sm_lines) * sm_line_h + 36
+    sm_y      = sep_y + 28
+
+    # 요약 반투명 배경
+    sm_bg = Image.new("RGBA", (W - 80, sm_total), (0, 0, 0, 170))
+    img_rgba = img.convert("RGBA")
+    img_rgba.paste(sm_bg, (40, sm_y - 12), sm_bg)
+    img  = img_rgba.convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    for line in sm_lines:
+        lb = draw.textbbox((0, 0), line, font=f_summary)
+        lw = lb[2] - lb[0]
+        _draw_outlined(draw, (CX - lw // 2, sm_y), line, f_summary,
+                       (255, 255, 255), ow=2)
+        sm_y += sm_line_h
+
+    # ── 나래이션 자막 (하단 고정) ─────────────────────────────────────────────
+    narr_clean = _strip_emoji(narration)
+    narr_lines = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 20)[:4]
+    narr_line_h = 54
+    narr_total  = len(narr_lines) * narr_line_h + 40
+    narr_y      = H - narr_total - 56
+
+    narr_bg = Image.new("RGBA", (W, narr_total + 10), (0, 0, 0, 195))
+    img_rgba = img.convert("RGBA")
+    img_rgba.paste(narr_bg, (0, narr_y - 10), narr_bg)
+    img  = img_rgba.convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    ny = narr_y + 8
     for line in narr_lines:
         lb = draw.textbbox((0, 0), line, font=f_narr)
         lw = lb[2] - lb[0]
-        _draw_outlined(
-            draw, (CX - lw // 2, ny),
-            line, f_narr, (255, 255, 255), ow=2
-        )
-        ny += 56
+        _draw_outlined(draw, (CX - lw // 2, ny), line, f_narr,
+                       (255, 255, 220), ow=2)
+        ny += narr_line_h
 
     # ── 워터마크 ─────────────────────────────────────────────────────────────
     wm  = "seedsup.tistory.com"
-    wbb = draw.textbbox((0, 0), wm, font=f_progress)
+    wbb = draw.textbbox((0, 0), wm, font=f_wm)
     ww  = wbb[2] - wbb[0]
-    draw.text((CX - ww // 2, H - 36), wm, font=f_progress, fill=(*accent, 160))
+    draw.text((CX - ww // 2, H - 38), wm, font=f_wm, fill=(*accent, 150))
 
     return img
 
@@ -798,14 +784,14 @@ class VideoGenerator:
             total_tts_dur = 0.0
 
             for i, seg in enumerate(narration_segments, 1):
-                narration   = _strip_emoji(seg.get("narration", ""))
-                keyword     = _strip_emoji(seg.get("keyword", "키워드"))
-                description = _strip_emoji(seg.get("description", ""))
+                narration = _strip_emoji(seg.get("narration", ""))
+                headline  = _strip_emoji(seg.get("headline", seg.get("keyword", "분석")))
+                summary   = _strip_emoji(seg.get("summary", seg.get("description", "")))
 
                 is_hook = (i == 1)
                 is_cta  = (i == total)
 
-                logger.info(f"슬라이드 {i}/{total}: [{keyword}] {narration[:30]}...")
+                logger.info(f"슬라이드 {i}/{total}: [{headline}] {narration[:30]}...")
 
                 # TTS 생성 (나래이션)
                 tts_path = str(tmp / f"tts_{i:02d}.mp3")
@@ -830,7 +816,7 @@ class VideoGenerator:
 
                 # 슬라이드 이미지 생성
                 slide_img = _make_slide(
-                    narration, keyword, description,
+                    narration, headline, summary,
                     theme, i, total, bg_img,
                     is_hook, is_cta,
                 )
@@ -878,15 +864,13 @@ class VideoGenerator:
             seg_title = _strip_emoji(seg.get("title", ""))
             seg_body  = _strip_emoji(seg.get("body", ""))
             narration = f"{seg_title}. {seg_body}" if seg_body else seg_title
-
-            # 키워드 추출 (제목에서)
-            keyword = seg_title[:6] if seg_title else "분석"
-            desc    = seg_body[:25] if seg_body else "자세한 내용 확인"
+            headline  = seg_title[:15] if seg_title else "분석"
+            summary   = seg_body[:35] if seg_body else "자세한 내용 확인"
 
             result.append({
-                "narration":   narration,
-                "keyword":     keyword,
-                "description": desc,
+                "narration": narration,
+                "headline":  headline,
+                "summary":   summary,
             })
         return result
 
