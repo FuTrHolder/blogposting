@@ -494,7 +494,7 @@ def _build_thumbnail(
         img = _crop_fit(bg_image.copy(), W, H)
         # 색감 약간 보정 (선명도 향상)
         img = ImageEnhance.Contrast(img).enhance(1.1)
-        img = ImageEnhance.Saturation(img).enhance(1.15)
+        img = ImageEnhance.Color(img).enhance(1.15)   # Saturation → Color (올바른 Pillow API)
     else:
         if mode == "morning":
             img = _make_gradient(W, H, [(6, 20, 60), (15, 50, 110), (6, 20, 60)])
@@ -530,23 +530,13 @@ class SNSThumbnailGenerator:
     ) -> Image.Image | None:
         """
         우선순위에 따라 배경 이미지 취득:
-        1. Gemini Imagen (카툰 스타일 생성)
-        2. 티스토리 썸네일
-        3. Pexels
-        4. Pixabay
-        5. Unsplash Source
-        6. None (그라디언트 fallback)
+        1. 티스토리 썸네일
+        2. Pexels
+        3. Pixabay
+        4. Unsplash Source
+        5. None (그라디언트 fallback)
         """
-        # 1. Gemini Imagen
-        if self.gemini_key:
-            img_prompt = content.get("thumbnail_prompt", "")
-            if not img_prompt:
-                img_prompt = _extract_image_query(title, mode, content)
-            cartoon_img = _generate_with_gemini_imagen(img_prompt, self.gemini_key)
-            if cartoon_img:
-                return cartoon_img
-
-        # 2. 티스토리 썸네일
+        # 1. 티스토리 썸네일
         if thumbnail_url:
             try:
                 r = requests.get(thumbnail_url, timeout=15,
@@ -559,18 +549,18 @@ class SNSThumbnailGenerator:
             except Exception as e:
                 logger.warning(f"티스토리 썸네일 실패: {e}")
 
-        # 3. Pexels
+        # 2. Pexels
         query = _extract_image_query(title, mode, content)
         img   = _fetch_pexels_image(query, W, H, self.pexels_key)
         if img:
             return img
 
-        # 4. Pixabay
+        # 3. Pixabay
         img = _fetch_pixabay_image(query, W, H, self.pixabay_key)
         if img:
             return img
 
-        # 5. Unsplash Source (무료, API 키 불필요)
+        # 4. Unsplash Source (무료, API 키 불필요)
         img = _fetch_unsplash_image(query, W, H, mode)
         if img:
             return img
