@@ -176,7 +176,7 @@ def generate_narration_script(blog_content: str, title: str, mode: str, api_key:
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
         },
     }
