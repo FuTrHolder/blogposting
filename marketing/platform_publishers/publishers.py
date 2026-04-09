@@ -1,11 +1,12 @@
 """
-플랫폼 발행 모듈 v3
-개선사항:
-  - X(Twitter) 코드 완전 삭제
-  - Threads 썸네일 업로드 지원 (이미지 첨부 방식 수정)
-  - Threads 텍스트 내 [블로그 URL] 플레이스홀더 → 실제 URL 치환
-  - 카카오 메일: 카카오 스토리채널 텍스트 + 썸네일 + 숏폼 영상만 발송
-  - VideoEmailPublisher 제거 (카카오 메일로 통합)
+플랫폼 발행 모듈 v4
+변경사항 v4:
+  - ThreadsPublisher: 이미지 URL 우선순위 개선
+      1순위: THREADS_IMAGE_URL 환경변수 (수동 지정)
+      2순위: blog_thumbnail_url (티스토리 썸네일 — 이미 공개 URL)
+      3순위: INSTAGRAM_IMAGE_URL 환경변수
+      4순위: 텍스트 전용 게시
+    → 별도 업로드 없이 티스토리 썸네일을 Threads 이미지로 자동 활용
 """
 
 import os
@@ -171,9 +172,12 @@ class FacebookPublisher(PlatformPublisher):
 class ThreadsPublisher(PlatformPublisher):
     """
     Threads API 이미지 업로드 방식:
-    - 로컬 파일 직접 불가 → 공개 URL 필요
-    - INSTAGRAM_IMAGE_URL 환경변수로 공개 URL 제공 시 이미지 포함 게시 가능
-    - 없으면 텍스트만 게시
+    - 로컬 파일 직접 업로드 불가 → 공개 URL 필요
+    - 이미지 URL 우선순위 (C안: 티스토리 썸네일 활용):
+        1순위: THREADS_IMAGE_URL 환경변수 (수동 지정)
+        2순위: content["blog_thumbnail_url"] — 티스토리 대표 이미지 (이미 공개 URL)
+        3순위: INSTAGRAM_IMAGE_URL 환경변수
+        4순위: 이미지 없이 텍스트 전용 게시
     - [블로그 URL] 플레이스홀더를 실제 URL로 자동 치환
     """
     GRAPH_API = "https://graph.threads.net/v1.0"
@@ -181,7 +185,7 @@ class ThreadsPublisher(PlatformPublisher):
     def __init__(self):
         self.user_id      = os.environ.get("THREADS_USER_ID", "")
         self.access_token = os.environ.get("THREADS_ACCESS_TOKEN", "")
-        # 공개 이미지 URL (선택, S3/CDN 등)
+        # 수동 지정 공개 URL (선택사항 — 없어도 티스토리 썸네일로 자동 대체)
         self.image_url    = os.environ.get("THREADS_IMAGE_URL",
                             os.environ.get("INSTAGRAM_IMAGE_URL", ""))
 
@@ -192,24 +196,52 @@ class ThreadsPublisher(PlatformPublisher):
             text = text.replace("[Blog URL]", blog_url)
             text = text.replace("[블로그url]", blog_url)
         else:
-            # URL 없으면 플레이스홀더 삭제
             import re
             text = re.sub(r"\[블로그\s*URL\]", "", text)
             text = re.sub(r"\[Blog\s*URL\]", "", text)
         return text.strip()
 
+    def _resolve_image_url(self, content: dict) -> str:
+        """
+        이미지 URL 우선순위 결정.
+        1. THREADS_IMAGE_URL 환경변수
+        2. 티스토리 블로그 대표 썸네일 URL (blog_thumbnail_url)
+        3. INSTAGRAM_IMAGE_URL 환경변수
+        """
+        # 1순위: 환경변수 수동 지정
+        if self.image_url:
+            logger.info(f"Threads 이미지: 환경변수 URL 사용")
+            return self.image_url
+
+        # 2순위: 티스토리 썸네일 (크롤러가 추출한 공개 URL)
+        tistory_thumb = content.get("blog_thumbnail_url", "")
+        if tistory_thumb and tistory_thumb.startswith("http"):
+            logger.info(f"Threads 이미지: 티스토리 썸네일 사용 → {tistory_thumb[:60]}...")
+            return tistory_thumb
+
+        # 3순위: Instagram 이미지 URL 환경변수 (공유 가능한 경우)
+        insta_url = os.environ.get("INSTAGRAM_IMAGE_URL", "")
+        if insta_url:
+            logger.info(f"Threads 이미지: INSTAGRAM_IMAGE_URL 사용")
+            return insta_url
+
+        logger.info("Threads 이미지: 사용 가능한 공개 URL 없음 → 텍스트 전용")
+        return ""
+
     def publish(self, content: dict, media_paths: dict) -> dict:
         if not self.user_id or not self.access_token:
             return {"status": "skip", "message": "Threads 설정 미완료"}
 
-        blog_url = content.get("blog_url", "")
-        text     = self._replace_placeholder(
+        blog_url   = content.get("blog_url", "")
+        text       = self._replace_placeholder(
             content.get("threads_post", ""), blog_url
         )
 
-        # 이미지 URL이 있으면 이미지 포함 게시 시도
-        if self.image_url:
-            result = self._publish_with_image(text, self.image_url)
+        # 이미지 URL 결정 (우선순위 적용)
+        image_url = self._resolve_image_url(content)
+
+        if image_url:
+            result = self._publish_with_image(text, image_url)
             if result["status"] == "ok":
                 return result
             logger.warning(f"Threads 이미지 게시 실패, 텍스트 전용으로 전환: {result['message']}")
@@ -307,12 +339,10 @@ class InstagramPublisher(PlatformPublisher):
 
     def publish(self, content: dict, media_paths: dict) -> dict:
         if not self.account_id or not self.access_token:
-            return {"status": "skip",
-                    "message": "Instagram 설정 미완료"}
+            return {"status": "skip", "message": "Instagram 설정 미완료"}
 
         caption   = content.get("instagram_post", content.get("threads_post", ""))
         blog_url  = content.get("blog_url", "")
-        # [블로그 URL] 치환
         if blog_url:
             caption = caption.replace("[블로그 URL]", blog_url)
 
@@ -442,14 +472,6 @@ class InstagramPublisher(PlatformPublisher):
 class KakaoStoryPublisher(PlatformPublisher):
     """
     카카오 스토리채널 텍스트 + 썸네일 + 숏폼 영상을 이메일로 발송.
-    (카카오는 공식 자동화 API 없어 수동 업로드 필요)
-
-    발송 내용:
-      - 카카오 스토리채널 텍스트
-      - 카카오 썸네일 이미지 첨부
-      - 숏폼 영상(MP4) 첨부 (25MB 이하인 경우)
-
-    필요 환경변수: GMAIL_ADDRESS, GMAIL_APP_PASSWORD, RECIPIENT_EMAIL
     """
 
     def __init__(self):
@@ -468,20 +490,16 @@ class KakaoStoryPublisher(PlatformPublisher):
         mode_label = "전일 마감 리뷰" if mode == "morning" else "프리마켓 & 이슈"
         now_kst    = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
 
-        # [블로그 URL] 플레이스홀더 치환
         if blog_url:
             kakao_text = kakao_text.replace("[블로그 URL]", blog_url)
 
-        # 썸네일: kakao > facebook > instagram 순
         thumb_path = (
             media_paths.get("kakao")
             or media_paths.get("facebook")
             or media_paths.get("instagram")
         )
-        # 숏폼 영상
         video_path = media_paths.get("video")
 
-        # HTML 이메일 본문
         html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head><meta charset="UTF-8">
@@ -542,7 +560,6 @@ class KakaoStoryPublisher(PlatformPublisher):
 </div>
 </body></html>"""
 
-        # 이메일 구성
         msg            = MIMEMultipart("mixed")
         msg["Subject"] = f"[카카오 스토리채널] {blog_title} ({mode_label})"
         msg["From"]    = self.gmail
@@ -554,7 +571,6 @@ class KakaoStoryPublisher(PlatformPublisher):
 
         attached_files = []
 
-        # 썸네일 이미지 첨부
         if thumb_path and Path(thumb_path).exists():
             try:
                 with open(thumb_path, "rb") as f:
@@ -567,7 +583,6 @@ class KakaoStoryPublisher(PlatformPublisher):
             except Exception as e:
                 logger.warning(f"썸네일 첨부 실패: {e}")
 
-        # 숏폼 영상 첨부 (25MB 이하)
         video_attached = False
         if video_path and Path(video_path).exists():
             video_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
@@ -592,7 +607,6 @@ class KakaoStoryPublisher(PlatformPublisher):
                 logger.warning(f"영상 크기 초과({video_size_mb:.1f}MB) — 첨부 생략")
                 attached_files.append(f"영상 생략({video_size_mb:.1f}MB 초과)")
 
-        # 발송
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(self.gmail, self.password)
@@ -614,16 +628,6 @@ class KakaoStoryPublisher(PlatformPublisher):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PublisherDispatcher:
-    """
-    발행 플랫폼 목록:
-      - YouTube (영상)
-      - Facebook (이미지 + 텍스트)
-      - Instagram (이미지/영상)
-      - Threads (텍스트, 이미지 URL 있으면 이미지 포함)
-      - Kakao (메일: 카카오 텍스트 + 썸네일 + 영상)
-    X (Twitter) 완전 제거됨.
-    """
-
     def __init__(self):
         self.publishers: dict[str, PlatformPublisher] = {
             "youtube":   YouTubePublisher(),
