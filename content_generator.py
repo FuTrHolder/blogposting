@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 GEMINI_MODELS = [
     "gemini-2.5-flash-lite",   # 1순위: 경량·빠름
     "gemini-2.5-flash",        # 2순위: 표준
-    "gemini-2.0-flash",        # 3순위: 최종 폴백
+    "gemini-3.1-flash-lite",        # 3순위: 최종 폴백
 ]
 
 # 재시도 가능한 HTTP 상태코드 (일시적 서버 오류·과부하 포함)
@@ -278,27 +278,31 @@ class ContentGenerator:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
+def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
         """
         Gemini API 호출.
         - 503/429/500/502/504 → 지수 백오프 재시도
         - 모델 과부하 지속 시 GEMINI_MODELS 순서대로 자동 폴백
         - timeout: 90초 (안정성 확보)
+        - 2.5 계열 모델은 thinking(추론)이 출력 토큰 예산을 함께 소모하므로 비활성화
+        - MAX_TOKENS로 잘리거나 빈 응답이 오면 자동 재시도
         """
-        payload = {
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.85,
-                "maxOutputTokens": 4096,
-                "responseMimeType": "application/json",
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
-
         for model in GEMINI_MODELS:
             url = f"{_gemini_url(model)}?key={self.api_key}"
             logger.info(f"Gemini 모델 시도: {model}")
+
+            generation_config = {
+                "temperature": 0.85,
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json",
+            }
+            
+            payload = {
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": generation_config,
+            }
+            data = json.dumps(payload).encode("utf-8")
 
             for attempt in range(1, max_retries + 1):
                 try:
@@ -310,14 +314,39 @@ class ContentGenerator:
                     )
                     with urllib.request.urlopen(req, timeout=90) as resp:
                         result = json.loads(resp.read().decode("utf-8"))
-                    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    logger.info(f"Gemini 응답 성공 (모델: {model})")
+
+                    candidate = result["candidates"][0]
+                    finish_reason = candidate.get("finishReason", "")
+                    parts = candidate.get("content", {}).get("parts", [])
+                    # 멀티파트 응답 방어: 모든 파트의 텍스트를 이어붙임
+                    raw = "".join(p.get("text", "") for p in parts).strip()
+
+                    if finish_reason == "MAX_TOKENS":
+                        logger.warning(
+                            f"Gemini 응답이 MAX_TOKENS로 잘림 (모델: {model}, "
+                            f"시도 {attempt}/{max_retries}, 응답 길이: {len(raw)}자)"
+                        )
+                        if attempt < max_retries:
+                            time.sleep(5)
+                            continue
+                        break
+
+                    if not raw:
+                        logger.warning(
+                            f"Gemini 빈 응답 (모델: {model}, finishReason: {finish_reason}, "
+                            f"시도 {attempt}/{max_retries})"
+                        )
+                        if attempt < max_retries:
+                            time.sleep(5)
+                            continue
+                        break
+
+                    logger.info(f"Gemini 응답 성공 (모델: {model}, {len(raw)}자)")
                     return raw
 
                 except urllib.error.HTTPError as e:
                     body = e.read().decode("utf-8", errors="replace")
                     if e.code in _RETRYABLE_CODES:
-                        # 429: 30s 기준, 5xx(503 포함): 20s 기준, 지수 백오프, 최대 120s
                         base_wait = 30 if e.code == 429 else 20
                         wait = min(base_wait * attempt, 120)
                         logger.warning(
@@ -326,7 +355,6 @@ class ContentGenerator:
                         )
                         time.sleep(wait)
                     else:
-                        # 400/401/403 등 재시도 불가 오류는 즉시 실패
                         logger.error(
                             f"Gemini API 오류 {e.code} (모델: {model}): {body[:300]}"
                         )
@@ -348,7 +376,7 @@ class ContentGenerator:
                     if attempt < max_retries:
                         time.sleep(10)
                     else:
-                        break  # 이 모델 포기 → 다음 모델로
+                        break
 
             logger.warning(f"모델 {model} 모든 시도 실패 → 다음 모델로 폴백")
 
@@ -357,7 +385,7 @@ class ContentGenerator:
             "잠시 후 다시 시도해주세요."
         )
 
-    def generate_post(
+def generate_post(
         self,
         date: str,
         market_data: dict,
@@ -379,9 +407,35 @@ class ContentGenerator:
             )
 
         logger.info(f"Gemini API 호출 중 (모드: {mode})...")
-        raw = self._call_gemini(system, prompt)
 
-        # JSON 파싱 (코드블록 방어)
+        max_json_retries = 2  # JSON 파싱 실패 시 Gemini 재호출 횟수
+        last_error: Exception | None = None
+
+        for json_attempt in range(1, max_json_retries + 2):  # 최초 1회 + 재시도
+            raw = self._call_gemini(system, prompt)
+            try:
+                post = self._parse_json_response(raw)
+                logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
+                logger.info(f"생성된 제목: {post.get('title', '')}")
+                return post
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    f"JSON 파싱 실패 (시도 {json_attempt}/{max_json_retries + 1}): {e}"
+                )
+                logger.warning(f"  응답 길이: {len(raw)}자")
+                logger.warning(f"  응답 앞부분: {raw[:300]!r}")
+                logger.warning(f"  응답 뒷부분: {raw[-300:]!r}")
+                if json_attempt <= max_json_retries:
+                    logger.info("Gemini를 재호출해 다시 시도합니다...")
+
+        raise RuntimeError(
+            f"Gemini 응답을 JSON으로 파싱하는 데 {max_json_retries + 1}회 모두 실패했습니다: {last_error}"
+        )
+
+    @staticmethod
+    def _parse_json_response(raw: str) -> dict:
+        """코드블록 방어 포함 JSON 파싱. 실패 시 json.JSONDecodeError를 발생시킴."""
         if "```" in raw:
             for part in raw.split("```"):
                 part = part.strip()
@@ -391,8 +445,4 @@ class ContentGenerator:
                     return json.loads(part)
                 except json.JSONDecodeError:
                     continue
-
-        post = json.loads(raw)
-        logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
-        logger.info(f"생성된 제목: {post.get('title', '')}")
-        return post
+        return json.loads(raw)
