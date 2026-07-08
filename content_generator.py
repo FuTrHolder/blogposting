@@ -357,19 +357,26 @@ class ContentGenerator:
             "잠시 후 다시 시도해주세요."
         )
 
-    def generate_post(
+def generate_post(
         self,
         date: str,
         market_data: dict,
         news_list: list[dict],
         mode: str = "morning",
+        korean_date: str | None = None,
+        us_market_date: str | None = None,
     ) -> dict:
         if mode == "evening":
             system = SYSTEM_EVENING
             prompt = _build_evening_prompt(date, market_data, news_list)
         else:
             system = SYSTEM_MORNING
-            prompt = _build_morning_prompt(date, market_data, news_list)
+            # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
+            _korean_date = korean_date or date
+            _us_market_date = us_market_date or date
+            prompt = _build_morning_prompt(
+                _korean_date, _us_market_date, market_data, news_list
+            )
 
         logger.info(f"Gemini API 호출 중 (모드: {mode})...")
         raw = self._call_gemini(system, prompt)
