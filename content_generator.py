@@ -357,7 +357,7 @@ class ContentGenerator:
             "잠시 후 다시 시도해주세요."
         )
 
-def generate_post(
+    def generate_post(
         self,
         date: str,
         market_data: dict,
