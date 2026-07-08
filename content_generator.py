@@ -163,9 +163,21 @@ SYSTEM_EVENING = (
 )
 
 
-def _build_morning_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
-    """오전 포스팅용 프롬프트: 전일 마감 데이터 중심."""
-    market_text = f"📅 미국 증시 마감 날짜: {date}\n\n[전일 마감 지수]\n"
+def _build_morning_prompt(
+    korean_date: str, us_market_date: str, market_data: dict, news_list: list[dict]
+) -> str:
+    """오전 포스팅용 프롬프트: 전일 마감 데이터 중심.
+
+    korean_date    : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
+    us_market_date : 리뷰 대상 미국 정규장 마감 날짜 — 본문 지수 데이터에 사용
+    """
+    market_text = (
+        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
+        f"📅 리뷰 대상 미국 증시 마감 날짜: {us_market_date}\n"
+        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
+        f"본문의 '전일 마감'은 미국 날짜({us_market_date}) 기준임을 명확히 하세요.\n\n"
+        f"[전일 마감 지수]\n"
+    )
     for name, data in market_data.items():
         if name == "fear_greed" or not data:
             continue
