@@ -278,7 +278,7 @@ class ContentGenerator:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
+    def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
         """
         Gemini API 호출.
         - 503/429/500/502/504 → 지수 백오프 재시도
@@ -385,7 +385,7 @@ def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
             "잠시 후 다시 시도해주세요."
         )
 
-def generate_post(
+    def generate_post(
         self,
         date: str,
         market_data: dict,
