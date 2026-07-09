@@ -6,16 +6,22 @@
   morning (오전 9시 KST) : 미국 전일 증시 마감 리뷰
     - 제목 날짜 : 포스팅 작성 날짜 (한국 시간 기준)
     - 리뷰 대상 : 종료된 미국 정규장
-      예) 한국 4월 4일(토) 오전 포스팅 → 미국 4월 2일(목) 정규장 리뷰
-          (미국 4월 3일 굿 프라이데이 휴장이므로 그 전 거래일)
+      예) 한국 7월 9일 오전 9시 포스팅 → 뉴욕 현지 시각은 7월 8일 오후 8시(EDT)
+          → 이미 마감된 정규장은 7월 8일 세션 → 리뷰 대상은 7월 8일
 
   evening (오후 9시 KST) : 당일 증시 오픈 전 이슈 + 당일 국내외 이슈 정리
+
+날짜/시각 계산은 한국 시간(KST)을 실제 미국 뉴욕 현지 시각(zoneinfo, EDT/EST 자동 반영)으로
+정확히 변환한 뒤, 그 값을 그대로 Gemini 프롬프트에 명시적으로 전달합니다.
+(AI가 매번 시간대를 스스로 계산하게 하면 오류가 잦으므로, 계산은 코드에서 하고
+ 결과값만 "사실"로 프롬프트에 제공하는 방식)
 """
 
 import os
 import sys
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from news_fetcher import NewsFetcher
 from content_generator import ContentGenerator
@@ -30,6 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+NY_TZ = ZoneInfo("America/New_York")  # 서머타임(EDT/EST)을 자동으로 정확히 반영
 
 # 미국 증시 정규 휴장일 (월/일 형식, 매년 업데이트 필요)
 # 굿 프라이데이, 독립기념일, 추수감사절 다음날, 크리스마스 등
@@ -90,55 +97,66 @@ def get_last_us_trading_day(from_date: datetime) -> datetime:
     return from_date
 
 
-def calculate_morning_dates(now_kst: datetime) -> tuple[str, str]:
+def compute_reference_times(now_kst: datetime) -> dict:
     """
-    오전 포스팅에 필요한 두 가지 날짜를 계산합니다.
+    한국 시간(KST)을 기준으로, 실제 미국 뉴욕 현지 시각(서머타임 자동 반영)과
+    가장 최근에 마감된 미국 정규장 거래일을 계산합니다. morning/evening 공통 사용.
 
-    한국 시간 오전 9시 = 미국 동부 시간(EDT) 전날 저녁 8시
-    → 미국 정규장(오전 9:30~오후 4:00 ET)은 이미 전날 종료
-    → 리뷰 대상: 미국 기준 전날 or 더 이전의 마지막 거래일
+    핵심 로직: 뉴욕 현지 시각이 그날 정규장 마감 시각(16:00 ET) 이후이면
+    "그 날짜"의 세션이 이미 마감된 것이고, 그 이전(마감 전)이면
+    "하루 전" 세션이 가장 최근에 마감된 세션입니다.
 
     Returns:
-        korean_date   : 포스팅 작성 날짜 한국어 문자열 (제목용)
-        us_market_date: 리뷰 대상 미국 정규장 날짜 한국어 문자열 (본문용)
+        korean_date         : 포스팅 작성 날짜 (한국어, 제목용)
+        korean_datetime_str : 포스팅 작성 시각 전체 문자열 (예: '2026-07-09 09:00 KST')
+        ny_reference_str    : 뉴욕 기준 현재 시각 전체 문자열 (예: '2026-07-08 20:00 EDT')
+        us_market_date       : 가장 최근에 마감된 미국 정규장 날짜 (한국어, 본문/리뷰 대상)
     """
-    # 포스팅 작성 날짜 (한국 시간)
     korean_date = now_kst.strftime("%Y년 %m월 %d일")
+    korean_datetime_str = now_kst.strftime("%Y-%m-%d %H:%M KST")
 
-    # 미국 동부 시간 기준: 한국 시간 - 13시간 (EDT 기준)
-    # 오전 9시 KST = 전날 저녁 8시 EDT → 미국 정규장은 이미 마감
-    us_now = now_kst - timedelta(hours=13)
+    # 뉴욕 실제 현지 시각 (zoneinfo가 EDT/EST를 자동으로 정확히 반영)
+    us_now = now_kst.astimezone(NY_TZ)
+    ny_reference_str = us_now.strftime("%Y-%m-%d %H:%M %Z")
 
-    # 미국 전날(정규장이 마감된 날)
-    us_previous_day = us_now - timedelta(days=1)
+    # 뉴욕 현지 시각이 그 날짜의 정규장 마감(16:00 ET) 이후인지 확인
+    market_close = us_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    candidate = us_now if us_now >= market_close else us_now - timedelta(days=1)
 
     # 마지막 미국 거래일 탐색 (휴장일·주말 건너뜀)
-    last_trading_day = get_last_us_trading_day(us_previous_day)
-
+    last_trading_day = get_last_us_trading_day(candidate)
     us_market_date = last_trading_day.strftime("%Y년 %m월 %d일")
 
-    logger.info(f"한국 시간 포스팅 날짜: {korean_date}")
-    logger.info(f"미국 정규장 리뷰 대상일: {us_market_date}")
+    logger.info(f"한국 시간 포스팅 시각: {korean_datetime_str}")
+    logger.info(f"뉴욕 기준 시각: {ny_reference_str}")
+    logger.info(f"가장 최근 마감된 미국 정규장 날짜: {us_market_date}")
 
-    return korean_date, us_market_date
+    return {
+        "korean_date": korean_date,
+        "korean_datetime_str": korean_datetime_str,
+        "ny_reference_str": ny_reference_str,
+        "us_market_date": us_market_date,
+    }
 
 
 def main():
     mode = detect_mode()
     now_kst = datetime.now(KST)
+    ref = compute_reference_times(now_kst)
+
+    korean_date = ref["korean_date"]
+    us_market_date = ref["us_market_date"]
 
     if mode == "morning":
-        korean_date, us_market_date = calculate_morning_dates(now_kst)
         post_label = "전일 마감 리뷰"
         logger.info(
             f"[오전 포스팅] 작성일: {korean_date} | 리뷰 대상: 미국 {us_market_date} 정규장"
         )
     else:
-        # 저녁 포스팅: 한국 날짜를 date로 사용 (기존 로직 유지)
-        korean_date = now_kst.strftime("%Y년 %m월 %d일")
-        us_market_date = korean_date  # evening은 사용 안 함
         post_label = "당일 프리마켓 & 이슈"
-        logger.info(f"[저녁 포스팅] 작성일: {korean_date}")
+        logger.info(
+            f"[저녁 포스팅] 작성일: {korean_date} | 직전 마감 정규장: 미국 {us_market_date}"
+        )
 
     logger.info(f"===== 미국 증시 블로그 자동화 시작 [{mode.upper()} / {post_label}] =====")
 
@@ -156,22 +174,16 @@ def main():
     logger.info(f"[2/4] 블로그 글 생성 중 (Gemini / {mode})...")
     generator = ContentGenerator(api_key=os.environ["GEMINI_API_KEY"])
 
-    if mode == "morning":
-        post = generator.generate_post(
-            date=korean_date,           # 하위 호환용 (evening fallback)
-            market_data=market_data,
-            news_list=news_list,
-            mode=mode,
-            korean_date=korean_date,    # 제목용 한국 날짜
-            us_market_date=us_market_date,  # 본문용 미국 정규장 날짜
-        )
-    else:
-        post = generator.generate_post(
-            date=korean_date,
-            market_data=market_data,
-            news_list=news_list,
-            mode=mode,
-        )
+    post = generator.generate_post(
+        date=korean_date,           # 하위 호환용
+        market_data=market_data,
+        news_list=news_list,
+        mode=mode,
+        korean_date=korean_date,
+        us_market_date=us_market_date,
+        korean_datetime_str=ref["korean_datetime_str"],
+        ny_reference_str=ref["ny_reference_str"],
+    )
 
     logger.info(f"  → 제목: {post['title']}")
     logger.info(f"  → 글자 수: {len(post['content'])}자")
