@@ -163,15 +163,47 @@ SYSTEM_EVENING = (
 )
 
 
+def _reference_time_block(korean_datetime_str: str, ny_reference_str: str) -> str:
+    """
+    글 작성 시각(KST)과 분석 기준 시각(뉴욕)을 명시적으로 프롬프트에 박아 넣는 블록.
+    AI가 매번 시간대를 스스로 계산하게 하면 오류가 잦으므로,
+    이미 정확히 계산된 값을 "사실"로 제공하고 재계산을 금지시킵니다.
+    """
+    if not korean_datetime_str or not ny_reference_str:
+        return ""
+    return (
+        "────────────────────────────────────────\n"
+        "기준 시각 (아래 값을 그대로 사용하세요 — 직접 재계산 금지)\n"
+        "────────────────────────────────────────\n"
+        f"[글 작성 시각 - 한국(KST)]   {korean_datetime_str}\n"
+        f"[분석 기준 시각 - 미국 뉴욕] {ny_reference_str}\n\n"
+        "본문에서 \"오늘\", \"어제\", \"전일\", \"이번 주\" 등 상대적 시제 표현을 쓸 때는 "
+        "반드시 위 [분석 기준 시각 - 미국 뉴욕]을 기준으로만 판단하세요.\n"
+        "한국 시간(KST)은 이 글이 발행되는 시각을 나타낼 뿐이며, "
+        "시황 분석의 '오늘/어제' 판단 기준으로는 절대 사용하지 마세요.\n"
+        "위 [분석 기준 시각]의 날짜가 이미 정규장 마감(16:00 ET) 이후라면, "
+        "그 날짜의 세션은 '오늘'이 아니라 이미 '마감된' 세션입니다.\n"
+        "────────────────────────────────────────\n\n"
+    )
+
+
 def _build_morning_prompt(
-    korean_date: str, us_market_date: str, market_data: dict, news_list: list[dict]
+    korean_date: str,
+    us_market_date: str,
+    market_data: dict,
+    news_list: list[dict],
+    korean_datetime_str: str = "",
+    ny_reference_str: str = "",
 ) -> str:
     """오전 포스팅용 프롬프트: 전일 마감 데이터 중심.
 
-    korean_date    : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
-    us_market_date : 리뷰 대상 미국 정규장 마감 날짜 — 본문 지수 데이터에 사용
+    korean_date          : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
+    us_market_date       : 리뷰 대상 미국 정규장 마감 날짜 — 본문 지수 데이터에 사용
+    korean_datetime_str  : 포스팅 작성 시각 전체 (예: '2026-07-09 09:00 KST')
+    ny_reference_str     : 뉴욕 기준 시각 전체 (예: '2026-07-08 20:00 EDT')
     """
     market_text = (
+        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
         f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
         f"📅 리뷰 대상 미국 증시 마감 날짜: {us_market_date}\n"
         f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
@@ -220,11 +252,27 @@ def _build_morning_prompt(
     )
 
 
-def _build_evening_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
-    """저녁 포스팅용 프롬프트: 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표 중심."""
+def _build_evening_prompt(
+    korean_date: str,
+    us_market_date: str,
+    market_data: dict,
+    news_list: list[dict],
+    korean_datetime_str: str = "",
+    ny_reference_str: str = "",
+) -> str:
+    """저녁 포스팅용 프롬프트: 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표 중심.
+
+    korean_date          : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
+    us_market_date       : 가장 최근에 마감된 미국 정규장 날짜 ('전일 마감' 리뷰 대상)
+    korean_datetime_str  : 포스팅 작성 시각 전체
+    ny_reference_str     : 뉴욕 기준 현재 시각 전체 (보통 프리마켓 시간대)
+    """
     market_text = (
-        f"📅 포스팅 작성 날짜 (한국 시간): {date}\n"
-        f"※ 제목에는 반드시 이 한국 날짜를 사용하세요.\n\n"
+        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
+        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
+        f"📅 전일 마감 미국 정규장 날짜: {us_market_date}\n"
+        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
+        f"본문의 '전일 마감'은 미국 날짜({us_market_date}) 기준임을 명확히 하세요.\n\n"
         f"[현재 선물/프리마켓 지수]\n"
     )
     for name, data in market_data.items():
@@ -393,17 +441,26 @@ class ContentGenerator:
         mode: str = "morning",
         korean_date: str | None = None,
         us_market_date: str | None = None,
+        korean_datetime_str: str | None = None,
+        ny_reference_str: str | None = None,
     ) -> dict:
+        # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
+        _korean_date = korean_date or date
+        _us_market_date = us_market_date or date
+        _korean_datetime_str = korean_datetime_str or ""
+        _ny_reference_str = ny_reference_str or ""
+
         if mode == "evening":
             system = SYSTEM_EVENING
-            prompt = _build_evening_prompt(date, market_data, news_list)
+            prompt = _build_evening_prompt(
+                _korean_date, _us_market_date, market_data, news_list,
+                _korean_datetime_str, _ny_reference_str,
+            )
         else:
             system = SYSTEM_MORNING
-            # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
-            _korean_date = korean_date or date
-            _us_market_date = us_market_date or date
             prompt = _build_morning_prompt(
-                _korean_date, _us_market_date, market_data, news_list
+                _korean_date, _us_market_date, market_data, news_list,
+                _korean_datetime_str, _ny_reference_str,
             )
 
         logger.info(f"Gemini API 호출 중 (모드: {mode})...")
