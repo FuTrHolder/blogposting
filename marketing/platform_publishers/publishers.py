@@ -202,31 +202,31 @@ class ThreadsPublisher(PlatformPublisher):
         return text.strip()
 
     def _resolve_image_url(self, content: dict) -> str:
-        """
-        이미지 URL 우선순위 결정.
-        1. THREADS_IMAGE_URL 환경변수
-        2. 티스토리 블로그 대표 썸네일 URL (blog_thumbnail_url)
-        3. INSTAGRAM_IMAGE_URL 환경변수
-        """
-        # 1순위: 환경변수 수동 지정
-        if self.image_url:
-            logger.info(f"Threads 이미지: 환경변수 URL 사용")
-            return self.image_url
+    # 1순위: 환경변수 수동 지정
+    if self.image_url:
+        logger.info("Threads 이미지: 환경변수 URL 사용")
+        return self.image_url
 
-        # 2순위: 티스토리 썸네일 (크롤러가 추출한 공개 URL)
-        tistory_thumb = content.get("blog_thumbnail_url", "")
-        if tistory_thumb and tistory_thumb.startswith("http"):
+    # 2순위: 티스토리 썸네일
+    # → 다음 CDN(daumcdn.net)은 Threads 서버에서 접근 불가하므로 제외
+    tistory_thumb = content.get("blog_thumbnail_url", "")
+    if tistory_thumb and tistory_thumb.startswith("http"):
+        if "daumcdn.net" in tistory_thumb:
+            logger.warning(
+                "Threads 이미지: 다음 CDN URL은 Threads 서버 접근 불가 → 텍스트 전용으로 전환"
+            )
+        else:
             logger.info(f"Threads 이미지: 티스토리 썸네일 사용 → {tistory_thumb[:60]}...")
             return tistory_thumb
 
-        # 3순위: Instagram 이미지 URL 환경변수 (공유 가능한 경우)
-        insta_url = os.environ.get("INSTAGRAM_IMAGE_URL", "")
-        if insta_url:
-            logger.info(f"Threads 이미지: INSTAGRAM_IMAGE_URL 사용")
-            return insta_url
+    # 3순위: Instagram URL 환경변수
+    insta_url = os.environ.get("INSTAGRAM_IMAGE_URL", "")
+    if insta_url:
+        logger.info("Threads 이미지: INSTAGRAM_IMAGE_URL 사용")
+        return insta_url
 
-        logger.info("Threads 이미지: 사용 가능한 공개 URL 없음 → 텍스트 전용")
-        return ""
+    logger.info("Threads 이미지: 사용 가능한 공개 URL 없음 → 텍스트 전용")
+    return ""
 
     def publish(self, content: dict, media_paths: dict) -> dict:
         if not self.user_id or not self.access_token:
