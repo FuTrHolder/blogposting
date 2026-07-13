@@ -260,6 +260,9 @@ class ThreadsPublisher(PlatformPublisher):
                 timeout=30,
             )
             data1 = resp1.json()
+            # ↓ 추가: 응답 전체를 로그에 출력
+            logger.info(f"Threads 컨테이너 응답 (status={resp1.status_code}): {data1}")
+          
             if "error" in data1:
                 return {"status": "error", "message": data1["error"]["message"]}
 
@@ -270,6 +273,9 @@ class ThreadsPublisher(PlatformPublisher):
                 timeout=30,
             )
             data2 = resp2.json()
+            # ↓ 추가: 응답 전체를 로그에 출력
+            logger.info(f"Threads 발행 응답 (status={resp2.status_code}): {data2}")
+          
             if "error" in data2:
                 return {"status": "error", "message": data2["error"]["message"]}
 
