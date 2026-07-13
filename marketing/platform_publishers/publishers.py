@@ -225,8 +225,8 @@ class ThreadsPublisher(PlatformPublisher):
             logger.info("Threads 이미지: INSTAGRAM_IMAGE_URL 사용")
             return insta_url
 
-    logger.info("Threads 이미지: 사용 가능한 공개 URL 없음 → 텍스트 전용")
-    return ""
+        logger.info("Threads 이미지: 사용 가능한 공개 URL 없음 → 텍스트 전용")
+        return ""
 
     def publish(self, content: dict, media_paths: dict) -> dict:
         if not self.user_id or not self.access_token:
