@@ -41,7 +41,7 @@ jobs:
       - name: 📁 디렉토리 준비
         run: mkdir -p images
 
-      - name: 🌅 오전 원고 생성 및 이메일 발송
+      - name: 🌅 오전 원고 생성 및 이메일 발송 + 대시보드 업로드
         env:
           POST_MODE: morning
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -50,6 +50,10 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
+          DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: python main.py
 
   evening-post:
@@ -76,7 +80,7 @@ jobs:
       - name: 📁 디렉토리 준비
         run: mkdir -p images
 
-      - name: 🌙 저녁 원고 생성 및 이메일 발송
+      - name: 🌙 저녁 원고 생성 및 이메일 발송 + 대시보드 업로드
         env:
           POST_MODE: evening
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -85,4 +89,8 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
+          DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: python main.py
