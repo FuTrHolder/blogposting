@@ -69,10 +69,19 @@ class YouTubePublisher(PlatformPublisher):
         if not all([self.client_id, self.client_secret, self.refresh_token]):
             return {"status": "skip", "message": "YouTube OAuth 미설정"}
 
-        title       = content["blog_title"][:100]
+        title    = content["blog_title"][:100]
+        blog_url = content.get("blog_url", "")
+
+        # 설명란: 카카오 스토리채널 게시물 본문을 그대로 사용
+        # (KakaoStoryPublisher와 동일하게 [블로그 URL] 플레이스홀더 치환)
+        kakao_text = content.get("kakao_post", "")
+        if blog_url:
+            kakao_text = kakao_text.replace("[블로그 URL]", blog_url)
+            kakao_text = kakao_text.replace("[Blog URL]", blog_url)
+
         description = (
-            f"{content.get('facebook_post', '')}\n\n"
-            f"🔗 전체 분석: {content['blog_url']}\n\n"
+            f"{kakao_text}\n\n"
+            f"🔗 전체 분석: {blog_url}\n\n"
             "⚠️ 투자 권유가 아닌 정보 제공 목적입니다."
         )
         tags = ["미국증시", "주식", "나스닥", "S&P500", "증시분석"]
@@ -110,8 +119,20 @@ class YouTubePublisher(PlatformPublisher):
             logger.info(f"YouTube Shorts 업로드 완료: {url}")
             return {"status": "ok", "url": url, "message": "업로드 성공"}
         except Exception as e:
+            err_str = str(e)
+            if "invalid_grant" in err_str:
+                diag = (
+                    "리프레시 토큰이 거부되었습니다(invalid_grant). 주로 다음 중 하나가 원인입니다: "
+                    "① OAuth 동의 화면이 '테스트' 상태 → 리프레시 토큰이 7일 후 자동 만료됨 "
+                    "(Google Cloud Console에서 동의 화면을 '프로덕션'으로 게시하거나, "
+                    "OAuth Playground로 토큰을 재발급해 YOUTUBE_REFRESH_TOKEN을 갱신하세요). "
+                    "② GitHub Secret에 저장된 토큰 값에 공백/개행이 섞였을 가능성. "
+                    "③ Google 계정 보안 설정에서 앱 접근 권한이 취소되었을 가능성."
+                )
+                logger.error(f"YouTube 업로드 실패 (invalid_grant): {diag}")
+                return {"status": "error", "message": diag}
             logger.error(f"YouTube 업로드 실패: {e}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": err_str}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
