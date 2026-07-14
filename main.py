@@ -1,6 +1,7 @@
 """
-미국 증시 블로그 자동화 메인 스크립트 (이메일 발송 버전)
-실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(SD/Unsplash) → 이메일 발송(Gmail)
+미국 증시 블로그 자동화 메인 스크립트 (이메일 발송 + Cloudflare 대시보드 업로드 버전)
+실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(SD/Unsplash)
+          → Cloudflare 대시보드 업로드 → 이메일 발송(Gmail)
 
 포스팅 모드:
   morning (오전 9시 KST) : 미국 전일 증시 마감 리뷰
@@ -15,6 +16,11 @@
 정확히 변환한 뒤, 그 값을 그대로 Gemini 프롬프트에 명시적으로 전달합니다.
 (AI가 매번 시간대를 스스로 계산하게 하면 오류가 잦으므로, 계산은 코드에서 하고
  결과값만 "사실"로 프롬프트에 제공하는 방식)
+
+Cloudflare 대시보드 업로드:
+  - DASHBOARD_API_URL이 설정된 경우에만 동작 (미설정 시 조용히 건너뜀)
+  - 업로드 실패해도 이메일 발송 등 나머지 흐름은 그대로 진행됨
+  - 대시보드가 안정화되기 전까지는 이메일 발송과 함께 병행 운영
 """
 
 import os
@@ -27,6 +33,7 @@ from news_fetcher import NewsFetcher
 from content_generator import ContentGenerator
 from image_generator import ImageGenerator
 from email_sender import EmailSender
+import dashboard_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -161,7 +168,7 @@ def main():
     logger.info(f"===== 미국 증시 블로그 자동화 시작 [{mode.upper()} / {post_label}] =====")
 
     # 1. 뉴스 및 시장 데이터 수집
-    logger.info("[1/4] 뉴스 및 시장 데이터 수집 중...")
+    logger.info("[1/5] 뉴스 및 시장 데이터 수집 중...")
     fetcher = NewsFetcher(alpha_vantage_key=os.environ["ALPHA_VANTAGE_API_KEY"])
     market_data = fetcher.get_market_summary()
     news_list = fetcher.get_top_news(limit=8)
@@ -171,7 +178,7 @@ def main():
     logger.info(f"  → 뉴스 {len(news_list)}건 수집 완료")
 
     # 2. 블로그 글 생성
-    logger.info(f"[2/4] 블로그 글 생성 중 (Gemini / {mode})...")
+    logger.info(f"[2/5] 블로그 글 생성 중 (Gemini / {mode})...")
     generator = ContentGenerator(api_key=os.environ["GEMINI_API_KEY"])
 
     post = generator.generate_post(
@@ -189,7 +196,7 @@ def main():
     logger.info(f"  → 글자 수: {len(post['content'])}자")
 
     # 3. 이미지 생성
-    logger.info("[3/4] 썸네일 이미지 생성 중...")
+    logger.info("[3/5] 썸네일 이미지 생성 중...")
     img_gen = ImageGenerator(hf_token=os.environ.get("HF_API_TOKEN", ""))
     timestamp = now_kst.strftime("%Y%m%d_%H%M")
     image_path = img_gen.generate(
@@ -200,8 +207,21 @@ def main():
     )
     logger.info(f"  → 이미지: {image_path}")
 
-    # 4. 이메일 발송
-    logger.info("[4/4] 이메일 발송 중...")
+    # 4. Cloudflare 대시보드 업로드 (DASHBOARD_API_URL 미설정 시 자동 스킵)
+    logger.info("[4/5] Cloudflare 대시보드 업로드 중...")
+    post_date_str = now_kst.strftime("%Y-%m-%d")
+    dashboard_ok = dashboard_client.push_content(
+        post_date=post_date_str,
+        mode=mode,
+        title=post["title"],
+        content=post["content"],
+        tags=post["tags"],
+        image_path=image_path,
+    )
+    logger.info(f"  → 대시보드 업로드: {'완료' if dashboard_ok else '건너뜀/실패 (계속 진행)'}")
+
+    # 5. 이메일 발송 (대시보드 안정화 전까지 계속 병행)
+    logger.info("[5/5] 이메일 발송 중...")
     sender = EmailSender(
         gmail_address=os.environ["GMAIL_ADDRESS"],
         gmail_app_password=os.environ["GMAIL_APP_PASSWORD"],
