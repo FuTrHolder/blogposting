@@ -1,8 +1,9 @@
 """
-마케팅 자동화 메인 스크립트 v5
-변경사항 v5:
-  - VideoGenerator에 blog_content, blog_title 전달 (나래이션 기반 영상 생성)
-  - 기타 기존 로직 동일 유지
+마케팅 자동화 메인 스크립트 v6
+변경사항 v6:
+  - 각 플랫폼 발행 결과(링크·썸네일·영상·캡션)를 Cloudflare 대시보드(D1 + R2)에 업로드하는
+    [6/6] 단계 추가. DASHBOARD_API_URL 미설정 시 자동으로 건너뜀.
+  - 기존 로직(v5) 동일 유지: VideoGenerator에 blog_content, blog_title 전달
 
 실행 흐름:
   1. Gist에서 처리 완료 내역 로드 → 중복 방지
@@ -13,6 +14,7 @@
   6. SNS 썸네일 제작
   7. 각 플랫폼 자동 발행
   8. 처리 완료 내역을 Gist에 저장
+  9. 채널별 발행 결과를 Cloudflare 대시보드에 업로드
 """
 
 import os
@@ -22,12 +24,14 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from tistory_crawler.crawler import TistoryCrawler
 from content_adapter.adapter import ContentAdapter
 from video_generator.generator import VideoGenerator
 from video_generator.thumbnail import SNSThumbnailGenerator
 from platform_publishers.publishers import PublisherDispatcher
 from state_manager import GistStateManager
+import dashboard_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,29 +42,21 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 
-
-# ── 파일명 정제 헬퍼 (블로그 제목 → 안전한 파일명) ───────────────────────────
-
-def _sanitize_filename(title: str, max_len: int = 80) -> str:
-    """
-    블로그 포스팅 제목을 파일 시스템에서 안전하게 쓸 수 있는 파일명으로 변환합니다.
-    - 파일명에 쓸 수 없는 문자(\\ / : * ? " < > |) 제거
-    - 개행/탭 등 제어문자 제거
-    - 연속 공백은 하나의 공백으로 축소 후 언더스코어로 치환
-    - 너무 길면 max_len 기준으로 자름 (확장자 제외 길이)
-    """
-    if not title:
-        return "untitled"
-    # 제어문자 제거
-    cleaned = "".join(ch for ch in title if unicodedata.category(ch)[0] != "C")
-    # 파일명에 사용 불가한 문자 제거
-    cleaned = re.sub(r'[\\/:*?"<>|]', "", cleaned)
-    # 연속 공백 정리 후 언더스코어로 치환
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    cleaned = cleaned.replace(" ", "_")
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len].rstrip("_")
-    return cleaned or "untitled"
+# 플랫폼별 캡션/썸네일 매핑 (대시보드 업로드용)
+_PLATFORM_TEXT_KEY = {
+    "youtube": "blog_title",
+    "facebook": "facebook_post",
+    "instagram": "instagram_post",
+    "threads": "threads_post",
+    "kakao": "kakao_post",
+}
+_PLATFORM_THUMB_KEY = {
+    "youtube": "facebook",         # 별도 유튜브 전용 썸네일이 없으므로 대표 썸네일 재사용
+    "facebook": "facebook",
+    "instagram": "instagram",
+    "threads": "threads",
+    "kakao": "kakao",
+}
 
 
 # ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
@@ -102,12 +98,42 @@ def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
             else ["city night", "finance", "market"])
 
 
+def _push_results_to_dashboard(
+    post_date: str,
+    mode: str,
+    content: dict,
+    media_paths: dict,
+    results: dict,
+):
+    """채널별 발행 결과를 Cloudflare 대시보드에 업로드합니다. 실패해도 무시하고 진행."""
+    for platform, result in results.items():
+        text_key = _PLATFORM_TEXT_KEY.get(platform)
+        thumb_key = _PLATFORM_THUMB_KEY.get(platform)
+
+        content_text = content.get(text_key, "") if text_key else ""
+        thumbnail_path = media_paths.get(thumb_key) if thumb_key else None
+        video_path = media_paths.get("video") if platform == "youtube" else None
+
+        dashboard_client.push_marketing_result(
+            post_date=post_date,
+            mode=mode,
+            platform=platform,
+            status=result.get("status", ""),
+            message=result.get("message", ""),
+            url=result.get("url", ""),
+            content_text=content_text,
+            thumbnail_path=thumbnail_path,
+            video_path=video_path,
+        )
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────
 
 def main():
     force     = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
     now_kst   = datetime.now(KST)
     timestamp = now_kst.strftime("%Y%m%d_%H%M")
+    post_date_str = now_kst.strftime("%Y-%m-%d")
 
     logger.info("=" * 60)
     logger.info("마케팅 자동화 시작")
@@ -120,7 +146,7 @@ def main():
     state.add_log("RUN_START", f"마케팅 자동화 시작 (force={force})")
 
     # ── 1. 티스토리 새 글 감지 ────────────────────────────────────────────
-    logger.info("[1/5] 티스토리 RSS 크롤링 중...")
+    logger.info("[1/6] 티스토리 RSS 크롤링 중...")
     crawler = TistoryCrawler()
     post    = crawler.get_post_as_dict(force=True)
 
@@ -160,7 +186,7 @@ def main():
     logger.info(f"  → 모드: {post['mode']} | 새 글 처리 시작")
 
     # ── 2. 멀티플랫폼 콘텐츠 생성 ────────────────────────────────────────
-    logger.info("[2/5] Gemini 콘텐츠 어댑터 실행 중...")
+    logger.info("[2/6] Gemini 콘텐츠 어댑터 실행 중...")
     try:
         adapter = ContentAdapter(api_key=os.environ["GEMINI_API_KEY"])
         content = adapter.generate_all(post)
@@ -181,14 +207,11 @@ def main():
     logger.info(f"  → 배경 이미지 키워드: {bg_keywords}")
 
     # ── 3. 영상 생성 (블로그 본문 기반 나래이션) ─────────────────────────
-    logger.info("[3/5] 영상 생성 중... (본문 기반 나래이션 + TTS, BGM 없음)")
+    logger.info("[3/6] 영상 생성 중... (본문 기반 나래이션 + TTS, BGM 없음)")
     video_path = None
     try:
         video_gen      = VideoGenerator(output_dir="videos")
-        # 영상 파일명을 블로그 포스팅 제목 기반으로 생성
-        # → YouTube 업로드 시 snippet.title도 content["blog_title"]을 그대로 쓰므로
-        #   파일명과 YouTube 영상 제목이 항상 동일한 블로그 제목을 따르게 됨
-        video_filename = f"{_sanitize_filename(post_title)}.mp4"
+        video_filename = f"shorts_{post['mode']}_{timestamp}.mp4"
         video_path     = video_gen.generate_with_text_only_fallback(
             script=content.get("youtube_script", []),
             mode=post["mode"],
@@ -206,7 +229,7 @@ def main():
         state.add_log("VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
 
     # ── 4. SNS 썸네일 생성 ───────────────────────────────────────────────
-    logger.info("[4/5] SNS 썸네일 생성 중...")
+    logger.info("[4/6] SNS 썸네일 생성 중...")
     thumb_paths = {}
     try:
         thumb_gen = SNSThumbnailGenerator(
@@ -232,7 +255,7 @@ def main():
         media_paths["video"] = video_path
 
     # ── 5. 플랫폼 발행 ───────────────────────────────────────────────────
-    logger.info("[5/5] 플랫폼 발행 중...")
+    logger.info("[5/6] 플랫폼 발행 중...")
     dispatcher = PublisherDispatcher()
     results    = dispatcher.publish_all(content=content, media_paths=media_paths)
 
@@ -260,6 +283,20 @@ def main():
         post_id=post_id, post_title=post_title,
     )
     state.save()
+
+    # ── 6. Cloudflare 대시보드에 채널별 결과 업로드 ───────────────────────
+    logger.info("[6/6] Cloudflare 대시보드 업로드 중...")
+    try:
+        _push_results_to_dashboard(
+            post_date=post_date_str,
+            mode=post["mode"],
+            content=content,
+            media_paths=media_paths,
+            results=results,
+        )
+        logger.info("  → 대시보드 업로드 완료 (DASHBOARD_API_URL 미설정 시 건너뜀)")
+    except Exception as e:
+        logger.warning(f"  → 대시보드 업로드 중 예외 발생 (무시하고 종료): {e}")
 
     logger.info("=" * 60)
     logger.info("마케팅 자동화 완료")
