@@ -1,0 +1,51 @@
+name: ☁️ Cloudflare 리소스 최초 설정 (D1 + R2 + Pages, 수동 1회 실행)
+
+# 사용법:
+#   1. GitHub Secrets에 CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID 등록
+#      (API 토큰 권한: Account > D1:Edit, Workers R2 Storage:Edit, Cloudflare Pages:Edit)
+#   2. Actions 탭 > 이 워크플로우 > Run workflow 로 1회 수동 실행
+#   3. 실행 로그의 "database_id" 값을 복사해 dashboard/wrangler.toml 에 붙여넣고 커밋
+#   4. 이후에는 deploy_dashboard.yml 이 dashboard/ 변경 시마다 자동 배포함
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🗄️ D1 데이터베이스 생성 (이미 있으면 안내만 출력)
+        working-directory: dashboard
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler@latest d1 create blogposting-db || echo "⚠️ 이미 존재하거나 생성 실패 — 위 로그를 확인하세요."
+
+      - name: 📦 R2 버킷 생성 (이미 있으면 안내만 출력)
+        working-directory: dashboard
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler@latest r2 bucket create blogposting-assets || echo "⚠️ 이미 존재하거나 생성 실패 — 위 로그를 확인하세요."
+
+      - name: 🌐 Pages 프로젝트 생성 (이미 있으면 안내만 출력)
+        working-directory: dashboard
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler@latest pages project create blogposting-dashboard --production-branch=main || echo "⚠️ 이미 존재하거나 생성 실패 — 위 로그를 확인하세요."
+
+      - name: 📋 다음 단계 안내
+        run: |
+          echo "======================================================================"
+          echo "1) 위 'D1 데이터베이스 생성' 로그에서 database_id 값을 복사하세요."
+          echo "2) dashboard/wrangler.toml 의 database_id = \"REPLACE_WITH_D1_DATABASE_ID\""
+          echo "   부분을 실제 값으로 바꾸고 커밋하세요."
+          echo "3) 그 다음부터는 deploy_dashboard.yml 이 dashboard/ 변경 시마다 자동 배포합니다."
+          echo "======================================================================"
