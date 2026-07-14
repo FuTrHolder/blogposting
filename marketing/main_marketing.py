@@ -39,6 +39,30 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 
+# ── 파일명 정제 헬퍼 (블로그 제목 → 안전한 파일명) ───────────────────────────
+
+def _sanitize_filename(title: str, max_len: int = 80) -> str:
+    """
+    블로그 포스팅 제목을 파일 시스템에서 안전하게 쓸 수 있는 파일명으로 변환합니다.
+    - 파일명에 쓸 수 없는 문자(\\ / : * ? " < > |) 제거
+    - 개행/탭 등 제어문자 제거
+    - 연속 공백은 하나의 공백으로 축소 후 언더스코어로 치환
+    - 너무 길면 max_len 기준으로 자름 (확장자 제외 길이)
+    """
+    if not title:
+        return "untitled"
+    # 제어문자 제거
+    cleaned = "".join(ch for ch in title if unicodedata.category(ch)[0] != "C")
+    # 파일명에 사용 불가한 문자 제거
+    cleaned = re.sub(r'[\\/:*?"<>|]', "", cleaned)
+    # 연속 공백 정리 후 언더스코어로 치환
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.replace(" ", "_")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip("_")
+    return cleaned or "untitled"
+
+
 # ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
 
 def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
@@ -161,7 +185,10 @@ def main():
     video_path = None
     try:
         video_gen      = VideoGenerator(output_dir="videos")
-        video_filename = f"shorts_{post['mode']}_{timestamp}.mp4"
+        # 영상 파일명을 블로그 포스팅 제목 기반으로 생성
+        # → YouTube 업로드 시 snippet.title도 content["blog_title"]을 그대로 쓰므로
+        #   파일명과 YouTube 영상 제목이 항상 동일한 블로그 제목을 따르게 됨
+        video_filename = f"{_sanitize_filename(post_title)}.mp4"
         video_path     = video_gen.generate_with_text_only_fallback(
             script=content.get("youtube_script", []),
             mode=post["mode"],
