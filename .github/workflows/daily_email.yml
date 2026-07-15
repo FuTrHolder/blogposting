@@ -1,10 +1,6 @@
 name: 미국 증시 블로그 원고 이메일 발송
 
 on:
-  schedule:
-    - cron: "0 0 * * 2-6"   # 화~토 오전 9시 KST (UTC 00:00) - 전일 마감 리뷰
-    - cron: "0 12 * * 1-5"  # 월~금 저녁 9시 KST (UTC 12:00) - 프리마켓 & 이슈
-
   workflow_dispatch:
     inputs:
       post_mode:
