@@ -1,10 +1,14 @@
 // POST /api/ingest/content
 // GitHub Actions(daily_email.yml)가 블로그 본문 + 썸네일 URL(GitHub Release 링크)을
-// JSON으로 전송하는 엔드포인트. 더 이상 바이너리를 다루지 않습니다 (R2 미사용).
-// Cloudflare Access 정책으로 이 경로를 Service Token 전용으로 막아두는 것을 권장합니다.
+// JSON으로 전송하는 엔드포인트. X-Ingest-Secret 헤더로 검증합니다 (Cloudflare Access 불필요).
 
 export async function onRequestPost(context) {
   const { request, env } = context;
+
+  const secret = request.headers.get("X-Ingest-Secret") || "";
+  if (!env.INGEST_SECRET || secret !== env.INGEST_SECRET) {
+    return json({ error: "인증 실패" }, 401);
+  }
 
   try {
     const body = await request.json();
