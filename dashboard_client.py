@@ -33,13 +33,10 @@ _GITHUB_API = "https://api.github.com"
 # ── Cloudflare 대시보드 인증/주소 ────────────────────────────────────────────
 
 def _dashboard_headers() -> dict:
-    headers = {}
-    client_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
-    client_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
-    if client_id and client_secret:
-        headers["CF-Access-Client-Id"] = client_id
-        headers["CF-Access-Client-Secret"] = client_secret
-    return headers
+    secret = os.environ.get("INGEST_SECRET", "")
+    if secret:
+        return {"X-Ingest-Secret": secret}
+    return {}
 
 
 def _dashboard_base_url() -> str:
