@@ -6,7 +6,9 @@ on:
     types: [completed]
     branches: [main]
 
- 
+  schedule:
+    - cron: "*/30 * * * *"
+
   # 대시보드의 "마케팅 워크플로우 실행" 버튼이 이 이벤트를 트리거합니다.
   # (Cloudflare Worker → GitHub repository_dispatch API 호출)
   repository_dispatch:
@@ -111,6 +113,9 @@ jobs:
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          # GitHub Release에 썸네일/영상 업로드 시 사용 (별도 발급 불필요, Actions 자동 제공)
+          # 주의: 위 GITHUB_TOKEN은 이미 Gist 접근용(GH_PAT)으로 쓰이고 있어 이름을 분리했습니다.
+          GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
           # X(Twitter) 완전 제거됨
 
