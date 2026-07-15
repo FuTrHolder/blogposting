@@ -207,6 +207,14 @@ def main():
     )
     logger.info(f"  → 이미지: {image_path}")
 
+    # 3-1. 썸네일 출처에 맞는 저작자 표시를 본문 끝에 자동 추가
+    #      (이메일/대시보드 모두 post["content"]를 그대로 사용하므로 여기 한 곳에서만
+    #      처리하면 양쪽에 자동 반영됩니다)
+    attribution = img_gen.get_attribution_text()
+    if attribution:
+        post["content"] = post["content"].rstrip() + f"\n\n---\n*{attribution}*"
+        logger.info(f"  → 저작자 표시 추가: {attribution}")
+
     # 4. Cloudflare 대시보드 업로드 (DASHBOARD_API_URL 미설정 시 자동 스킵)
     logger.info("[4/5] Cloudflare 대시보드 업로드 중...")
     post_date_str = now_kst.strftime("%Y-%m-%d")
