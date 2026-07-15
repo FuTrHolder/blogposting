@@ -111,8 +111,7 @@ jobs:
 
           # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           # GitHub Release에 썸네일/영상 업로드 시 사용 (별도 발급 불필요, Actions 자동 제공)
           # 주의: 위 GITHUB_TOKEN은 이미 Gist 접근용(GH_PAT)으로 쓰이고 있어 이름을 분리했습니다.
           GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}

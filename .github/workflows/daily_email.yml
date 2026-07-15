@@ -54,8 +54,7 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           # GitHub Release에 썸네일 업로드 시 사용 (별도 발급 불필요, Actions 자동 제공)
           GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python main.py
@@ -97,8 +96,7 @@ jobs:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
           # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           # GitHub Release에 썸네일 업로드 시 사용 (별도 발급 불필요, Actions 자동 제공)
           GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python main.py
