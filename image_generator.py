@@ -92,7 +92,19 @@ class ImageGenerator:
         # 하위 호환을 위해 인자는 그대로 받아둡니다.
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
+        self.last_image_source = ""  # "Pexels" | "Pixabay" | "Unsplash" | ""
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    def get_attribution_text(self) -> str:
+        """가장 최근 generate() 호출에서 실제로 사용된 이미지 출처에 맞는
+        저작자 표시 문구를 반환합니다. 각 서비스 라이선스는 표시를 의무로
+        요구하지는 않지만, 안전하게 자동으로 남겨둡니다."""
+        credit_map = {
+            "Pexels": "사진 제공: Pexels",
+            "Pixabay": "사진 제공: Pixabay",
+            "Unsplash": "사진 제공: Unsplash",
+        }
+        return credit_map.get(self.last_image_source, "")
 
     def generate(
         self,
@@ -106,14 +118,17 @@ class ImageGenerator:
 
         result = self._fetch_pexels(keywords, filename)
         if result:
+            self.last_image_source = "Pexels"
             return result
 
         logger.info("Pixabay로 대체 시도...")
         result = self._fetch_pixabay(keywords, filename)
         if result:
+            self.last_image_source = "Pixabay"
             return result
 
         logger.warning("Pexels/Pixabay 모두 실패. 기본 이미지 사용")
+        self.last_image_source = "Unsplash"
         return self._default_fallback(filename, mode)
 
     # ── Pexels ────────────────────────────────────────────────────────────
