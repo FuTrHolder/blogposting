@@ -1,15 +1,12 @@
+# Cloudflare Pages "Git 연결" 방식에서는 이 파일이 필수는 아니지만,
+# 어떤 바인딩 이름을 쓰는지 문서화하는 용도로 남겨둡니다.
+# 실제 D1 바인딩과 환경변수는 Cloudflare 대시보드(Settings > Functions)에서
+# 직접 설정하세요 — 계정 관련 ID는 이 파일에 전혀 들어가지 않습니다.
+#
+# R2는 사용하지 않습니다 (이미지/영상은 GitHub Releases에 저장되고
+# 공개 URL만 D1에 기록됩니다).
 name = "blogposting-dashboard"
-pages_build_output_dir = "public"
 compatibility_date = "2026-07-01"
 
-# 1) 아래 database_id는 cloudflare_setup.yml 워크플로우를 최초 1회 실행한 뒤
-#    출력 로그에서 확인해 그대로 교체하세요.
-[[d1_databases]]
-binding = "DB"
-database_name = "blogposting-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
-# 2) R2 버킷은 이름만 있으면 되므로 별도 ID 교체가 필요 없습니다.
-[[r2_buckets]]
-binding = "ASSETS"
-bucket_name = "blogposting-assets"
+# 참고용 바인딩 이름 (실제 설정은 Cloudflare 대시보드에서):
+#   D1 바인딩 변수명 : DB → 데이터베이스: blogposting-db
