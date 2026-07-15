@@ -1,58 +1,46 @@
 // POST /api/ingest/marketing-result
-// GitHub Actions(marketing_automation.yml)가 채널별 발행 결과를 전송하는 엔드포인트.
+// GitHub Actions(marketing_automation.yml)가 채널별 발행 결과 + 미디어 URL(GitHub
+// Release 링크)을 JSON으로 전송하는 엔드포인트. 바이너리를 다루지 않습니다 (R2 미사용).
 // Cloudflare Access 정책으로 이 경로를 Service Token 전용으로 막아두는 것을 권장합니다.
 
 export async function onRequestPost(context) {
   const { request, env } = context;
 
   try {
-    const form = await request.formData();
-    const postDate = form.get("post_date");
-    const mode = form.get("mode");
-    const platform = form.get("platform");
-    const status = form.get("status") || "";
-    const message = form.get("message") || "";
-    const url = form.get("url") || "";
-    const contentText = form.get("content_text") || "";
-    const thumbnail = form.get("thumbnail");
-    const video = form.get("video");
+    const body = await request.json();
+    const postDate = body.post_date;
+    const mode = body.mode;
+    const platform = body.platform;
+    const status = body.status || "";
+    const message = body.message || "";
+    const url = body.url || "";
+    const contentText = body.content_text || "";
+    const thumbnailUrl = body.thumbnail_url || "";
+    const videoUrl = body.video_url || "";
 
     if (!postDate || !mode || !platform) {
       return json({ error: "post_date, mode, platform은 필수입니다." }, 400);
     }
 
     const id = `${postDate}_${mode}_${platform}`;
-    let thumbnailKey = null;
-    let videoKey = null;
-
-    if (thumbnail && typeof thumbnail === "object" && thumbnail.size > 0) {
-      const ext = (thumbnail.type || "").includes("png") ? "png" : "jpg";
-      thumbnailKey = `marketing/${id}.${ext}`;
-      await env.ASSETS.put(thumbnailKey, await thumbnail.arrayBuffer(), {
-        httpMetadata: { contentType: thumbnail.type || "image/jpeg" },
-      });
-    }
-
-    if (video && typeof video === "object" && video.size > 0) {
-      videoKey = `marketing/${id}.mp4`;
-      await env.ASSETS.put(videoKey, await video.arrayBuffer(), {
-        httpMetadata: { contentType: "video/mp4" },
-      });
-    }
 
     await env.DB.prepare(
       `INSERT INTO marketing_results
-         (id, post_date, mode, platform, status, message, url, thumbnail_key, video_key, content_text)
+         (id, post_date, mode, platform, status, message, url, thumbnail_url, video_url, content_text)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
        ON CONFLICT(id) DO UPDATE SET
          status = excluded.status,
          message = excluded.message,
          url = excluded.url,
-         thumbnail_key = COALESCE(excluded.thumbnail_key, marketing_results.thumbnail_key),
-         video_key = COALESCE(excluded.video_key, marketing_results.video_key),
+         thumbnail_url = CASE WHEN excluded.thumbnail_url != ''
+                              THEN excluded.thumbnail_url
+                              ELSE marketing_results.thumbnail_url END,
+         video_url = CASE WHEN excluded.video_url != ''
+                          THEN excluded.video_url
+                          ELSE marketing_results.video_url END,
          content_text = excluded.content_text`
     )
-      .bind(id, postDate, mode, platform, status, message, url, thumbnailKey, videoKey, contentText)
+      .bind(id, postDate, mode, platform, status, message, url, thumbnailUrl, videoUrl, contentText)
       .run();
 
     return json({ ok: true, id });
