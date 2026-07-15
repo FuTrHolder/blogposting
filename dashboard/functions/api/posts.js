@@ -17,7 +17,7 @@ export async function onRequestGet(context) {
   }
 
   const { results } = await env.DB.prepare(
-    `SELECT id, post_date, mode, title, thumbnail_key, created_at
+    `SELECT id, post_date, mode, title, thumbnail_url, created_at
      FROM posts ORDER BY post_date DESC, mode ASC LIMIT 60`
   ).all();
 
