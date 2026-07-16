@@ -22,8 +22,17 @@ import requests
 import logging
 import os
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
+
+# 이미지 우측 하단 출처 표시용 폰트 후보 (GitHub Actions ubuntu-latest 기본 제공 폰트).
+# 한글 폰트(fonts-noto-cjk)는 이 워크플로우에 설치돼 있지 않으므로,
+# 출처 표시는 영문("Photo: Pexels")으로 남겨 별도 설치 없이 항상 렌더링되게 합니다.
+_WATERMARK_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
 
 # 모드별 검색 키워드 (Pexels/Pixabay 공용 — 자연어 구문으로 검색)
 TOPIC_KEYWORDS = {
@@ -84,6 +93,50 @@ def _daily_index(length: int) -> int:
         return 0
     seed = int(datetime.now().strftime("%Y%m%d"))
     return seed % length
+
+
+def _load_watermark_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in _WATERMARK_FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _watermark_image(file_path: str, text: str) -> None:
+    """이미지 우측 하단에 작은 반투명 출처 표시를 그립니다. 실패해도 무시합니다."""
+    try:
+        img = Image.open(file_path).convert("RGBA")
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        font_size = max(14, img.width // 45)
+        font = _load_watermark_font(font_size)
+
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad = 8
+        margin = 14
+        x = img.width - text_w - pad * 2 - margin
+        y = img.height - text_h - pad * 2 - margin
+
+        draw.rectangle(
+            [x, y, x + text_w + pad * 2, y + text_h + pad * 2],
+            fill=(0, 0, 0, 140),
+        )
+        draw.text(
+            (x + pad - bbox[0], y + pad - bbox[1]),
+            text,
+            font=font,
+            fill=(255, 255, 255, 235),
+        )
+
+        result = Image.alpha_composite(img, overlay).convert("RGB")
+        result.save(file_path, quality=90)
+    except Exception as e:
+        logger.warning(f"이미지 출처 표시 삽입 실패 (무시하고 진행): {e}")
 
 
 class ImageGenerator:
@@ -161,6 +214,7 @@ class ImageGenerator:
             file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
             with open(file_path, "wb") as f:
                 f.write(ir.content)
+            _watermark_image(file_path, "Photo: Pexels")
             logger.info(f"Pexels 이미지 저장: {file_path} ({len(ir.content)//1024}KB)")
             return file_path
         except Exception as e:
@@ -204,6 +258,7 @@ class ImageGenerator:
             file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
             with open(file_path, "wb") as f:
                 f.write(ir.content)
+            _watermark_image(file_path, "Photo: Pixabay")
             logger.info(f"Pixabay 이미지 저장: {file_path} ({len(ir.content)//1024}KB)")
             return file_path
         except Exception as e:
@@ -220,6 +275,7 @@ class ImageGenerator:
             if resp.status_code == 200:
                 with open(fallback_path, "wb") as f:
                     f.write(resp.content)
+                _watermark_image(fallback_path, "Photo: Unsplash")
                 return fallback_path
         except Exception:
             pass
