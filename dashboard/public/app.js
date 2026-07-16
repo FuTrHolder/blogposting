@@ -3,8 +3,14 @@ let currentMode = null;
 let currentThumbnailUrl = "";
 
 // ── 이미지를 실제로 클립보드에 복사 (PNG로 변환해서 어디든 붙여넣기 가능하게) ──────
+// GitHub Release 자산은 CORS를 지원하지 않아 직접 fetch()가 막히므로,
+// 같은 출처(same-origin)인 /proxy-image를 거쳐서 가져옵니다.
 async function copyImageToClipboard(url) {
-  const resp = await fetch(url);
+  const proxied = `/proxy-image?url=${encodeURIComponent(url)}`;
+  const resp = await fetch(proxied);
+  if (!resp.ok) {
+    throw new Error(`이미지를 가져오지 못했습니다 (${resp.status})`);
+  }
   const blob = await resp.blob();
   const bitmap = await createImageBitmap(blob);
   const canvas = document.createElement("canvas");
