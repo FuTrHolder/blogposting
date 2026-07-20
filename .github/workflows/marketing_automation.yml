@@ -1,11 +1,6 @@
 name: 📣 마케팅 자동화 (SNS 자동 업로드)
 
 on:
-  workflow_run:
-    workflows: ["미국 증시 블로그 원고 이메일 발송"]
-    types: [completed]
-    branches: [main]
-
   # 대시보드의 "마케팅 워크플로우 실행" 버튼이 이 이벤트를 트리거합니다.
   # (Cloudflare Worker → GitHub repository_dispatch API 호출)
   repository_dispatch:
