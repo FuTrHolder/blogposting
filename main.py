@@ -33,6 +33,7 @@ from news_fetcher import NewsFetcher
 from content_generator import ContentGenerator
 from image_generator import ImageGenerator
 from email_sender import EmailSender
+from fact_reference import build_fact_reference
 import dashboard_client
 
 logging.basicConfig(
@@ -177,6 +178,22 @@ def main():
         sys.exit(1)
     logger.info(f"  → 뉴스 {len(news_list)}건 수집 완료")
 
+    # 1-1. 사실 기준표(Fact Reference) 구성 — 실적/경제지표 발표일 팩트체크용
+    #      기존 ALPHA_VANTAGE_API_KEY를 재사용하므로 별도 비용/키 발급이 없습니다.
+    #      실패하더라도(네트워크 오류 등) 빈 값으로 안전하게 진행됩니다.
+    logger.info("[1-1] 실적/경제지표 사실 기준표 구성 중...")
+    try:
+        fact_reference_block, fact_lookup = build_fact_reference(
+            alpha_vantage_key=os.environ.get("ALPHA_VANTAGE_API_KEY", ""),
+            now_kst=now_kst,
+        )
+        n_earnings = len(fact_lookup.get("earnings", {}))
+        n_macro = len(fact_lookup.get("macro", []))
+        logger.info(f"  → 확인된 실적 발표일 {n_earnings}건, 매크로 지표 {n_macro}건")
+    except Exception as e:
+        logger.warning(f"  → 사실 기준표 구성 실패(팩트체크 없이 계속 진행): {e}")
+        fact_reference_block, fact_lookup = "", {}
+
     # 2. 블로그 글 생성
     logger.info(f"[2/5] 블로그 글 생성 중 (Gemini / {mode})...")
     generator = ContentGenerator(api_key=os.environ["GEMINI_API_KEY"])
@@ -190,6 +207,8 @@ def main():
         us_market_date=us_market_date,
         korean_datetime_str=ref["korean_datetime_str"],
         ny_reference_str=ref["ny_reference_str"],
+        fact_reference_block=fact_reference_block,
+        fact_lookup=fact_lookup,
     )
 
     logger.info(f"  → 제목: {post['title']}")
