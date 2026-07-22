@@ -13,6 +13,8 @@ import time
 import urllib.request
 import urllib.error
 
+import fact_checker
+
 logger = logging.getLogger(__name__)
 
 # ── 모델 우선순위: 과부하/불가 시 순서대로 폴백 ─────────────────────────────
@@ -51,6 +53,26 @@ _TIME_FORMAT_RULE = """
    예: "4월 1일 오후 9시 30분(KST) [미국 오전 8시 30분 ET]"
 ⑤ 애프터마켓·프리마켓 시간대 안내 시에도 동일하게 KST로 표기
    예: "애프터마켓(한국 시간 4월 1일 오전 5시~9시 30분 KST)"
+────────────────────────────────────────
+"""
+
+# ── 공통 팩트체크 규칙 (두 모드 공유) ────────────────────────────────────────
+_FACT_CHECK_RULE = """
+────────────────────────────────────────
+실적 발표일 · 경제지표 발표일 작성 규칙 (반드시 준수 — 블로그 신뢰도 직결)
+────────────────────────────────────────
+① 기업의 실적 발표일이나 미국 경제지표(FOMC, CPI, PPI, 고용보고서 등) 발표일을
+   본문에 구체적인 날짜, 요일, 또는 "오늘", "이번 주", "장 마감 후"처럼
+   임박한 것으로 언급할 때는 반드시 프롬프트 하단에 제공되는
+   "[검증된 사실 정보]"에 나열된 날짜에 근거해야 합니다.
+② "[검증된 사실 정보]"에 없는 기업의 실적 발표일은 스스로 추정하거나
+   과거 기억으로 재계산하지 마세요. 확실하지 않으면 구체적인 날짜를 쓰지
+   말고 "정확한 일정은 아직 확인되지 않았습니다", "발표 시기가 다가오면
+   업데이트하겠습니다"처럼 모호하게 표현하거나 해당 문장을 생략하세요.
+③ 위 목록에 있는 기업이라도, 발표일이 이번 포스팅 시점으로부터 몇 주 이상
+   떨어져 있다면 "오늘", "이번 주", "장 마감 후"처럼 임박한 표현을 쓰지
+   마세요. D-day가 얼마나 남았는지는 [검증된 사실 정보]에 표시되어 있으니
+   그 값을 그대로 참고하세요.
 ────────────────────────────────────────
 """
 
@@ -104,6 +126,7 @@ SYSTEM_MORNING = (
 """
     + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
+    + _FACT_CHECK_RULE
     + """
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이 순수 JSON만):
 {
@@ -152,6 +175,7 @@ SYSTEM_EVENING = (
 """
     + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
+    + _FACT_CHECK_RULE
     + """
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이 순수 JSON만):
 {
@@ -194,6 +218,7 @@ def _build_morning_prompt(
     news_list: list[dict],
     korean_datetime_str: str = "",
     ny_reference_str: str = "",
+    fact_reference_block: str = "",
 ) -> str:
     """오전 포스팅용 프롬프트: 전일 마감 데이터 중심.
 
@@ -242,9 +267,12 @@ def _build_morning_prompt(
         "전일 미국 시장은 혼조세로 마감했습니다."
     )
 
+    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
+
     return (
         f"{market_text}{news_text}\n"
-        f"[시장 요약] {hint}\n\n"
+        f"[시장 요약] {hint}\n"
+        f"{fact_block_text}\n"
         "위 데이터를 바탕으로 전일 미국 증시 마감 리뷰 블로그 포스팅을 작성하고, "
         "지정된 JSON 형식으로만 응답해주세요.\n"
         "제목은 반드시 전날 마감 결과(지수 수치·등락 방향 등)를 구체적으로 담아 "
@@ -259,6 +287,7 @@ def _build_evening_prompt(
     news_list: list[dict],
     korean_datetime_str: str = "",
     ny_reference_str: str = "",
+    fact_reference_block: str = "",
 ) -> str:
     """저녁 포스팅용 프롬프트: 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표 중심.
 
@@ -307,15 +336,20 @@ def _build_evening_prompt(
         "프리마켓은 혼조세를 보이고 있습니다."
     )
 
+    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
+
     return (
         f"{market_text}{news_text}\n"
-        f"[프리마켓 요약] {premarket_hint}\n\n"
+        f"[프리마켓 요약] {premarket_hint}\n"
+        f"{fact_block_text}\n"
         "위 데이터를 바탕으로 저녁 9시 블로그 포스팅을 작성하고, "
         "지정된 JSON 형식으로만 응답해주세요.\n\n"
         "작성 시 반드시 아래 흐름을 따르세요:\n"
         "1) 서론: 전일 미국 정규장 마감을 한 문단으로 간략 리뷰\n"
         "2) 전일 애프터마켓 이후 ~ 현재 프리장까지 발생한 주요 이슈 상세 서술\n"
-        "3) 오늘 밤(미국 시간 기준 당일) 발표 예정 경제지표·기업실적 중심으로 서술\n"
+        "3) 오늘 밤(미국 시간 기준 당일) 발표 예정 경제지표·기업실적 중심으로 서술 "
+        "(단, 실적/지표 발표일을 구체적으로 언급할 때는 반드시 위 '검증된 사실 정보'에 "
+        "근거해야 하며, 목록에 없는 기업의 실적일은 추측해서 쓰지 마세요)\n"
         "4) 현재 프리마켓/선물 동향 및 오늘 밤 강세/약세 시나리오\n\n"
         "제목은 반드시 한국 시간 날짜를 포함하고, "
         "오늘 밤 정규장에 대한 기대감 또는 우려감을 후킹 문구로 표현해주세요."
@@ -443,6 +477,8 @@ class ContentGenerator:
         us_market_date: str | None = None,
         korean_datetime_str: str | None = None,
         ny_reference_str: str | None = None,
+        fact_reference_block: str = "",
+        fact_lookup: dict | None = None,
     ) -> dict:
         # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
         _korean_date = korean_date or date
@@ -454,13 +490,13 @@ class ContentGenerator:
             system = SYSTEM_EVENING
             prompt = _build_evening_prompt(
                 _korean_date, _us_market_date, market_data, news_list,
-                _korean_datetime_str, _ny_reference_str,
+                _korean_datetime_str, _ny_reference_str, fact_reference_block,
             )
         else:
             system = SYSTEM_MORNING
             prompt = _build_morning_prompt(
                 _korean_date, _us_market_date, market_data, news_list,
-                _korean_datetime_str, _ny_reference_str,
+                _korean_datetime_str, _ny_reference_str, fact_reference_block,
             )
 
         logger.info(f"Gemini API 호출 중 (모드: {mode})...")
@@ -474,6 +510,7 @@ class ContentGenerator:
                 post = self._parse_json_response(raw)
                 logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
                 logger.info(f"생성된 제목: {post.get('title', '')}")
+                post = self._fact_check_and_correct(post, system, prompt, fact_lookup)
                 return post
             except json.JSONDecodeError as e:
                 last_error = e
@@ -489,6 +526,93 @@ class ContentGenerator:
         raise RuntimeError(
             f"Gemini 응답을 JSON으로 파싱하는 데 {max_json_retries + 1}회 모두 실패했습니다: {last_error}"
         )
+
+    def _fact_check_and_correct(
+        self,
+        post: dict,
+        system: str,
+        original_prompt: str,
+        fact_lookup: dict | None,
+    ) -> dict:
+        """
+        실적/경제지표 발표일 관련 사실 오류를 검사하고, 가능한 선에서 교정합니다.
+
+        처리 순서:
+          1) check_facts()로 위반 탐지
+          2) auto_correct_facts()로 "명시적 오기재(본문에 한함)"는 정답 날짜로
+             즉시 치환 — 정답이 확실하므로 재생성 없이 바로 고침
+          3) 그래도 남은 위반(제목 관련, 또는 "오늘/이번 주" 같은 임박 표현)은
+             Gemini에게 구체적으로 무엇이 틀렸는지 알려주고 딱 1회만 전체
+             재생성을 요청
+          4) 재생성 후에도 여전히 남아있는 위반은 최종 안전장치로
+             neutralize_unresolved()가 모호한 표현으로 순화
+
+          이 과정 전체는 파이프라인을 절대 중단시키지 않습니다 — 무슨 일이
+          있어도 최종적으로는 post(dict)를 반환합니다.
+        """
+        if not fact_lookup:
+            return post
+
+        try:
+            violations = fact_checker.check_facts(post, fact_lookup)
+        except Exception as e:
+            logger.warning(f"팩트체크 검사 중 오류(무시하고 원본 유지): {e}")
+            return post
+
+        if not violations:
+            logger.info("팩트체크: 실적/지표 발표일 관련 사실 오류 없음")
+            return post
+
+        logger.warning(f"팩트체크: {len(violations)}건의 사실 오류 후보 발견")
+        for v in violations:
+            logger.warning(
+                f"  - [{v['type']}/{v['source']}] {v['entity']}: "
+                f"발견='{v.get('found_date')}' 기대='{v['expected_date']}' "
+                f"(자동교정={'가능' if v.get('auto_fixable') else '불가'})"
+            )
+
+        post, applied, remaining = fact_checker.auto_correct_facts(post, violations)
+        if applied:
+            logger.warning(f"팩트체크: {len(applied)}건 자동 교정 완료 (본문 내 명시적 날짜 오기재)")
+
+        if not remaining:
+            return post
+
+        # ── 남은 위반은 Gemini에게 딱 1회만 재생성 요청 ─────────────────────
+        logger.warning(
+            f"팩트체크: {len(remaining)}건은 자동 교정이 어려워 Gemini에 "
+            f"수정 재요청합니다 (1회 한정)"
+        )
+        correction_note = fact_checker.build_correction_prompt_note(remaining)
+        corrected_prompt = original_prompt + "\n\n" + correction_note
+
+        try:
+            raw2 = self._call_gemini(system, corrected_prompt)
+            post2 = self._parse_json_response(raw2)
+        except Exception as e:
+            logger.warning(
+                f"팩트체크 재생성 호출 실패(원본에 자동교정만 적용된 상태로 진행): {e}"
+            )
+            return fact_checker.neutralize_unresolved(post, remaining)
+
+        # 재생성 결과를 다시 한 번 검증
+        violations2 = fact_checker.check_facts(post2, fact_lookup)
+        if not violations2:
+            logger.info("팩트체크: 재생성 후 모든 사실 오류 해결 확인")
+            return post2
+
+        post2, applied2, remaining2 = fact_checker.auto_correct_facts(post2, violations2)
+        if applied2:
+            logger.warning(f"팩트체크: 재생성본에서 {len(applied2)}건 추가 자동 교정")
+
+        if remaining2:
+            logger.error(
+                f"팩트체크: 재생성 후에도 {len(remaining2)}건 미해결 — "
+                f"안전한 표현으로 최종 대체합니다"
+            )
+            post2 = fact_checker.neutralize_unresolved(post2, remaining2)
+
+        return post2
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
