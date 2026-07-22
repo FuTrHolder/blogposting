@@ -1,9 +1,21 @@
 """
-마케팅 자동화 메인 스크립트 v6
-변경사항 v6:
-  - 각 플랫폼 발행 결과(링크·썸네일·영상·캡션)를 Cloudflare 대시보드(D1 + R2)에 업로드하는
-    [6/6] 단계 추가. DASHBOARD_API_URL 미설정 시 자동으로 건너뜀.
-  - 기존 로직(v5) 동일 유지: VideoGenerator에 blog_content, blog_title 전달
+마케팅 자동화 메인 스크립트 v7
+변경사항 v7:
+  - [신규] 발행 직전 "로컬 미디어 → 공개 URL" 확보 단계 추가 ([5/7]).
+      Threads(이미지/영상), Instagram Reels, Facebook Reels API는 전부
+      로컬 파일이 아닌 "공개적으로 접근 가능한 URL"만 받습니다. 지금까지는
+      썸네일/영상이 로컬 파일로만 존재해 Threads가 이미지를 전혀 못 쓰고
+      텍스트 전용으로 계속 전환되는 문제가 있었습니다(Daum CDN 차단 + 로컬
+      파일은애초에 후보조차 아니었음).
+      이제 SNS 썸네일과 숏폼 영상을 dashboard_client.upload_media_get_public_url()
+      로 GitHub Release에 미리 업로드해 공개 URL을 확보하고, content 딕셔너리에
+      threads_thumbnail_url / instagram_thumbnail_url / video_public_url로
+      담아 각 Publisher가 발행 시점에 바로 쓸 수 있게 합니다.
+  - [기능 추가] 숏폼 영상을 Facebook·Instagram·Threads에 '릴스'로 추가 발행.
+      기존 썸네일+캡션 발행은 그대로 유지되고, 영상 공개 URL이 확보된 경우
+      PublisherDispatcher가 각 플랫폼에 publish_reels()를 추가로 호출합니다
+      (결과는 facebook_reels/instagram_reels/threads_reels 키로 별도 기록).
+  - 기존 로직(v6) 동일 유지: 각 플랫폼 발행 결과의 Cloudflare 대시보드 업로드
 
 실행 흐름:
   1. Gist에서 처리 완료 내역 로드 → 중복 방지
@@ -12,9 +24,10 @@
   4. Gemini로 플랫폼별 콘텐츠 생성
   5. 영상 제작 (블로그 본문 기반 나래이션 숏폼)
   6. SNS 썸네일 제작
-  7. 각 플랫폼 자동 발행
-  8. 처리 완료 내역을 Gist에 저장
-  9. 채널별 발행 결과를 Cloudflare 대시보드에 업로드
+  7. 발행용 공개 URL 확보 (GitHub Release 업로드)
+  8. 각 플랫폼 자동 발행 (썸네일+캡션, 그리고 가능하면 릴스+캡션도 추가)
+  9. 처리 완료 내역을 Gist에 저장
+  10. 채널별 발행 결과를 Cloudflare 대시보드에 업로드
 """
 
 import os
@@ -43,20 +56,30 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 # 플랫폼별 캡션/썸네일 매핑 (대시보드 업로드용)
+# *_reels 항목은 동일 플랫폼의 캡션 텍스트를 그대로 재사용합니다
+# (릴스도 같은 플랫폼의 같은 콘텐츠를 영상 형태로 추가 발행하는 것이므로).
 _PLATFORM_TEXT_KEY = {
     "youtube": "blog_title",
     "facebook": "facebook_post",
+    "facebook_reels": "facebook_post",
     "instagram": "instagram_post",
+    "instagram_reels": "instagram_post",
     "threads": "threads_post",
+    "threads_reels": "threads_post",
     "kakao": "kakao_post",
 }
 _PLATFORM_THUMB_KEY = {
     "youtube": "facebook",         # 별도 유튜브 전용 썸네일이 없으므로 대표 썸네일 재사용
     "facebook": "facebook",
+    "facebook_reels": "facebook",
     "instagram": "instagram",
+    "instagram_reels": "instagram",
     "threads": "threads",
+    "threads_reels": "threads",
     "kakao": "kakao",
 }
+# 대시보드에 썸네일 대신 영상을 보여줘야 하는 플랫폼 (릴스 발행 결과들 + 유튜브)
+_VIDEO_RESULT_PLATFORMS = {"youtube", "facebook_reels", "instagram_reels", "threads_reels"}
 
 
 # ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
@@ -112,7 +135,7 @@ def _push_results_to_dashboard(
 
         content_text = content.get(text_key, "") if text_key else ""
         thumbnail_path = media_paths.get(thumb_key) if thumb_key else None
-        video_path = media_paths.get("video") if platform == "youtube" else None
+        video_path = media_paths.get("video") if platform in _VIDEO_RESULT_PLATFORMS else None
 
         dashboard_client.push_marketing_result(
             post_date=post_date,
@@ -146,7 +169,7 @@ def main():
     state.add_log("RUN_START", f"마케팅 자동화 시작 (force={force})")
 
     # ── 1. 티스토리 새 글 감지 ────────────────────────────────────────────
-    logger.info("[1/6] 티스토리 RSS 크롤링 중...")
+    logger.info("[1/7] 티스토리 RSS 크롤링 중...")
     crawler = TistoryCrawler()
     post    = crawler.get_post_as_dict(force=True)
 
@@ -186,7 +209,7 @@ def main():
     logger.info(f"  → 모드: {post['mode']} | 새 글 처리 시작")
 
     # ── 2. 멀티플랫폼 콘텐츠 생성 ────────────────────────────────────────
-    logger.info("[2/6] Gemini 콘텐츠 어댑터 실행 중...")
+    logger.info("[2/7] Gemini 콘텐츠 어댑터 실행 중...")
     try:
         adapter = ContentAdapter(api_key=os.environ["GEMINI_API_KEY"])
         content = adapter.generate_all(post)
@@ -207,7 +230,7 @@ def main():
     logger.info(f"  → 배경 이미지 키워드: {bg_keywords}")
 
     # ── 3. 영상 생성 (블로그 본문 기반 나래이션) ─────────────────────────
-    logger.info("[3/6] 영상 생성 중... (본문 기반 나래이션 + TTS, BGM 없음)")
+    logger.info("[3/7] 영상 생성 중... (본문 기반 나래이션 + TTS, BGM 없음)")
     video_path = None
     try:
         video_gen      = VideoGenerator(output_dir="videos")
@@ -229,7 +252,7 @@ def main():
         state.add_log("VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
 
     # ── 4. SNS 썸네일 생성 ───────────────────────────────────────────────
-    logger.info("[4/6] SNS 썸네일 생성 중...")
+    logger.info("[4/7] SNS 썸네일 생성 중...")
     thumb_paths = {}
     try:
         thumb_gen = SNSThumbnailGenerator(
@@ -254,8 +277,46 @@ def main():
     if video_path:
         media_paths["video"] = video_path
 
-    # ── 5. 플랫폼 발행 ───────────────────────────────────────────────────
-    logger.info("[5/6] 플랫폼 발행 중...")
+    # ── 5. 발행용 공개 URL 확보 (GitHub Release 업로드) ──────────────────
+    # Threads(이미지/영상), Instagram Reels, Facebook Reels API는 전부
+    # "공개적으로 접근 가능한 URL"만 받고 로컬 파일은 받지 않습니다.
+    # 여기서 미리 업로드해 content 딕셔너리에 채워 넣어야 각 Publisher가
+    # 발행 시점에 바로 사용할 수 있습니다. 실패해도 파이프라인은 계속
+    # 진행되며(해당 항목만 없는 채로 폴백), 전체를 중단시키지 않습니다.
+    logger.info("[5/7] 발행용 공개 URL 확보 중 (GitHub Release 업로드)...")
+    try:
+        if thumb_paths.get("threads"):
+            url = dashboard_client.upload_media_get_public_url(
+                thumb_paths["threads"], f"sns_threads_{post['mode']}_{timestamp}.jpg"
+            )
+            if url:
+                content["threads_thumbnail_url"] = url
+
+        if thumb_paths.get("instagram"):
+            url = dashboard_client.upload_media_get_public_url(
+                thumb_paths["instagram"], f"sns_instagram_{post['mode']}_{timestamp}.jpg"
+            )
+            if url:
+                content["instagram_thumbnail_url"] = url
+
+        if video_path:
+            url = dashboard_client.upload_media_get_public_url(
+                video_path, f"reels_{post['mode']}_{timestamp}.mp4"
+            )
+            if url:
+                content["video_public_url"] = url
+
+        acquired = [k for k in (
+            "threads_thumbnail_url", "instagram_thumbnail_url", "video_public_url"
+        ) if content.get(k)]
+        logger.info(f"  → 확보된 공개 URL: {acquired or '없음'}")
+        state.add_log("PUBLIC_URLS_READY", f"공개 URL 확보: {acquired or '없음'}", post_id=post_id)
+    except Exception as e:
+        logger.warning(f"  → 공개 URL 확보 중 예외 발생 (계속 진행, 일부 플랫폼은 텍스트 전용/발행 생략될 수 있음): {e}")
+        state.add_log("PUBLIC_URLS_FAILED", str(e), post_id=post_id, level="WARNING")
+
+    # ── 6. 플랫폼 발행 (썸네일+캡션, 그리고 가능하면 릴스+캡션도 추가) ────
+    logger.info("[6/7] 플랫폼 발행 중...")
     dispatcher = PublisherDispatcher()
     results    = dispatcher.publish_all(content=content, media_paths=media_paths)
 
@@ -284,8 +345,8 @@ def main():
     )
     state.save()
 
-    # ── 6. Cloudflare 대시보드에 채널별 결과 업로드 ───────────────────────
-    logger.info("[6/6] Cloudflare 대시보드 업로드 중...")
+    # ── 7. Cloudflare 대시보드에 채널별 결과 업로드 ───────────────────────
+    logger.info("[7/7] Cloudflare 대시보드 업로드 중...")
     try:
         _push_results_to_dashboard(
             post_date=post_date_str,
