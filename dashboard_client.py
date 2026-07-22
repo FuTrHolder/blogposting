@@ -160,6 +160,29 @@ def _upload_asset(file_path: str | None, asset_name: str) -> str:
         return ""
 
 
+# ── 로컬 파일 → 공개 URL 변환 (Threads/Reels API 등에서 재사용) ──────────────
+
+def upload_media_get_public_url(file_path: str | None, asset_name: str) -> str:
+    """
+    로컬 파일(SNS용 썸네일, 숏폼 영상 등)을 GitHub Release 자산으로 업로드하고
+    누구나(Meta 서버 포함) 접근 가능한 공개 다운로드 URL을 반환합니다.
+
+    Threads API(media_type=IMAGE/VIDEO), Instagram Graph API(REELS),
+    Facebook Reels Publishing API는 전부 "공개적으로 접근 가능한 URL"만 받고
+    로컬 파일 직접 업로드는 지원하지 않습니다. 지금까지는 이 변환 과정이
+    main.py/main_marketing.py 완료 "이후"(대시보드 표시용)에만 이뤄져서,
+    정작 발행 시점에는 각 Publisher가 이 URL을 쓸 수 없었습니다.
+
+    이 함수는 _upload_asset()을 발행 파이프라인(main_marketing.py)에서
+    "발행 전"에 미리 호출할 수 있도록 외부에 노출하는 얇은 공개 래퍼입니다.
+    내부 로직(중복 자산 삭제 후 재업로드 등)은 _upload_asset과 완전히 동일합니다.
+
+    실패 시 빈 문자열을 반환합니다 (호출부에서 빈 문자열이면 해당 플랫폼은
+    건너뛰도록 처리해야 하며, 파이프라인 전체를 중단시키지 않습니다).
+    """
+    return _upload_asset(file_path, asset_name)
+
+
 # ── 대시보드로 메타데이터 전송 ────────────────────────────────────────────────
 
 def push_content(
