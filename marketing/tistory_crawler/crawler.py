@@ -3,6 +3,17 @@
 - RSS 피드로 새 글 감지 (최근 업로드된 글)
 - BeautifulSoup으로 본문 파싱
 - 상태 파일로 중복 발행 방지
+
+모드 판별 방식 변경 (중요):
+  기존에는 제목에 "프리마켓", "오늘 밤" 같은 키워드가 있는지로 morning/evening을
+  추측했으나, 실제 생성된 제목이 그 키워드를 포함하지 않는 경우(예: "혼조세 마감,
+  S&P500 0.5% 하락 속 불안한 투자 심리")에 저녁 포스팅이 "morning"으로 잘못
+  판별되어, 같은 날짜의 마케팅 결과가 같은 ID(`${post_date}_morning_${platform}`)로
+  겹쳐 써지며 아침 결과가 사라지는 문제가 있었습니다.
+  → RSS의 실제 발행 시각(published_parsed, UTC)을 한국 시간(KST)으로 변환해
+    오전/저녁 여부를 판별하는 방식으로 교체했습니다 (오전 9시 vs 저녁 9시 발행이라
+    시각 기준이 제목 키워드보다 훨씬 신뢰도가 높습니다). 시각 파싱이 실패할 때만
+    기존 제목 키워드 방식을 폴백으로 사용합니다.
 """
 
 import feedparser
@@ -11,7 +22,7 @@ import json
 import logging
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
 
@@ -20,6 +31,12 @@ logger = logging.getLogger(__name__)
 BLOG_URL = "https://seedsup.tistory.com"
 RSS_URL = f"{BLOG_URL}/rss"
 STATE_FILE = "last_post_state.json"
+
+KST = timezone(timedelta(hours=9))
+
+# 오전/저녁 포스팅을 가르는 기준 시각 (KST). 실제 발행은 9시/21시 근처이므로
+# 정오~오후 중 아무 지점이나 기준으로 잡아도 안전하게 갈립니다.
+_MODE_SPLIT_HOUR_KST = 15
 
 
 @dataclass
@@ -32,11 +49,28 @@ class BlogPost:
     tags: list[str]
     published: str
     post_id: str          # URL 해시 (중복 방지용)
-    mode: str             # morning / evening (제목에서 감지)
+    mode: str             # morning / evening (발행 시각 기준 판별)
 
 
-def _detect_mode(title: str) -> str:
-    """제목에서 포스팅 모드를 추론합니다."""
+def _detect_mode(title: str, published_parsed=None) -> str:
+    """
+    포스팅 모드를 판별합니다.
+    1순위: RSS의 published_parsed(UTC struct_time)를 KST로 변환해 시각으로 판별
+           (09:00 KST 발행 → morning, 21:00 KST 발행 → evening)
+    2순위(폴백): 시각 정보가 없거나 파싱 실패 시에만 제목 키워드로 판별
+    """
+    if published_parsed:
+        try:
+            published_utc = datetime(*published_parsed[:6], tzinfo=timezone.utc)
+            published_kst = published_utc.astimezone(KST)
+            mode = "morning" if published_kst.hour < _MODE_SPLIT_HOUR_KST else "evening"
+            logger.info(
+                f"발행 시각 기준 모드 판별: {published_kst.strftime('%Y-%m-%d %H:%M KST')} → {mode}"
+            )
+            return mode
+        except Exception as e:
+            logger.warning(f"발행 시각 파싱 실패, 제목 키워드로 대체 판별: {e}")
+
     evening_keywords = ["프리마켓", "이슈", "저녁", "오늘 밤", "개장 전"]
     for kw in evening_keywords:
         if kw in title:
@@ -152,7 +186,7 @@ class TistoryCrawler:
         summary = " ".join(lines[:5])[:300]
 
         thumbnail_url = _extract_thumbnail(soup, entry.get("summary", ""))
-        mode = _detect_mode(title)
+        mode = _detect_mode(title, entry.get("published_parsed"))
 
         return BlogPost(
             title=title,
