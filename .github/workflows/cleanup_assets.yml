@@ -1,0 +1,41 @@
+name: 🧹 대시보드 자산 정리 (오래된 파일 자동 삭제)
+
+# GitHub Release("dashboard-assets")에 쌓이는 썸네일/영상 파일 중
+# 보관 기간(기본 7일)이 지난 것을 매일 자동으로 삭제합니다.
+# GitHub Actions가 자동 제공하는 토큰만 사용하므로 별도 PAT 발급이 필요 없습니다.
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 매일 UTC 18:00 = 한국시간(KST) 새벽 3시
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "보관 기간(일 단위, 기본 7일)"
+        required: false
+        default: "7"
+
+jobs:
+  cleanup:
+    name: "🧹 오래된 대시보드 자산 삭제"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # 릴리스 자산 삭제 권한
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 requests 설치
+        run: pip install requests
+
+      - name: 🧹 보관 기간 경과 자산 삭제
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETENTION_DAYS: ${{ github.event.inputs.retention_days || '7' }}
+        run: python marketing/scripts/cleanup_release_assets.py
