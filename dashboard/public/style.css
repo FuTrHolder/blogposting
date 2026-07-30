@@ -380,6 +380,47 @@ textarea:focus { border-color: var(--amber); }
 }
 .calendar-embed .tradingview-widget-copyright a { color: var(--text-dim); }
 
+/* ── 기업 실적 발표 바로가기 ─────────────────────────────────────────────── */
+.panel-earnings {
+  grid-column: 1 / -1;
+}
+.cta-link {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--amber-strong);
+  text-decoration: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 6px 14px;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.cta-link:hover { border-color: var(--amber); background: var(--amber-dim); }
+
+.quicklinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.quicklink-chip {
+  font-family: var(--font-kr);
+  font-size: 13px;
+  color: var(--text-dim);
+  text-decoration: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  transition: border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.quicklink-chip:hover {
+  border-color: var(--amber);
+  color: var(--amber-strong);
+  transform: translateY(-1px);
+}
+
 /* ── 스크롤바 (터미널 느낌 유지) ──────────────────────────────────────────── */
 ::-webkit-scrollbar { height: 8px; width: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
