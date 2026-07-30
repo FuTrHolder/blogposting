@@ -4,49 +4,64 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>seedsup 블로그 대시보드</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>seedsup.tistory.com 콘텐츠 대시보드</h1>
+  <header class="masthead">
+    <div class="wordmark">
+      <span class="wordmark-main">SEEDSUP</span><span class="wordmark-sub">OPS DESK</span>
+    </div>
+    <div class="clock" title="발행 기준 시각">
+      <span class="clock-kst" id="clock-kst">--:--:--</span>
+      <span class="clock-tz">KST</span>
+      <span class="clock-div">/</span>
+      <span class="clock-et" id="clock-et">--:--</span>
+      <span class="clock-tz">ET</span>
+    </div>
   </header>
 
-  <nav id="tabs"></nav>
+  <nav id="tabs" class="tabs"></nav>
 
-  <main id="app">
-    <section id="content-panel" class="panel">
+  <main id="app" class="layout">
+    <section id="content-panel" class="panel panel-content">
       <div class="panel-head">
+        <span class="panel-eyebrow">블로그 원고</span>
         <h2 id="post-title">포스트를 선택하세요</h2>
       </div>
+
+      <div class="thumb-wrap">
+        <img id="thumb-img" alt="썸네일" hidden>
+        <p id="thumb-empty" class="muted">썸네일 없음</p>
+      </div>
+      <div class="thumb-strip">
+        <span class="thumb-caption">THUMBNAIL</span>
+        <span class="btn-group">
+          <button class="copy-btn" id="thumb-copy-btn">이미지 복사</button>
+          <a class="copy-btn" id="thumb-download-link" download>다운로드</a>
+        </span>
+      </div>
+
       <div class="content-body">
         <div class="field">
           <div class="field-head">
-            <span>썸네일</span>
-            <span class="btn-group">
-              <button class="copy-btn" id="thumb-copy-btn">이미지 복사</button>
-              <a class="copy-btn" id="thumb-download-link" download>다운로드</a>
-            </span>
-          </div>
-          <img id="thumb-img" alt="썸네일" hidden>
-          <p id="thumb-empty" class="muted">썸네일 없음</p>
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <span>제목</span>
+            <span class="field-label">제목</span>
             <button class="copy-btn" data-target="title-text">복사</button>
           </div>
           <textarea id="title-text" rows="2" readonly></textarea>
         </div>
         <div class="field">
           <div class="field-head">
-            <span>본문 (마크다운)</span>
+            <span class="field-label">본문 · 마크다운</span>
             <button class="copy-btn" data-target="content-text">복사</button>
           </div>
           <textarea id="content-text" rows="16" readonly></textarea>
         </div>
         <div class="field">
           <div class="field-head">
-            <span>태그</span>
+            <span class="field-label">태그</span>
             <button class="copy-btn" data-target="tags-text">복사</button>
           </div>
           <textarea id="tags-text" rows="1" readonly></textarea>
@@ -54,13 +69,44 @@
       </div>
     </section>
 
-    <section id="marketing-panel" class="panel">
+    <section id="marketing-panel" class="panel panel-marketing">
       <div class="panel-head">
+        <span class="panel-eyebrow">배포 채널</span>
         <h2>마케팅 워크플로우</h2>
-        <button id="trigger-btn">마케팅 워크플로우 실행</button>
+        <button id="trigger-btn">마케팅 실행</button>
       </div>
       <p id="trigger-status" class="muted"></p>
-      <div id="marketing-grid"></div>
+      <div id="marketing-grid" class="marketing-grid"></div>
+    </section>
+
+    <section id="calendar-panel" class="panel panel-calendar">
+      <div class="panel-head">
+        <span class="panel-eyebrow">레퍼런스</span>
+        <h2>미국 경제지표 캘린더</h2>
+      </div>
+      <div class="calendar-embed">
+        <!-- TradingView Widget BEGIN -->
+        <div class="tradingview-widget-container">
+          <div class="tradingview-widget-container__widget"></div>
+          <div class="tradingview-widget-copyright">
+            <a href="https://kr.tradingview.com/economic-calendar/" rel="noopener nofollow" target="_blank">
+              <span class="blue-text">Track all markets on TradingView</span>
+            </a>
+          </div>
+          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-events.js" async>
+          {
+          "colorTheme": "dark",
+          "isTransparent": true,
+          "locale": "kr",
+          "countryFilter": "us",
+          "importanceFilter": "-1,0,1",
+          "width": "100%",
+          "height": 550
+        }
+          </script>
+        </div>
+        <!-- TradingView Widget END -->
+      </div>
     </section>
   </main>
 

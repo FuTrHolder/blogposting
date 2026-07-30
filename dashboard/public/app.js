@@ -2,6 +2,31 @@ let currentDate = null;
 let currentMode = null;
 let currentThumbnailUrl = "";
 
+// ── 마스트헤드 실시간 시계 (KST / ET) ────────────────────────────────────────
+const _kstFormatter = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const _etFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function updateClock() {
+  const now = new Date();
+  const kstEl = document.getElementById("clock-kst");
+  const etEl = document.getElementById("clock-et");
+  if (kstEl) kstEl.textContent = _kstFormatter.format(now);
+  if (etEl) etEl.textContent = _etFormatter.format(now);
+}
+updateClock();
+setInterval(updateClock, 1000);
+
 // ── 이미지를 실제로 클립보드에 복사 (PNG로 변환해서 어디든 붙여넣기 가능하게) ──────
 // GitHub Release 자산은 CORS를 지원하지 않아 직접 fetch()가 막히므로,
 // 같은 출처(same-origin)인 /proxy-image를 거쳐서 가져옵니다.
@@ -19,17 +44,6 @@ async function copyImageToClipboard(url) {
   canvas.getContext("2d").drawImage(bitmap, 0, 0);
   const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
   await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
-}
-
-async function flashButton(btn, successText, failText) {
-  const original = btn.textContent;
-  try {
-    await Promise.resolve();
-    btn.textContent = successText;
-  } catch (e) {
-    btn.textContent = failText;
-  }
-  setTimeout(() => (btn.textContent = original), 1400);
 }
 
 // ── 탭 로딩 ────────────────────────────────────────────────────────────────
@@ -51,14 +65,23 @@ async function loadTabs() {
   nav.innerHTML = "";
 
   if (tabs.length === 0) {
-    nav.innerHTML = '<span class="muted" style="padding:8px 16px;">아직 등록된 포스트가 없습니다.</span>';
+    nav.innerHTML =
+      '<span class="muted" style="padding:8px 4px;">' +
+      "아직 생성된 포스트가 없습니다. GitHub Actions 워크플로우가 실행되면 여기에 나타납니다." +
+      "</span>";
     return;
   }
 
   tabs.forEach((t, i) => {
     const btn = document.createElement("button");
     btn.className = "tab-btn" + (i === 0 ? " active" : "");
-    btn.textContent = `${t.post_date} ${t.mode}`;
+    btn.dataset.mode = t.mode;
+    const parts = t.post_date.split("-");
+    const shortDate = parts.length === 3 ? `${parts[1]}.${parts[2]}` : t.post_date;
+    btn.innerHTML =
+      `<span class="tab-dot"></span>` +
+      `<span class="tab-date">${shortDate}</span>` +
+      `<span class="tab-mode">${t.mode.toUpperCase()}</span>`;
     btn.onclick = () => selectTab(t.post_date, t.mode, btn);
     nav.appendChild(btn);
   });
@@ -84,7 +107,7 @@ async function loadContent(postDate, mode) {
   const post = await res.json();
 
   document.getElementById("post-title").textContent = post
-    ? `${postDate} ${mode}`
+    ? `${postDate} · ${mode.toUpperCase()}`
     : "콘텐츠 없음";
   document.getElementById("title-text").value = post?.title || "";
   document.getElementById("content-text").value = post?.content || "";
@@ -146,16 +169,17 @@ async function loadMarketing(postDate, mode) {
   grid.innerHTML = "";
 
   if (!results || results.length === 0) {
-    grid.innerHTML = '<p class="muted">아직 마케팅 결과가 없습니다.</p>';
+    grid.innerHTML =
+      '<p class="muted">마케팅 워크플로우가 아직 실행되지 않았습니다. 위 "마케팅 실행" 버튼을 눌러 시작하세요.</p>';
     return;
   }
 
   results.forEach((r) => {
-    const card = document.createElement("div");
-    card.className = "platform-card";
-
     const statusClass =
       r.status === "ok" ? "status-ok" : r.status === "skip" ? "status-skip" : "status-error";
+
+    const card = document.createElement("div");
+    card.className = `platform-card ${statusClass}`;
 
     let mediaHtml = "";
     if (r.video_url) {
@@ -182,7 +206,7 @@ async function loadMarketing(postDate, mode) {
       ${
         r.content_text
           ? `<div class="field-head" style="margin-top:8px;">
-               <span>캡션</span>
+               <span class="field-label">캡션</span>
                <button class="copy-btn" data-copy-text>복사</button>
              </div>
              <textarea rows="4" readonly>${r.content_text}</textarea>`
@@ -237,7 +261,8 @@ document.getElementById("trigger-btn").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (res.ok && data.ok) {
-      status.textContent = "요청 완료! GitHub Actions가 곧 실행됩니다. (완료까지 몇 분 소요, 이 탭을 다시 눌러 새로고침하세요)";
+      status.textContent =
+        "요청 완료! GitHub Actions가 곧 실행됩니다. (완료까지 몇 분 소요, 이 탭을 다시 눌러 새로고침하세요)";
     } else {
       status.textContent = `실행 실패: ${data.error || "알 수 없는 오류"}`;
     }
