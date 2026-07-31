@@ -20,6 +20,8 @@ mode:
   evening : 개장 전 활기찬 트레이딩 분위기 (긴장·역동적)
 """
 
+import html as _html_module
+import re
 import requests
 import logging
 import os
@@ -28,6 +30,18 @@ import hashlib
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
+
+
+def _clean_text(text: str) -> str:
+    """
+    이미지 생성 전 텍스트 정제.
+    HTML 엔티티(&middot; &amp; &ndash; 등)를 실제 문자로 변환합니다.
+    Gemini가 JSON 내부에 HTML 엔티티를 출력하는 경우를 방지합니다.
+    """
+    text = _html_module.unescape(text)
+    text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
+    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)), text)
+    return text.strip()
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +171,8 @@ class ImageGenerator:
         content: str = "",
         mode: str = "morning",
     ) -> str:
+        # 진입점에서 HTML 엔티티 정제 (Gemini 생성 프롬프트에 &middot; 등 포함 가능)
+        prompt = _clean_text(prompt)
         # 1순위: FLUX.1-schnell
         result = self._generate_flux(prompt, filename, mode)
         if result:
