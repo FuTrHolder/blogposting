@@ -1,80 +1,39 @@
 """
 블로그 글 생성 모듈
-Google Gemini API를 사용해 3,000자 내외의 한글 블로그 포스팅을 생성합니다.
+Google Gemini 2.5 Flash API를 사용해 3,000자 내외의 한글 블로그 포스팅을 생성합니다.
 
 모드:
   morning : 미국 전일 증시 마감 리뷰 (오전 9시 포스팅)
-  evening : 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 경제지표/실적 (저녁 9시 포스팅)
+  evening : 당일 프리마켓 이슈 + 한국 시간 당일 주요 이슈 정리 (저녁 9시 포스팅)
 """
 
+import html as _html_module
 import json
 import logging
+import re
 import time
 import urllib.request
 import urllib.error
 
-import fact_checker
+
+def _clean_post_text(text: str) -> str:
+    """
+    Gemini JSON 파싱 직후 HTML 엔티티를 실제 문자로 변환합니다.
+    &middot; → · / &amp; → & / &ndash; → – / &nbsp; → 공백 등
+    제목(title)과 본문(content) 모두에 적용합니다.
+    """
+    text = _html_module.unescape(text)
+    text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
+    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)), text)
+    return text
 
 logger = logging.getLogger(__name__)
 
-# ── 모델 우선순위: 과부하/불가 시 순서대로 폴백 ─────────────────────────────
-GEMINI_MODELS = [
-    "gemini-2.5-flash-lite",   # 1순위: 경량·빠름
-    "gemini-2.5-flash",        # 2순위: 표준
-    "gemini-3.1-flash-lite",        # 3순위: 최종 폴백
-]
-
-# 재시도 가능한 HTTP 상태코드 (일시적 서버 오류·과부하 포함)
-_RETRYABLE_CODES = {429, 500, 502, 503, 504}
-
-
-def _gemini_url(model: str) -> str:
-    return (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent"
-    )
-
-
-# ── 공통 시간 표기 규칙 (두 모드 공유) ──────────────────────────────────────
-_TIME_FORMAT_RULE = """
-────────────────────────────────────────
-시간 표기 규칙 (반드시 준수)
-────────────────────────────────────────
-본문에 등장하는 모든 시간은 아래 규칙을 따르세요.
-
-① 시간대는 반드시 **한국 시간(KST)** 기준으로 변환하여 표기
-   - 미국 동부시간(ET) → KST 변환: EDT(서머타임) +13시간 / EST(겨울) +14시간
-   - UTC → KST: +9시간
-② 표기 형식: "날짜 시간(KST)"
-   예: "4월 1일 오후 11시 30분(KST)", "4월 2일 오전 3시(KST)"
-③ 날짜가 바뀌는 경우 날짜를 반드시 명시
-   예: 미국 오후 4시 마감 → "4월 2일 오전 5시(KST)"처럼 날짜 포함
-④ 미국 경제지표·실적 발표 시각도 KST로 변환 후 원본 ET 시각을 괄호에 병기
-   예: "4월 1일 오후 9시 30분(KST) [미국 오전 8시 30분 ET]"
-⑤ 애프터마켓·프리마켓 시간대 안내 시에도 동일하게 KST로 표기
-   예: "애프터마켓(한국 시간 4월 1일 오전 5시~9시 30분 KST)"
-────────────────────────────────────────
-"""
-
-# ── 공통 팩트체크 규칙 (두 모드 공유) ────────────────────────────────────────
-_FACT_CHECK_RULE = """
-────────────────────────────────────────
-실적 발표일 · 경제지표 발표일 작성 규칙 (반드시 준수 — 블로그 신뢰도 직결)
-────────────────────────────────────────
-① 기업의 실적 발표일이나 미국 경제지표(FOMC, CPI, PPI, 고용보고서 등) 발표일을
-   본문에 구체적인 날짜, 요일, 또는 "오늘", "이번 주", "장 마감 후"처럼
-   임박한 것으로 언급할 때는 반드시 프롬프트 하단에 제공되는
-   "[검증된 사실 정보]"에 나열된 날짜에 근거해야 합니다.
-② "[검증된 사실 정보]"에 없는 기업의 실적 발표일은 스스로 추정하거나
-   과거 기억으로 재계산하지 마세요. 확실하지 않으면 구체적인 날짜를 쓰지
-   말고 "정확한 일정은 아직 확인되지 않았습니다", "발표 시기가 다가오면
-   업데이트하겠습니다"처럼 모호하게 표현하거나 해당 문장을 생략하세요.
-③ 위 목록에 있는 기업이라도, 발표일이 이번 포스팅 시점으로부터 몇 주 이상
-   떨어져 있다면 "오늘", "이번 주", "장 마감 후"처럼 임박한 표현을 쓰지
-   마세요. D-day가 얼마나 남았는지는 [검증된 사실 정보]에 표시되어 있으니
-   그 값을 그대로 참고하세요.
-────────────────────────────────────────
-"""
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
 
 # ── 공통 제목 전략 (두 모드 공유) ────────────────────────────────────────────
 _TITLE_STRATEGY = """
@@ -124,9 +83,7 @@ SYSTEM_MORNING = (
 - 투자 권유가 아닌 정보 제공 목적 유지
 - 글 말미에 면책 조항 한 줄 추가
 """
-    + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
-    + _FACT_CHECK_RULE
     + """
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이 순수 JSON만):
 {
@@ -137,104 +94,45 @@ SYSTEM_MORNING = (
 }"""
 )
 
-# ── 저녁 시스템 프롬프트 (전일 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표) ────────
+# ── 저녁 시스템 프롬프트 (당일 프리마켓 & 이슈) ──────────────────────────────
 SYSTEM_EVENING = (
     """당신은 미국 주식 시장을 분석하는 전문 블로그 작가입니다.
-이 포스팅은 **한국 시간 저녁 9시 발행** 원고입니다.
+이 포스팅은 **저녁 9시 발행** 원고로, 두 가지 내용을 담습니다.
+  ① 미국 당일 프리마켓 & 오픈 전 주요 이슈 (지표 발표 예정, 실적 발표 등)
+  ② 한국 시간 기준 오늘 아침부터 저녁 9시까지 발생한 증시 관련 이슈 정리
 
-포스팅의 흐름은 다음 순서를 반드시 따르세요:
-  ① 전일 미국 정규장 마감 결과 간략 리뷰 (분위기·지수 등락 요약)
-  ② 전일 미국 애프터마켓(시간외) 이후 현재 프리장까지 발생한 주요 이슈
-     (기업 실적 발표·가이던스, 연준 인사 발언, 지정학적 이슈, 매크로 변화 등)
-  ③ 당일(미국 날짜 기준) 정규장에서 발표 예정인 경제지표 & 기업 실적
-  ④ 현재 프리마켓/선물 동향과 오늘 밤 정규장 시나리오
-
-제목 작성 규칙:
-- 날짜는 반드시 **포스팅을 작성하는 한국 시간 기준 날짜**를 사용 (예: "4월 1일")
-- 오늘 밤 열리는 미국 정규장에 대한 기대감 또는 우려감을 구체적으로 표현하는 후킹 문구 포함
-- 예시: "4월 1일 오늘 밤 나스닥, 고용지표 발표 앞두고 어디로?"
-         "4월 1일 미국 증시 프리뷰: 엔비디아 실적 충격, 오늘 밤 반등 가능할까?"
-
-본문 작성 규칙:
+작성 규칙:
 - 전체 글자 수: 2,800~3,200자 (공백 포함)
-- 어조: 긴장감 있고 실용적인 톤. 오늘 밤 시장 개장을 앞둔 투자자 시점으로 작성
+- 어조: 긴장감 있고 실용적인 톤. 오늘 밤~내일 새벽 시장을 앞둔 투자자 관점으로 작성
 - 형식: 마크다운 사용 (##, ###, **굵게**, > 인용구 등)
 - 구조: 반드시 아래 섹션 포함
-  1. 서론: 전일 정규장 마감을 한 문단으로 간략 요약 (지수 등락·분위기)
-  2. ## 전일 애프터마켓 & 오늘 프리장 주요 이슈
-     (시간외 급등락 종목, 실적 발표 결과, 주요 발언, 매크로 뉴스 등)
-  3. ## 오늘 밤 주목할 경제지표 & 이벤트 (KST 시각 포함)
-  4. ## 오늘 실적 발표 예정 기업 & 시장 기대치
-  5. ## 현재 프리마켓·선물 동향
+  1. 서론: 오늘 밤 미국 시장 개장을 앞둔 분위기 한 문단
+  2. ## 오늘 밤 주목할 경제 지표 & 이벤트 (발표 시간 포함)
+  3. ## 실적 발표 예정 기업 & 기대치
+  4. ## 오늘 하루 주요 글로벌 이슈 정리 (한국·아시아·유럽 시장 동향 포함)
+  5. ## 프리마켓 동향 & 선물 지수
   6. ## 오늘 밤 시나리오: 강세 vs 약세
-  7. 마무리: 오늘 밤 대응 포인트 한 문단
+  7. 마무리: 오늘 밤 대응 전략 한 문단
 - 숫자·데이터를 자연스럽게 녹여낼 것
 - 초보자도 이해할 수 있도록 쉽게 설명
 - 투자 권유가 아닌 정보 제공 목적 유지
 - 글 말미에 면책 조항 한 줄 추가
 """
-    + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
-    + _FACT_CHECK_RULE
     + """
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이 순수 JSON만):
 {
-  "title": "한국 시간 날짜 포함 + 오늘 밤 정규장 기대/우려 후킹 문구 (60자 이내)",
+  "title": "후킹 요소가 포함된 SEO 최적화 제목 (날짜 포함, 60자 이내)",
   "content": "마크다운 형식의 전체 블로그 본문",
   "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
-  "image_prompt": "Stable Diffusion용 영문 이미지 프롬프트 (긴장감 있는 프리마켓 트레이딩 분위기)"
+  "image_prompt": "Stable Diffusion용 영문 이미지 프롬프트 (활기찬 프리마켓 트레이딩 분위기)"
 }"""
 )
 
 
-def _reference_time_block(korean_datetime_str: str, ny_reference_str: str) -> str:
-    """
-    글 작성 시각(KST)과 분석 기준 시각(뉴욕)을 명시적으로 프롬프트에 박아 넣는 블록.
-    AI가 매번 시간대를 스스로 계산하게 하면 오류가 잦으므로,
-    이미 정확히 계산된 값을 "사실"로 제공하고 재계산을 금지시킵니다.
-    """
-    if not korean_datetime_str or not ny_reference_str:
-        return ""
-    return (
-        "────────────────────────────────────────\n"
-        "기준 시각 (아래 값을 그대로 사용하세요 — 직접 재계산 금지)\n"
-        "────────────────────────────────────────\n"
-        f"[글 작성 시각 - 한국(KST)]   {korean_datetime_str}\n"
-        f"[분석 기준 시각 - 미국 뉴욕] {ny_reference_str}\n\n"
-        "본문에서 \"오늘\", \"어제\", \"전일\", \"이번 주\" 등 상대적 시제 표현을 쓸 때는 "
-        "반드시 위 [분석 기준 시각 - 미국 뉴욕]을 기준으로만 판단하세요.\n"
-        "한국 시간(KST)은 이 글이 발행되는 시각을 나타낼 뿐이며, "
-        "시황 분석의 '오늘/어제' 판단 기준으로는 절대 사용하지 마세요.\n"
-        "위 [분석 기준 시각]의 날짜가 이미 정규장 마감(16:00 ET) 이후라면, "
-        "그 날짜의 세션은 '오늘'이 아니라 이미 '마감된' 세션입니다.\n"
-        "────────────────────────────────────────\n\n"
-    )
-
-
-def _build_morning_prompt(
-    korean_date: str,
-    us_market_date: str,
-    market_data: dict,
-    news_list: list[dict],
-    korean_datetime_str: str = "",
-    ny_reference_str: str = "",
-    fact_reference_block: str = "",
-) -> str:
-    """오전 포스팅용 프롬프트: 전일 마감 데이터 중심.
-
-    korean_date          : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
-    us_market_date       : 리뷰 대상 미국 정규장 마감 날짜 — 본문 지수 데이터에 사용
-    korean_datetime_str  : 포스팅 작성 시각 전체 (예: '2026-07-09 09:00 KST')
-    ny_reference_str     : 뉴욕 기준 시각 전체 (예: '2026-07-08 20:00 EDT')
-    """
-    market_text = (
-        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
-        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
-        f"📅 리뷰 대상 미국 증시 마감 날짜: {us_market_date}\n"
-        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
-        f"본문의 '전일 마감'은 미국 날짜({us_market_date}) 기준임을 명확히 하세요.\n\n"
-        f"[전일 마감 지수]\n"
-    )
+def _build_morning_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
+    """오전 포스팅용 프롬프트: 전일 마감 데이터 중심."""
+    market_text = f"📅 미국 증시 마감 날짜: {date}\n\n[전일 마감 지수]\n"
     for name, data in market_data.items():
         if name == "fear_greed" or not data:
             continue
@@ -261,18 +159,16 @@ def _build_morning_prompt(
     ]
     up_count = sum(1 for d in directions if "상승" in d)
     down_count = sum(1 for d in directions if "하락" in d)
-    hint = (
-        "전일 미국 시장은 전반적으로 상승 마감했습니다." if up_count > down_count else
-        "전일 미국 시장은 전반적으로 하락 마감했습니다." if down_count > up_count else
-        "전일 미국 시장은 혼조세로 마감했습니다."
-    )
-
-    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
+    if up_count > down_count:
+        hint = "전일 미국 시장은 전반적으로 상승 마감했습니다."
+    elif down_count > up_count:
+        hint = "전일 미국 시장은 전반적으로 하락 마감했습니다."
+    else:
+        hint = "전일 미국 시장은 혼조세로 마감했습니다."
 
     return (
         f"{market_text}{news_text}\n"
-        f"[시장 요약] {hint}\n"
-        f"{fact_block_text}\n"
+        f"[시장 요약] {hint}\n\n"
         "위 데이터를 바탕으로 전일 미국 증시 마감 리뷰 블로그 포스팅을 작성하고, "
         "지정된 JSON 형식으로만 응답해주세요.\n"
         "제목은 반드시 전날 마감 결과(지수 수치·등락 방향 등)를 구체적으로 담아 "
@@ -280,30 +176,9 @@ def _build_morning_prompt(
     )
 
 
-def _build_evening_prompt(
-    korean_date: str,
-    us_market_date: str,
-    market_data: dict,
-    news_list: list[dict],
-    korean_datetime_str: str = "",
-    ny_reference_str: str = "",
-    fact_reference_block: str = "",
-) -> str:
-    """저녁 포스팅용 프롬프트: 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표 중심.
-
-    korean_date          : 포스팅 작성 날짜 (한국 시간) — 제목에 사용
-    us_market_date       : 가장 최근에 마감된 미국 정규장 날짜 ('전일 마감' 리뷰 대상)
-    korean_datetime_str  : 포스팅 작성 시각 전체
-    ny_reference_str     : 뉴욕 기준 현재 시각 전체 (보통 프리마켓 시간대)
-    """
-    market_text = (
-        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
-        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
-        f"📅 전일 마감 미국 정규장 날짜: {us_market_date}\n"
-        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
-        f"본문의 '전일 마감'은 미국 날짜({us_market_date}) 기준임을 명확히 하세요.\n\n"
-        f"[현재 선물/프리마켓 지수]\n"
-    )
+def _build_evening_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
+    """저녁 포스팅용 프롬프트: 프리마켓 & 당일 이슈 중심."""
+    market_text = f"📅 기준 날짜: {date} (한국 시간)\n\n[현재 선물/프리마켓 지수]\n"
     for name, data in market_data.items():
         if name == "fear_greed" or not data:
             continue
@@ -316,7 +191,7 @@ def _build_evening_prompt(
     if fg.get("score"):
         market_text += f"\n[Fear & Greed 지수] {fg['score']}/100 ({fg['rating']})\n"
 
-    news_text = "\n[수집된 주요 뉴스 & 이슈]\n"
+    news_text = "\n[오늘 수집된 주요 뉴스 & 이슈]\n"
     for i, news in enumerate(news_list, 1):
         sentiment = news.get("sentiment", "")
         suffix = f" [{sentiment}]" if sentiment else ""
@@ -324,35 +199,12 @@ def _build_evening_prompt(
         if news.get("summary"):
             news_text += f"   → {news['summary'][:200].replace(chr(10), ' ')}\n"
 
-    directions = [
-        v["direction"] for k, v in market_data.items()
-        if k != "fear_greed" and v and "direction" in v
-    ]
-    up_count = sum(1 for d in directions if "상승" in d)
-    down_count = sum(1 for d in directions if "하락" in d)
-    premarket_hint = (
-        "프리마켓은 전반적으로 강세 흐름입니다." if up_count > down_count else
-        "프리마켓은 전반적으로 약세 흐름입니다." if down_count > up_count else
-        "프리마켓은 혼조세를 보이고 있습니다."
-    )
-
-    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
-
     return (
         f"{market_text}{news_text}\n"
-        f"[프리마켓 요약] {premarket_hint}\n"
-        f"{fact_block_text}\n"
-        "위 데이터를 바탕으로 저녁 9시 블로그 포스팅을 작성하고, "
-        "지정된 JSON 형식으로만 응답해주세요.\n\n"
-        "작성 시 반드시 아래 흐름을 따르세요:\n"
-        "1) 서론: 전일 미국 정규장 마감을 한 문단으로 간략 리뷰\n"
-        "2) 전일 애프터마켓 이후 ~ 현재 프리장까지 발생한 주요 이슈 상세 서술\n"
-        "3) 오늘 밤(미국 시간 기준 당일) 발표 예정 경제지표·기업실적 중심으로 서술 "
-        "(단, 실적/지표 발표일을 구체적으로 언급할 때는 반드시 위 '검증된 사실 정보'에 "
-        "근거해야 하며, 목록에 없는 기업의 실적일은 추측해서 쓰지 마세요)\n"
-        "4) 현재 프리마켓/선물 동향 및 오늘 밤 강세/약세 시나리오\n\n"
-        "제목은 반드시 한국 시간 날짜를 포함하고, "
-        "오늘 밤 정규장에 대한 기대감 또는 우려감을 후킹 문구로 표현해주세요."
+        "위 데이터를 바탕으로 오늘 밤 미국 증시 개장 전 프리뷰 블로그 포스팅을 작성하고, "
+        "지정된 JSON 형식으로만 응답해주세요.\n"
+        "제목은 오늘 밤 시장에서 주목해야 할 핵심 이슈를 구체적으로 담아 "
+        "독자가 클릭하고 싶게 만들어 주세요."
     )
 
 
@@ -361,111 +213,48 @@ class ContentGenerator:
         self.api_key = api_key
 
     def _call_gemini(self, system: str, prompt: str, max_retries: int = 3) -> str:
-        """
-        Gemini API 호출.
-        - 503/429/500/502/504 → 지수 백오프 재시도
-        - 모델 과부하 지속 시 GEMINI_MODELS 순서대로 자동 폴백
-        - timeout: 90초 (안정성 확보)
-        - 2.5 계열 모델은 thinking(추론)이 출력 토큰 예산을 함께 소모하므로 비활성화
-        - MAX_TOKENS로 잘리거나 빈 응답이 오면 자동 재시도
-        """
-        for model in GEMINI_MODELS:
-            url = f"{_gemini_url(model)}?key={self.api_key}"
-            logger.info(f"Gemini 모델 시도: {model}")
-
-            generation_config = {
+        url = f"{GEMINI_API_URL}?key={self.api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
                 "temperature": 0.85,
-                "maxOutputTokens": 8192,
+                "maxOutputTokens": 4096,
                 "responseMimeType": "application/json",
-            }
-            
-            payload = {
-                "system_instruction": {"parts": [{"text": system}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": generation_config,
-            }
-            data = json.dumps(payload).encode("utf-8")
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
 
-            for attempt in range(1, max_retries + 1):
-                try:
-                    req = urllib.request.Request(
-                        url,
-                        data=data,
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=90) as resp:
-                        result = json.loads(resp.read().decode("utf-8"))
+        for attempt in range(1, max_retries + 1):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                return raw
 
-                    candidate = result["candidates"][0]
-                    finish_reason = candidate.get("finishReason", "")
-                    parts = candidate.get("content", {}).get("parts", [])
-                    # 멀티파트 응답 방어: 모든 파트의 텍스트를 이어붙임
-                    raw = "".join(p.get("text", "") for p in parts).strip()
-
-                    if finish_reason == "MAX_TOKENS":
-                        logger.warning(
-                            f"Gemini 응답이 MAX_TOKENS로 잘림 (모델: {model}, "
-                            f"시도 {attempt}/{max_retries}, 응답 길이: {len(raw)}자)"
-                        )
-                        if attempt < max_retries:
-                            time.sleep(5)
-                            continue
-                        break
-
-                    if not raw:
-                        logger.warning(
-                            f"Gemini 빈 응답 (모델: {model}, finishReason: {finish_reason}, "
-                            f"시도 {attempt}/{max_retries})"
-                        )
-                        if attempt < max_retries:
-                            time.sleep(5)
-                            continue
-                        break
-
-                    logger.info(f"Gemini 응답 성공 (모델: {model}, {len(raw)}자)")
-                    return raw
-
-                except urllib.error.HTTPError as e:
-                    body = e.read().decode("utf-8", errors="replace")
-                    if e.code in _RETRYABLE_CODES:
-                        base_wait = 30 if e.code == 429 else 20
-                        wait = min(base_wait * attempt, 120)
-                        logger.warning(
-                            f"Gemini {e.code} (모델: {model}, "
-                            f"시도 {attempt}/{max_retries}). {wait}초 대기 후 재시도..."
-                        )
-                        time.sleep(wait)
-                    else:
-                        logger.error(
-                            f"Gemini API 오류 {e.code} (모델: {model}): {body[:300]}"
-                        )
-                        raise
-
-                except urllib.error.URLError as e:
-                    wait = min(15 * attempt, 60)
-                    logger.warning(
-                        f"Gemini 네트워크 오류 (모델: {model}, "
-                        f"시도 {attempt}/{max_retries}): {e}. {wait}초 대기..."
-                    )
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                if e.code == 429:
+                    wait = 30 * attempt
+                    logger.warning(f"Gemini 한도 초과. {wait}초 대기 후 재시도...")
                     time.sleep(wait)
+                else:
+                    logger.error(f"Gemini API 오류 {e.code}: {body}")
+                    raise
+            except Exception as e:
+                logger.warning(f"Gemini 호출 실패 (시도 {attempt}): {e}")
+                if attempt < max_retries:
+                    time.sleep(10)
+                else:
+                    raise
 
-                except Exception as e:
-                    logger.warning(
-                        f"Gemini 호출 실패 (모델: {model}, "
-                        f"시도 {attempt}/{max_retries}): {e}"
-                    )
-                    if attempt < max_retries:
-                        time.sleep(10)
-                    else:
-                        break
-
-            logger.warning(f"모델 {model} 모든 시도 실패 → 다음 모델로 폴백")
-
-        raise RuntimeError(
-            f"모든 Gemini 모델({', '.join(GEMINI_MODELS)}) 호출 실패. "
-            "잠시 후 다시 시도해주세요."
-        )
+        raise RuntimeError("Gemini API 최대 재시도 초과")
 
     def generate_post(
         self,
@@ -473,150 +262,18 @@ class ContentGenerator:
         market_data: dict,
         news_list: list[dict],
         mode: str = "morning",
-        korean_date: str | None = None,
-        us_market_date: str | None = None,
-        korean_datetime_str: str | None = None,
-        ny_reference_str: str | None = None,
-        fact_reference_block: str = "",
-        fact_lookup: dict | None = None,
     ) -> dict:
-        # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
-        _korean_date = korean_date or date
-        _us_market_date = us_market_date or date
-        _korean_datetime_str = korean_datetime_str or ""
-        _ny_reference_str = ny_reference_str or ""
-
         if mode == "evening":
             system = SYSTEM_EVENING
-            prompt = _build_evening_prompt(
-                _korean_date, _us_market_date, market_data, news_list,
-                _korean_datetime_str, _ny_reference_str, fact_reference_block,
-            )
+            prompt = _build_evening_prompt(date, market_data, news_list)
         else:
             system = SYSTEM_MORNING
-            prompt = _build_morning_prompt(
-                _korean_date, _us_market_date, market_data, news_list,
-                _korean_datetime_str, _ny_reference_str, fact_reference_block,
-            )
+            prompt = _build_morning_prompt(date, market_data, news_list)
 
-        logger.info(f"Gemini API 호출 중 (모드: {mode})...")
+        logger.info(f"Gemini API 호출 중 (모델: {GEMINI_MODEL}, 모드: {mode})...")
+        raw = self._call_gemini(system, prompt)
 
-        max_json_retries = 2  # JSON 파싱 실패 시 Gemini 재호출 횟수
-        last_error: Exception | None = None
-
-        for json_attempt in range(1, max_json_retries + 2):  # 최초 1회 + 재시도
-            raw = self._call_gemini(system, prompt)
-            try:
-                post = self._parse_json_response(raw)
-                logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
-                logger.info(f"생성된 제목: {post.get('title', '')}")
-                post = self._fact_check_and_correct(post, system, prompt, fact_lookup)
-                return post
-            except json.JSONDecodeError as e:
-                last_error = e
-                logger.warning(
-                    f"JSON 파싱 실패 (시도 {json_attempt}/{max_json_retries + 1}): {e}"
-                )
-                logger.warning(f"  응답 길이: {len(raw)}자")
-                logger.warning(f"  응답 앞부분: {raw[:300]!r}")
-                logger.warning(f"  응답 뒷부분: {raw[-300:]!r}")
-                if json_attempt <= max_json_retries:
-                    logger.info("Gemini를 재호출해 다시 시도합니다...")
-
-        raise RuntimeError(
-            f"Gemini 응답을 JSON으로 파싱하는 데 {max_json_retries + 1}회 모두 실패했습니다: {last_error}"
-        )
-
-    def _fact_check_and_correct(
-        self,
-        post: dict,
-        system: str,
-        original_prompt: str,
-        fact_lookup: dict | None,
-    ) -> dict:
-        """
-        실적/경제지표 발표일 관련 사실 오류를 검사하고, 가능한 선에서 교정합니다.
-
-        처리 순서:
-          1) check_facts()로 위반 탐지
-          2) auto_correct_facts()로 "명시적 오기재(본문에 한함)"는 정답 날짜로
-             즉시 치환 — 정답이 확실하므로 재생성 없이 바로 고침
-          3) 그래도 남은 위반(제목 관련, 또는 "오늘/이번 주" 같은 임박 표현)은
-             Gemini에게 구체적으로 무엇이 틀렸는지 알려주고 딱 1회만 전체
-             재생성을 요청
-          4) 재생성 후에도 여전히 남아있는 위반은 최종 안전장치로
-             neutralize_unresolved()가 모호한 표현으로 순화
-
-          이 과정 전체는 파이프라인을 절대 중단시키지 않습니다 — 무슨 일이
-          있어도 최종적으로는 post(dict)를 반환합니다.
-        """
-        if not fact_lookup:
-            return post
-
-        try:
-            violations = fact_checker.check_facts(post, fact_lookup)
-        except Exception as e:
-            logger.warning(f"팩트체크 검사 중 오류(무시하고 원본 유지): {e}")
-            return post
-
-        if not violations:
-            logger.info("팩트체크: 실적/지표 발표일 관련 사실 오류 없음")
-            return post
-
-        logger.warning(f"팩트체크: {len(violations)}건의 사실 오류 후보 발견")
-        for v in violations:
-            logger.warning(
-                f"  - [{v['type']}/{v['source']}] {v['entity']}: "
-                f"발견='{v.get('found_date')}' 기대='{v['expected_date']}' "
-                f"(자동교정={'가능' if v.get('auto_fixable') else '불가'})"
-            )
-
-        post, applied, remaining = fact_checker.auto_correct_facts(post, violations)
-        if applied:
-            logger.warning(f"팩트체크: {len(applied)}건 자동 교정 완료 (본문 내 명시적 날짜 오기재)")
-
-        if not remaining:
-            return post
-
-        # ── 남은 위반은 Gemini에게 딱 1회만 재생성 요청 ─────────────────────
-        logger.warning(
-            f"팩트체크: {len(remaining)}건은 자동 교정이 어려워 Gemini에 "
-            f"수정 재요청합니다 (1회 한정)"
-        )
-        correction_note = fact_checker.build_correction_prompt_note(remaining)
-        corrected_prompt = original_prompt + "\n\n" + correction_note
-
-        try:
-            raw2 = self._call_gemini(system, corrected_prompt)
-            post2 = self._parse_json_response(raw2)
-        except Exception as e:
-            logger.warning(
-                f"팩트체크 재생성 호출 실패(원본에 자동교정만 적용된 상태로 진행): {e}"
-            )
-            return fact_checker.neutralize_unresolved(post, remaining)
-
-        # 재생성 결과를 다시 한 번 검증
-        violations2 = fact_checker.check_facts(post2, fact_lookup)
-        if not violations2:
-            logger.info("팩트체크: 재생성 후 모든 사실 오류 해결 확인")
-            return post2
-
-        post2, applied2, remaining2 = fact_checker.auto_correct_facts(post2, violations2)
-        if applied2:
-            logger.warning(f"팩트체크: 재생성본에서 {len(applied2)}건 추가 자동 교정")
-
-        if remaining2:
-            logger.error(
-                f"팩트체크: 재생성 후에도 {len(remaining2)}건 미해결 — "
-                f"안전한 표현으로 최종 대체합니다"
-            )
-            post2 = fact_checker.neutralize_unresolved(post2, remaining2)
-
-        return post2
-
-    @staticmethod
-    def _parse_json_response(raw: str) -> dict:
-        """코드블록 방어 포함 JSON 파싱. 실패 시 json.JSONDecodeError를 발생시킴."""
+        # JSON 파싱 (코드블록 방어)
         if "```" in raw:
             for part in raw.split("```"):
                 part = part.strip()
@@ -626,4 +283,12 @@ class ContentGenerator:
                     return json.loads(part)
                 except json.JSONDecodeError:
                     continue
-        return json.loads(raw)
+
+        post = json.loads(raw)
+        # JSON 파싱 직후 HTML 엔티티 정제
+        # Gemini가 &middot; &amp; 등 HTML 엔티티를 그대로 출력하는 경우 방지
+        post["title"]   = _clean_post_text(post.get("title", ""))
+        post["content"] = _clean_post_text(post.get("content", ""))
+        logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
+        logger.info(f"생성된 제목: {post.get('title', '')}")
+        return post
