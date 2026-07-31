@@ -1,15 +1,19 @@
 """
 marketing/scripts/cleanup_release_assets.py
 
-GitHub Release("dashboard-assets") 자산 정리 스크립트.
-대시보드가 썸네일/영상을 저장하는 릴리스에 파일이 무한정 쌓이는 것을 막기 위해,
-생성된 지 일정 기간(기본 7일)이 지난 자산을 자동으로 삭제합니다.
+GitHub Release("dashboard-assets") 자산 + Cloudflare D1 데이터 정리 스크립트.
+대시보드가 썸네일/영상을 저장하는 릴리스에 파일이 무한정 쌓이고, D1의 posts/
+marketing_results 테이블에 탭이 무한정 쌓이는 것을 막기 위해, 생성된 지 일정
+기간(기본 7일)이 지난 것들을 매일 자동으로 삭제합니다.
 
-주의:
-  삭제된 파일의 URL은 더 이상 유효하지 않으므로, Cloudflare D1에 저장된
-  과거(7일 이전) 포스트/마케팅 결과의 이미지·영상 링크는 이 스크립트 실행 후
-  깨진 링크로 남습니다. 대시보드는 최근 결과를 복사해 쓰는 용도라 실무에는
-  영향이 없지만, 오래된 기록을 다시 열어볼 계획이 있다면 보관 기간을 늘리세요.
+이 스크립트는 두 단계로 동작합니다:
+  1) cleanup()              : GitHub Release 자산(썸네일/영상 파일) 삭제
+  2) cleanup_dashboard_data(): Cloudflare Worker의 /api/ingest/cleanup 호출 →
+                               D1의 posts/marketing_results 오래된 행 삭제
+     (DASHBOARD_API_URL/INGEST_SECRET이 없으면 조용히 건너뜀 — 대시보드 미도입 환경 호환)
+
+두 단계 모두 같은 보관 기간(RETENTION_DAYS)을 기준으로 동작하므로, 대시보드
+탭과 그 안의 이미지/영상 링크가 항상 같은 시점까지만 남습니다.
 
 사용법 (GitHub Actions에서 자동 실행, 수동 실행도 가능):
   python marketing/scripts/cleanup_release_assets.py
@@ -20,6 +24,10 @@ GitHub Release("dashboard-assets") 자산 정리 스크립트.
   GITHUB_REPOSITORY  : GitHub Actions가 자동 제공 ("owner/repo" 형식)
   GITHUB_OWNER / GITHUB_REPO : 위 값을 대신 명시적으로 지정하고 싶을 때 (선택)
   RETENTION_DAYS     : 보관 기간(일 단위, 기본 7일)
+  DASHBOARD_API_URL  : 대시보드 주소 (예: https://blogposting.pages.dev) — 없으면
+                       D1 정리 단계만 건너뜀
+  INGEST_SECRET      : /api/ingest/* 인증용 시크릿 (GitHub Secrets와 Cloudflare
+                       Pages 환경변수 양쪽에 동일한 값이 등록돼 있어야 함)
 """
 
 import logging
@@ -134,9 +142,43 @@ def cleanup(retention_days: int = 7) -> dict:
     return {"deleted": deleted, "kept": kept, "failed": failed}
 
 
+def cleanup_dashboard_data(retention_days: int = 7) -> dict:
+    """Cloudflare D1의 posts/marketing_results 중 보관 기간이 지난 행을 삭제합니다.
+    DASHBOARD_API_URL 또는 INGEST_SECRET이 없으면 조용히 건너뜁니다(대시보드
+    미도입 환경 호환 — 이 스크립트 실패로 전체 워크플로우를 중단시키지 않음)."""
+    base = os.environ.get("DASHBOARD_API_URL", "").rstrip("/")
+    secret = os.environ.get("INGEST_SECRET", "")
+
+    if not base or not secret:
+        logger.info("DASHBOARD_API_URL/INGEST_SECRET 미설정 — 대시보드 데이터 정리 건너뜀")
+        return {"skipped": True}
+
+    try:
+        resp = requests.post(
+            f"{base}/api/ingest/cleanup",
+            json={"retention_days": retention_days},
+            headers={"X-Ingest-Secret": secret},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(
+            f"대시보드 데이터 정리 완료 — 기준일: {data.get('cutoff')} 이전, "
+            f"삭제된 posts: {data.get('deleted_posts')}건, "
+            f"marketing_results: {data.get('deleted_marketing_results')}건"
+        )
+        return data
+    except Exception as e:
+        logger.warning(f"대시보드 데이터 정리 요청 실패 (무시하고 종료): {e}")
+        return {"error": str(e)}
+
+
 def main():
     retention_days = int(os.environ.get("RETENTION_DAYS", "7"))
+
     result = cleanup(retention_days=retention_days)
+    cleanup_dashboard_data(retention_days=retention_days)
+
     if result.get("failed", 0) > 0:
         sys.exit(1)
 
