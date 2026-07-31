@@ -1,17 +1,19 @@
 """
-이미지 생성 모듈 (v2 — Pexels/Pixabay 기반)
-1차: Pexels API (무료) - 키워드 기반 스톡 사진, 날짜 시드로 매일 다른 이미지
-2차: Pixabay API (무료) - Pexels 실패 시 자동 대체
-3차: 기본 이미지 - 위 두 곳 모두 실패 시 최종 폴백
+이미지 생성 모듈 (v3 — FLUX.1-schnell 기반)
+우선순위:
+  1순위: HuggingFace FLUX.1-schnell (AI 생성 — 콘텐츠 맞춤형, 무료티어)
+  2순위: Pexels API (스톡사진)
+  3순위: Pixabay API (스톡사진)
+  4순위: gradient fallback
 
-변경 이유 (v1 → v2):
-- Stable Diffusion XL(HuggingFace hf-inference)가 provider에서 모델 지원을 완전히
-  중단함 (410 Gone: "The requested model is deprecated")
-- source.unsplash.com(Unsplash Source)은 2024년에 서비스가 완전히 종료되어
-  이후 모든 요청이 503으로 실패함
-두 기존 경로가 이미 죽어있어 매번 기본 이미지로만 폴백되던 문제를 해결합니다.
-마케팅 워크플로우의 SNS 썸네일 생성기(video_generator/thumbnail.py)와 동일한
-Pexels → Pixabay 우선순위를 그대로 사용합니다.
+v2 → v3 변경 이유:
+  - Pexels/Pixabay 스톡사진은 증시 콘텐츠와 맥락이 맞지 않는 일반 이미지가
+    섞이는 문제가 있었습니다.
+  - Gemini가 생성한 image_prompt를 FLUX.1-schnell에 그대로 투입하면
+    콘텐츠와 연계된 이미지를 매일 새롭게 생성할 수 있습니다.
+  - FLUX.1-schnell은 SDXL 대비 속도가 빠르고 무료티어에서 사용 가능합니다.
+    (cold start 포함 보통 15~40초, GitHub Actions 10분 timeout 이내)
+  - Unsplash Source는 2024년 완전 종료(503)되어 제거했습니다.
 
 mode:
   morning : 마감 후 조용한 월스트리트 분위기 (차분·분석적)
@@ -21,141 +23,130 @@ mode:
 import requests
 import logging
 import os
+import time
+import hashlib
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
-# 이미지 우측 하단 출처 표시용 폰트 후보 (GitHub Actions ubuntu-latest 기본 제공 폰트).
-# 한글 폰트(fonts-noto-cjk)는 이 워크플로우에 설치돼 있지 않으므로,
-# 출처 표시는 영문("Photo: Pexels")으로 남겨 별도 설치 없이 항상 렌더링되게 합니다.
-_WATERMARK_FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-]
+# ── HuggingFace FLUX.1-schnell ────────────────────────────────────────────────
+HF_FLUX_URL = (
+    "https://router.huggingface.co/hf-inference/models/"
+    "black-forest-labs/FLUX.1-schnell"
+)
 
-# 모드별 검색 키워드 (Pexels/Pixabay 공용 — 자연어 구문으로 검색)
-TOPIC_KEYWORDS = {
+# 모드별 프롬프트 접미사 (FLUX는 자연어 지시에 강함)
+FLUX_SUFFIX = {
+    "morning": (
+        ", Wall Street financial district at dawn, calm after market close, "
+        "professional financial photography, stock market analysis, "
+        "blue and gold color palette, cinematic lighting, 8K, sharp focus, "
+        "no text, no watermark"
+    ),
+    "evening": (
+        ", pre-market trading floor at night, dynamic stock exchange screens, "
+        "professional financial photography, urgent market news atmosphere, "
+        "purple and amber color palette, dramatic lighting, 8K, sharp focus, "
+        "no text, no watermark"
+    ),
+}
+
+FLUX_NEGATIVE = (
+    "blurry, low quality, text, watermark, logo, cartoon, "
+    "anime, faces, nsfw, ugly, duplicate, deformed"
+)
+
+# ── Pexels / Pixabay 키워드 (fallback) ───────────────────────────────────────
+STOCK_KEYWORDS = {
     "morning": {
-        "상승": "stock market bull finance morning growth",
-        "하락": "stock market bear finance crisis red",
-        "혼조": "wall street trading floor economy",
-        "금리": "federal reserve interest rate banking",
+        "상승": "stock market bull finance growth morning",
+        "하락": "stock market bear finance crisis red morning",
+        "혼조": "wall street trading floor economy dawn",
+        "금리": "federal reserve interest rate banking economy",
         "기술주": "technology nasdaq silicon valley innovation",
-        "에너지": "energy oil renewable petroleum",
-        "인플레이션": "inflation economy money prices",
-        "고용": "employment jobs economy workforce",
-        "default": "stock market wall street finance morning",
+        "에너지": "energy oil renewable petroleum economy",
+        "인플레이션": "inflation economy money prices consumer",
+        "고용": "employment jobs economy workforce business",
+        "default": "stock market wall street finance morning economy",
     },
     "evening": {
         "상승": "stock market bull trading night growth",
-        "하락": "stock market bear crisis red night",
+        "하락": "stock market bear crisis red night finance",
         "혼조": "premarket trading floor economy night",
         "금리": "federal reserve interest rate banking night",
-        "기술주": "technology nasdaq innovation night",
-        "에너지": "energy oil market night",
-        "인플레이션": "inflation economy money night",
-        "고용": "employment jobs economy night",
+        "기술주": "technology nasdaq innovation digital night",
+        "에너지": "energy oil market economy night",
+        "인플레이션": "inflation economy money prices night",
+        "고용": "employment jobs economy business night",
         "default": "stock market premarket trading finance night",
     },
-}
-
-# 모드별 fallback 이미지 URL (Pexels/Pixabay 모두 실패했을 때 최종 폴백)
-FALLBACK_URLS = {
-    "morning": [
-        "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1024&q=80",
-        "https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?w=1024&q=80",
-        "https://images.unsplash.com/photo-1559526324-4b87b5e36e44?w=1024&q=80",
-    ],
-    "evening": [
-        "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1024&q=80",
-        "https://images.unsplash.com/photo-1526628953301-3e589a6a8b74?w=1024&q=80",
-        "https://images.unsplash.com/photo-1642790551116-18a150d1f65d?w=1024&q=80",
-    ],
 }
 
 OUTPUT_DIR = "images"
 
 
-def _extract_keywords(image_prompt: str, content: str, mode: str) -> str:
-    topic_map = TOPIC_KEYWORDS.get(mode, TOPIC_KEYWORDS["morning"])
-    for topic, keywords in topic_map.items():
-        if topic == "default":
-            continue
-        if topic in content or topic in image_prompt:
-            return keywords
-    return topic_map["default"]
-
-
 def _daily_index(length: int) -> int:
-    """날짜 기반으로 매일 다른 인덱스를 골라 같은 검색 결과 안에서도 이미지가 바뀌게 함."""
+    """날짜 기반으로 매일 다른 인덱스 선택."""
     if length <= 0:
         return 0
     seed = int(datetime.now().strftime("%Y%m%d"))
     return seed % length
 
 
-def _load_watermark_font(size: int) -> ImageFont.FreeTypeFont:
-    for path in _WATERMARK_FONT_CANDIDATES:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
+def _extract_stock_query(prompt: str, content: str, mode: str) -> str:
+    kmap = STOCK_KEYWORDS.get(mode, STOCK_KEYWORDS["morning"])
+    for topic, keywords in kmap.items():
+        if topic == "default":
+            continue
+        if topic in content or topic in prompt:
+            return keywords
+    return kmap["default"]
 
 
-def _watermark_image(file_path: str, text: str) -> None:
-    """이미지 우측 하단에 작은 반투명 출처 표시를 그립니다. 실패해도 무시합니다."""
+def _add_watermark(file_path: str, source: str) -> None:
+    """이미지 우측 하단에 출처 표시 (실패해도 무시)."""
     try:
         img = Image.open(file_path).convert("RGBA")
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
+        font_size = max(14, img.width // 55)
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size
+            )
+        except Exception:
+            font = ImageFont.load_default()
 
-        font_size = max(14, img.width // 45)
-        font = _load_watermark_font(font_size)
-
+        text = f"Image: {source}"
         bbox = draw.textbbox((0, 0), text, font=font)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        pad = 8
-        margin = 14
-        x = img.width - text_w - pad * 2 - margin
-        y = img.height - text_h - pad * 2 - margin
-
-        draw.rectangle(
-            [x, y, x + text_w + pad * 2, y + text_h + pad * 2],
-            fill=(0, 0, 0, 140),
-        )
-        draw.text(
-            (x + pad - bbox[0], y + pad - bbox[1]),
-            text,
-            font=font,
-            fill=(255, 255, 255, 235),
-        )
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad, margin = 8, 14
+        x = img.width - tw - pad * 2 - margin
+        y = img.height - th - pad * 2 - margin
+        draw.rectangle([x, y, x + tw + pad * 2, y + th + pad * 2], fill=(0, 0, 0, 140))
+        draw.text((x + pad - bbox[0], y + pad - bbox[1]), text, font=font, fill=(255, 255, 255, 220))
 
         result = Image.alpha_composite(img, overlay).convert("RGB")
         result.save(file_path, quality=90)
     except Exception as e:
-        logger.warning(f"이미지 출처 표시 삽입 실패 (무시하고 진행): {e}")
+        logger.warning(f"워터마크 삽입 실패 (무시): {e}")
 
 
 class ImageGenerator:
     def __init__(self, hf_token: str = ""):
-        # hf_token은 더 이상 사용하지 않지만, 기존 호출부(main.py)와의
-        # 하위 호환을 위해 인자는 그대로 받아둡니다.
+        self.hf_token = hf_token
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
-        self.last_image_source = ""  # "Pexels" | "Pixabay" | "Unsplash" | ""
+        self.last_image_source = ""
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     def get_attribution_text(self) -> str:
-        """가장 최근 generate() 호출에서 실제로 사용된 이미지 출처에 맞는
-        저작자 표시 문구를 반환합니다. 각 서비스 라이선스는 표시를 의무로
-        요구하지는 않지만, 안전하게 자동으로 남겨둡니다."""
         credit_map = {
+            "FLUX.1-schnell": "Image generated by FLUX.1-schnell (HuggingFace)",
             "Pexels": "사진 제공: Pexels",
             "Pixabay": "사진 제공: Pixabay",
-            "Unsplash": "사진 제공: Unsplash",
         }
         return credit_map.get(self.last_image_source, "")
 
@@ -166,72 +157,168 @@ class ImageGenerator:
         content: str = "",
         mode: str = "morning",
     ) -> str:
-        keywords = _extract_keywords(prompt, content, mode)
-        logger.info(f"이미지 검색 키워드 ({mode}): {keywords}")
+        # 1순위: FLUX.1-schnell
+        result = self._generate_flux(prompt, filename, mode)
+        if result:
+            self.last_image_source = "FLUX.1-schnell"
+            return result
 
-        result = self._fetch_pexels(keywords, filename)
+        # 2순위: Pexels
+        logger.info("FLUX 실패 → Pexels로 대체 시도...")
+        result = self._fetch_pexels(prompt, content, filename, mode)
         if result:
             self.last_image_source = "Pexels"
             return result
 
-        logger.info("Pixabay로 대체 시도...")
-        result = self._fetch_pixabay(keywords, filename)
+        # 3순위: Pixabay
+        logger.info("Pexels 실패 → Pixabay로 대체 시도...")
+        result = self._fetch_pixabay(prompt, content, filename, mode)
         if result:
             self.last_image_source = "Pixabay"
             return result
 
-        logger.warning("Pexels/Pixabay 모두 실패. 기본 이미지 사용")
-        self.last_image_source = "Unsplash"
-        return self._default_fallback(filename, mode)
+        # 4순위: gradient fallback
+        logger.warning("모든 이미지 소스 실패 → gradient fallback 사용")
+        self.last_image_source = ""
+        return self._gradient_fallback(filename, mode)
 
-    # ── Pexels ────────────────────────────────────────────────────────────
-    def _fetch_pexels(self, keywords: str, filename: str) -> str | None:
+    # ── FLUX.1-schnell ────────────────────────────────────────────────────────
+    def _generate_flux(
+        self, prompt: str, filename: str, mode: str, max_retries: int = 3
+    ) -> str | None:
+        if not self.hf_token:
+            logger.info("HF_API_TOKEN 미설정 — FLUX 건너뜀")
+            return None
+
+        suffix = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
+        full_prompt = f"{prompt}{suffix}"
+
+        # 날짜+모드 기반 시드로 매일 다른 이미지
+        seed = int(hashlib.md5(
+            f"{datetime.now().strftime('%Y%m%d')}{mode}".encode()
+        ).hexdigest()[:8], 16) % (2 ** 32)
+
+        payload = {
+            "inputs": full_prompt,
+            "parameters": {
+                "num_inference_steps": 4,   # schnell 권장값
+                "guidance_scale": 0.0,       # schnell은 0이 최적
+                "width": 1024,
+                "height": 576,
+                "seed": seed,
+            },
+        }
+        headers = {"Authorization": f"Bearer {self.hf_token}"}
+
+        logger.info(f"FLUX.1-schnell 이미지 생성 중 (모드: {mode}, 시드: {seed})...")
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = requests.post(
+                    HF_FLUX_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+
+                if resp.status_code == 200:
+                    if len(resp.content) < 10_000:
+                        logger.warning("FLUX 응답 크기 불충분")
+                        return None
+                    file_path = os.path.join(
+                        OUTPUT_DIR, filename.replace(".png", ".jpg")
+                    )
+                    # FLUX는 PNG 바이너리 반환 → JPEG로 저장
+                    img = Image.open(BytesIO(resp.content)).convert("RGB")
+                    img.save(file_path, "JPEG", quality=92, optimize=True)
+                    _add_watermark(file_path, "FLUX.1-schnell / HuggingFace")
+                    logger.info(
+                        f"FLUX 이미지 저장: {file_path} "
+                        f"({len(resp.content) // 1024}KB)"
+                    )
+                    return file_path
+
+                elif resp.status_code == 503:
+                    # 모델 cold start — estimated_time만큼 대기 후 재시도
+                    try:
+                        wait = min(resp.json().get("estimated_time", 20), 40)
+                    except Exception:
+                        wait = 20
+                    logger.warning(
+                        f"FLUX 모델 로딩 중 (503) — {wait:.0f}초 대기 "
+                        f"(시도 {attempt}/{max_retries})..."
+                    )
+                    time.sleep(wait)
+
+                elif resp.status_code == 429:
+                    logger.warning("FLUX 요청 한도 초과 (429) — Pexels로 전환")
+                    return None
+
+                else:
+                    logger.warning(
+                        f"FLUX 실패 ({resp.status_code}): {resp.text[:150]}"
+                    )
+                    return None
+
+            except requests.exceptions.Timeout:
+                logger.warning(f"FLUX 타임아웃 (시도 {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    time.sleep(5)
+            except Exception as e:
+                logger.warning(f"FLUX 오류: {e}")
+                return None
+
+        return None
+
+    # ── Pexels ────────────────────────────────────────────────────────────────
+    def _fetch_pexels(
+        self, prompt: str, content: str, filename: str, mode: str
+    ) -> str | None:
         if not self.pexels_key:
             logger.info("PEXELS_API_KEY 미설정 — Pexels 건너뜀")
             return None
+        query = _extract_stock_query(prompt, content, mode)
         try:
             resp = requests.get(
                 "https://api.pexels.com/v1/search",
                 headers={"Authorization": self.pexels_key},
-                params={"query": keywords, "per_page": 10, "orientation": "landscape"},
+                params={"query": query, "per_page": 10, "orientation": "landscape"},
                 timeout=15,
             )
             resp.raise_for_status()
             photos = resp.json().get("photos", [])
             if not photos:
-                logger.warning(f"Pexels 결과 없음: {keywords}")
+                logger.warning(f"Pexels 결과 없음: {query}")
                 return None
-
-            idx = _daily_index(len(photos))
-            img_url = photos[idx]["src"]["large2x"]
-
+            img_url = photos[_daily_index(len(photos))]["src"]["large2x"]
             ir = requests.get(img_url, timeout=20)
             ir.raise_for_status()
-            if len(ir.content) < 10000:
-                logger.warning("Pexels 이미지 응답이 너무 작음")
+            if len(ir.content) < 10_000:
                 return None
-
             file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
             with open(file_path, "wb") as f:
                 f.write(ir.content)
-            _watermark_image(file_path, "Photo: Pexels")
-            logger.info(f"Pexels 이미지 저장: {file_path} ({len(ir.content)//1024}KB)")
+            _add_watermark(file_path, "Pexels")
+            logger.info(f"Pexels 이미지 저장: {file_path}")
             return file_path
         except Exception as e:
             logger.warning(f"Pexels 실패: {e}")
             return None
 
-    # ── Pixabay ───────────────────────────────────────────────────────────
-    def _fetch_pixabay(self, keywords: str, filename: str) -> str | None:
+    # ── Pixabay ───────────────────────────────────────────────────────────────
+    def _fetch_pixabay(
+        self, prompt: str, content: str, filename: str, mode: str
+    ) -> str | None:
         if not self.pixabay_key:
             logger.info("PIXABAY_API_KEY 미설정 — Pixabay 건너뜀")
             return None
+        query = _extract_stock_query(prompt, content, mode)
         try:
             resp = requests.get(
                 "https://pixabay.com/api/",
                 params={
                     "key": self.pixabay_key,
-                    "q": keywords,
+                    "q": query,
                     "image_type": "photo",
                     "orientation": "horizontal",
                     "per_page": 10,
@@ -243,40 +330,43 @@ class ImageGenerator:
             resp.raise_for_status()
             hits = resp.json().get("hits", [])
             if not hits:
-                logger.warning(f"Pixabay 결과 없음: {keywords}")
+                logger.warning(f"Pixabay 결과 없음: {query}")
                 return None
-
-            idx = _daily_index(len(hits))
-            img_url = hits[idx]["largeImageURL"]
-
+            img_url = hits[_daily_index(len(hits))]["largeImageURL"]
             ir = requests.get(img_url, timeout=20)
             ir.raise_for_status()
-            if len(ir.content) < 10000:
-                logger.warning("Pixabay 이미지 응답이 너무 작음")
+            if len(ir.content) < 10_000:
                 return None
-
             file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
             with open(file_path, "wb") as f:
                 f.write(ir.content)
-            _watermark_image(file_path, "Photo: Pixabay")
-            logger.info(f"Pixabay 이미지 저장: {file_path} ({len(ir.content)//1024}KB)")
+            _add_watermark(file_path, "Pixabay")
+            logger.info(f"Pixabay 이미지 저장: {file_path}")
             return file_path
         except Exception as e:
             logger.warning(f"Pixabay 실패: {e}")
             return None
 
-    # ── 최종 폴백 ─────────────────────────────────────────────────────────
-    def _default_fallback(self, filename: str, mode: str) -> str:
-        urls = FALLBACK_URLS.get(mode, FALLBACK_URLS["morning"])
-        idx = datetime.now().day % len(urls)
-        fallback_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
-        try:
-            resp = requests.get(urls[idx], timeout=15)
-            if resp.status_code == 200:
-                with open(fallback_path, "wb") as f:
-                    f.write(resp.content)
-                _watermark_image(fallback_path, "Photo: Unsplash")
-                return fallback_path
-        except Exception:
-            pass
-        return fallback_path
+    # ── gradient fallback ─────────────────────────────────────────────────────
+    def _gradient_fallback(self, filename: str, mode: str) -> str:
+        W, H = 1024, 576
+        img = Image.new("RGB", (W, H))
+        draw = ImageDraw.Draw(img)
+        if mode == "morning":
+            colors = [(6, 20, 60), (15, 50, 110), (6, 20, 60)]
+        else:
+            colors = [(20, 5, 55), (50, 15, 100), (20, 5, 55)]
+        n = len(colors) - 1
+        step = H // n
+        for i in range(n):
+            c0, c1 = colors[i], colors[i + 1]
+            for y in range(i * step, (i + 1) * step):
+                t = (y - i * step) / step
+                r = int(c0[0] * (1 - t) + c1[0] * t)
+                g = int(c0[1] * (1 - t) + c1[1] * t)
+                b = int(c0[2] * (1 - t) + c1[2] * t)
+                draw.line([(0, y), (W, y)], fill=(r, g, b))
+        file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
+        img.save(file_path, "JPEG", quality=85)
+        logger.info(f"gradient fallback 저장: {file_path}")
+        return file_path
