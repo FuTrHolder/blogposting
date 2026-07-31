@@ -1,0 +1,94 @@
+name: 미국 증시 블로그 원고 대시보드 업로드
+
+on:
+  schedule:
+    - cron: "0 0 * * 2-6"   # 오전 9시 KST (UTC 00:00, 화~토) — 전일 마감 리뷰
+    - cron: "0 12 * * 1-5"  # 저녁 9시 KST (UTC 12:00, 월~금) — 프리마켓 & 이슈
+
+  workflow_dispatch:
+    inputs:
+      post_mode:
+        description: "포스팅 모드 (morning=전일 마감리뷰 / evening=프리마켓&이슈)"
+        required: false
+        default: "morning"
+        type: choice
+        options:
+          - morning
+          - evening
+
+jobs:
+  morning-post:
+    name: "📊 오전 포스팅 (전일 마감 리뷰)"
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 2-6') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # GitHub Release 썸네일 업로드용
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 📁 디렉토리 준비
+        run: mkdir -p images
+
+      - name: 🌅 오전 원고 생성 및 대시보드 업로드
+        env:
+          POST_MODE: morning
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python main.py
+
+  evening-post:
+    name: "🌙 저녁 포스팅 (프리마켓 & 당일 이슈)"
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'evening')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 📁 디렉토리 준비
+        run: mkdir -p images
+
+      - name: 🌙 저녁 원고 생성 및 대시보드 업로드
+        env:
+          POST_MODE: evening
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          GH_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python main.py
