@@ -26,59 +26,6 @@
   <nav id="tabs" class="tabs"></nav>
 
   <main id="app" class="layout">
-    <section id="content-panel" class="panel panel-content">
-      <div class="panel-head">
-        <span class="panel-eyebrow">블로그 원고</span>
-        <h2 id="post-title">포스트를 선택하세요</h2>
-      </div>
-
-      <div class="thumb-wrap">
-        <img id="thumb-img" alt="썸네일" hidden>
-        <p id="thumb-empty" class="muted">썸네일 없음</p>
-      </div>
-      <div class="thumb-strip">
-        <span class="thumb-caption">THUMBNAIL</span>
-        <span class="btn-group">
-          <button class="copy-btn" id="thumb-copy-btn">이미지 복사</button>
-          <a class="copy-btn" id="thumb-download-link" download>다운로드</a>
-        </span>
-      </div>
-
-      <div class="content-body">
-        <div class="field">
-          <div class="field-head">
-            <span class="field-label">제목</span>
-            <button class="copy-btn" data-target="title-text">복사</button>
-          </div>
-          <textarea id="title-text" rows="2" readonly></textarea>
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <span class="field-label">본문 · 마크다운</span>
-            <button class="copy-btn" data-target="content-text">복사</button>
-          </div>
-          <textarea id="content-text" rows="16" readonly></textarea>
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <span class="field-label">태그</span>
-            <button class="copy-btn" data-target="tags-text">복사</button>
-          </div>
-          <textarea id="tags-text" rows="1" readonly></textarea>
-        </div>
-      </div>
-    </section>
-
-    <section id="marketing-panel" class="panel panel-marketing">
-      <div class="panel-head">
-        <span class="panel-eyebrow">배포 채널</span>
-        <h2>마케팅 워크플로우</h2>
-        <button id="trigger-btn">마케팅 실행</button>
-      </div>
-      <p id="trigger-status" class="muted"></p>
-      <div id="marketing-grid" class="marketing-grid"></div>
-    </section>
-
     <section id="calendar-panel" class="panel panel-calendar">
       <div class="panel-head">
         <span class="panel-eyebrow">레퍼런스</span>
@@ -149,6 +96,60 @@
         <a class="quicklink-chip" href="https://earnings-desk.com/stocks/XOM" target="_blank" rel="noopener">엑슨모빌</a>
         <a class="quicklink-chip" href="https://earnings-desk.com/stocks/BA" target="_blank" rel="noopener">보잉</a>
       </div>
+    </section>
+
+    <section id="content-panel" class="panel panel-content">
+      <div class="panel-head">
+        <span class="panel-eyebrow">블로그 원고</span>
+        <h2 id="post-title">포스트를 선택하세요</h2>
+      </div>
+
+      <div class="thumb-wrap">
+        <img id="thumb-img" alt="썸네일" hidden>
+        <p id="thumb-empty" class="muted">썸네일 없음</p>
+      </div>
+      <div class="thumb-strip">
+        <span class="thumb-caption">THUMBNAIL</span>
+        <span class="btn-group">
+          <button class="copy-btn" id="thumb-copy-btn">이미지 복사</button>
+          <a class="copy-btn" id="thumb-download-link" download>다운로드</a>
+        </span>
+      </div>
+
+      <div class="content-body">
+        <div class="field">
+          <div class="field-head">
+            <span class="field-label">제목</span>
+            <button class="copy-btn" data-target="title-text">복사</button>
+          </div>
+          <textarea id="title-text" rows="2" readonly></textarea>
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <span class="field-label">본문 · 마크다운</span>
+            <button class="copy-btn" data-target="content-text">복사</button>
+          </div>
+          <textarea id="content-text" rows="16" readonly></textarea>
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <span class="field-label">태그 · 하나씩 클릭해서 복사</span>
+            <button class="copy-btn" id="tags-copy-all-btn">전체 복사</button>
+          </div>
+          <div id="tags-chips" class="tag-chips"></div>
+          <p id="tags-empty" class="muted" hidden>태그 없음</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="marketing-panel" class="panel panel-marketing">
+      <div class="panel-head">
+        <span class="panel-eyebrow">배포 채널</span>
+        <h2>마케팅 워크플로우</h2>
+        <button id="trigger-btn">마케팅 실행</button>
+      </div>
+      <p id="trigger-status" class="muted"></p>
+      <div id="marketing-grid" class="marketing-grid"></div>
     </section>
   </main>
 

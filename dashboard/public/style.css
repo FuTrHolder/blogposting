@@ -159,18 +159,22 @@ body {
 .tab-btn.active .tab-mode { color: var(--amber); }
 
 /* ── 레이아웃 ─────────────────────────────────────────────────────────────── */
+/* 데스크톱 기준 왼쪽부터: 경제지표 캘린더 → 기업 실적 발표 → 블로그 원고 → 마케팅 워크플로우 */
 main {
-  max-width: 1280px;
+  max-width: 1680px;
   margin: 0 auto;
   padding: 28px;
 }
 .layout {
   display: grid;
-  grid-template-columns: minmax(340px, 460px) 1fr;
-  gap: 24px;
+  grid-template-columns: repeat(4, minmax(280px, 1fr));
+  gap: 20px;
   align-items: start;
 }
-@media (max-width: 900px) {
+@media (max-width: 1500px) {
+  .layout { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
   .layout { grid-template-columns: 1fr; }
   .masthead { flex-direction: column; align-items: flex-start; gap: 10px; }
 }
@@ -263,6 +267,28 @@ textarea {
   transition: border-color 0.15s ease;
 }
 textarea:focus { border-color: var(--amber); }
+
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tag-chip {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.tag-chip:hover {
+  border-color: var(--amber);
+  color: var(--amber-strong);
+  transform: translateY(-1px);
+}
 
 /* ── 버튼 ────────────────────────────────────────────────────────────────── */
 .copy-btn, #trigger-btn {
@@ -362,9 +388,6 @@ textarea:focus { border-color: var(--amber); }
   font-family: var(--font-ui);
 }
 
-.panel-calendar {
-  grid-column: 1 / -1;
-}
 .calendar-embed {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -381,9 +404,6 @@ textarea:focus { border-color: var(--amber); }
 .calendar-embed .tradingview-widget-copyright a { color: var(--text-dim); }
 
 /* ── 기업 실적 발표 바로가기 ─────────────────────────────────────────────── */
-.panel-earnings {
-  grid-column: 1 / -1;
-}
 .cta-link {
   font-family: var(--font-ui);
   font-size: 12px;

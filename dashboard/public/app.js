@@ -1,6 +1,7 @@
 let currentDate = null;
 let currentMode = null;
 let currentThumbnailUrl = "";
+let currentTags = [];
 
 // ── 마스트헤드 실시간 시계 (KST / ET) ────────────────────────────────────────
 const _kstFormatter = new Intl.DateTimeFormat("ko-KR", {
@@ -118,7 +119,8 @@ async function loadContent(postDate, mode) {
   } catch (e) {
     tags = [];
   }
-  document.getElementById("tags-text").value = tags.map((t) => `#${t}`).join(" ");
+  currentTags = tags;
+  renderTagChips(tags);
 
   const img = document.getElementById("thumb-img");
   const empty = document.getElementById("thumb-empty");
@@ -157,6 +159,47 @@ document.getElementById("thumb-copy-btn").addEventListener("click", async (e) =>
     console.error(err);
   }
   setTimeout(() => (btn.textContent = original), 1400);
+});
+
+// ── 태그 칩 (하나씩 클릭해서 복사) ────────────────────────────────────────────
+
+function renderTagChips(tags) {
+  const container = document.getElementById("tags-chips");
+  const empty = document.getElementById("tags-empty");
+  container.innerHTML = "";
+
+  if (!tags || tags.length === 0) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  tags.forEach((tag) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "tag-chip";
+    chip.textContent = `#${tag}`;
+    chip.title = "클릭해서 이 태그만 복사";
+    chip.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(tag);
+        chip.textContent = "복사됨!";
+      } catch (err) {
+        chip.textContent = "복사 실패";
+      }
+      setTimeout(() => (chip.textContent = `#${tag}`), 1000);
+    });
+    container.appendChild(chip);
+  });
+}
+
+document.getElementById("tags-copy-all-btn").addEventListener("click", async (e) => {
+  const btn = e.target;
+  if (!currentTags || currentTags.length === 0) return;
+  const original = btn.textContent;
+  await navigator.clipboard.writeText(currentTags.map((t) => `#${t}`).join(" "));
+  btn.textContent = "복사됨!";
+  setTimeout(() => (btn.textContent = original), 1200);
 });
 
 // ── 마케팅 결과 로딩 ─────────────────────────────────────────────────────────
