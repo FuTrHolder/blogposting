@@ -1,10 +1,6 @@
 name: 미국 증시 블로그 원고 대시보드 업로드
 
 on:
-  schedule:
-    - cron: "0 0 * * 2-6"   # 오전 9시 KST (UTC 00:00, 화~토) — 전일 마감 리뷰
-    - cron: "0 12 * * 1-5"  # 저녁 9시 KST (UTC 12:00, 월~금) — 프리마켓 & 이슈
-
   workflow_dispatch:
     inputs:
       post_mode:
