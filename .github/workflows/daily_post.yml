@@ -1,6 +1,10 @@
 name: 미국 증시 블로그 원고 대시보드 업로드
 
 on:
+  schedule:
+    - cron: "0 0 * * 2-6"   # 오전 9시 KST (UTC 00:00, 화~토) — 전일 마감 리뷰
+    - cron: "0 12 * * 1-5"  # 저녁 9시 KST (UTC 12:00, 월~금) — 프리마켓 & 이슈
+
   workflow_dispatch:
     inputs:
       post_mode:
@@ -19,9 +23,9 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      contents: write   # GitHub Release 썸네일 업로드용
+      contents: write
 
     steps:
       - name: 📥 코드 체크아웃
@@ -44,6 +48,7 @@ jobs:
           POST_MODE: morning
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
@@ -57,7 +62,7 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'evening')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
 
@@ -82,6 +87,7 @@ jobs:
           POST_MODE: evening
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
