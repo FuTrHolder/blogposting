@@ -59,7 +59,9 @@ _FONT_BLACK   = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
 _FONT_BOLD    = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 _FONT_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
-# ── 이모지 제거 ───────────────────────────────────────────────────────────────
+# ── 텍스트 정제 (HTML 엔티티 + 이모지) ──────────────────────────────────────
+import html as _html_module
+
 _EMOJI_RE = re.compile(
     "["
     "\U0001F600-\U0001F64F"
@@ -81,8 +83,22 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-def _strip_emoji(text: str) -> str:
-    return _EMOJI_RE.sub("", text).strip()
+def _clean_text(text: str) -> str:
+    """
+    Pillow 렌더링 전 텍스트 정제.
+    1) HTML 엔티티 변환: &middot; → · / &amp; → & / &ndash; → – 등
+       Gemini가 JSON 안에 HTML 엔티티를 그대로 출력하는 경우를 방지합니다.
+    2) 잔여 numeric 엔티티 처리: &#183; / &#xB7; 형태
+    3) 이모지 제거: Pillow CJK 폰트가 렌더링하지 못해 □ 또는 오류 발생
+    """
+    text = _html_module.unescape(text)
+    text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
+    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)), text)
+    text = _EMOJI_RE.sub("", text)
+    return text.strip()
+
+# 하위 호환 별칭 (generator.py 등에서 _strip_emoji 직접 호출 시 대비)
+_strip_emoji = _clean_text
 
 
 # ── 폰트 헬퍼 ────────────────────────────────────────────────────────────────
@@ -506,6 +522,10 @@ class SNSThumbnailGenerator:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         content  = content or {}
+        # 진입점에서 HTML 엔티티 + 이모지 일괄 정제
+        # (Gemini가 &middot; 같은 HTML 엔티티를 JSON 안에 넣는 경우 방지)
+        title      = _clean_text(title)
+        image_prompt = _clean_text(image_prompt) if image_prompt else ""
         date_str = _extract_date(title)
 
         platform_list = ["facebook", "threads", "instagram", "instagram_portrait", "kakao"]
