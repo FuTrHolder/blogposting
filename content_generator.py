@@ -130,9 +130,40 @@ SYSTEM_EVENING = (
 )
 
 
-def _build_morning_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
+def _reference_time_block(korean_datetime_str: str, ny_reference_str: str) -> str:
+    """기준 시각 블록 — AI가 직접 재계산하지 못하도록 사실로 주입."""
+    if not korean_datetime_str or not ny_reference_str:
+        return ""
+    return (
+        "────────────────────────────────────────\n"
+        "기준 시각 (아래 값을 그대로 사용하세요 — 직접 재계산 금지)\n"
+        "────────────────────────────────────────\n"
+        f"[글 작성 시각 - 한국(KST)]   {korean_datetime_str}\n"
+        f"[분석 기준 시각 - 미국 뉴욕] {ny_reference_str}\n\n"
+        "본문에서 '오늘', '어제', '전일', '이번 주' 등 상대적 시제 표현을 쓸 때는 "
+        "반드시 위 [분석 기준 시각 - 미국 뉴욕]을 기준으로만 판단하세요.\n"
+        "────────────────────────────────────────\n\n"
+    )
+
+
+def _build_morning_prompt(
+    korean_date: str,
+    us_market_date: str,
+    market_data: dict,
+    news_list: list[dict],
+    korean_datetime_str: str = "",
+    ny_reference_str: str = "",
+    fact_reference_block: str = "",
+) -> str:
     """오전 포스팅용 프롬프트: 전일 마감 데이터 중심."""
-    market_text = f"📅 미국 증시 마감 날짜: {date}\n\n[전일 마감 지수]\n"
+    market_text = (
+        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
+        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
+        f"📅 리뷰 대상 미국 증시 마감 날짜: {us_market_date}\n"
+        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하고, "
+        f"본문의 '전일 마감'은 미국 날짜({us_market_date}) 기준임을 명확히 하세요.\n\n"
+        "[전일 마감 지수]\n"
+    )
     for name, data in market_data.items():
         if name == "fear_greed" or not data:
             continue
@@ -166,9 +197,12 @@ def _build_morning_prompt(date: str, market_data: dict, news_list: list[dict]) -
     else:
         hint = "전일 미국 시장은 혼조세로 마감했습니다."
 
+    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
+
     return (
         f"{market_text}{news_text}\n"
-        f"[시장 요약] {hint}\n\n"
+        f"[시장 요약] {hint}\n"
+        f"{fact_block_text}\n"
         "위 데이터를 바탕으로 전일 미국 증시 마감 리뷰 블로그 포스팅을 작성하고, "
         "지정된 JSON 형식으로만 응답해주세요.\n"
         "제목은 반드시 전날 마감 결과(지수 수치·등락 방향 등)를 구체적으로 담아 "
@@ -176,9 +210,23 @@ def _build_morning_prompt(date: str, market_data: dict, news_list: list[dict]) -
     )
 
 
-def _build_evening_prompt(date: str, market_data: dict, news_list: list[dict]) -> str:
-    """저녁 포스팅용 프롬프트: 프리마켓 & 당일 이슈 중심."""
-    market_text = f"📅 기준 날짜: {date} (한국 시간)\n\n[현재 선물/프리마켓 지수]\n"
+def _build_evening_prompt(
+    korean_date: str,
+    us_market_date: str,
+    market_data: dict,
+    news_list: list[dict],
+    korean_datetime_str: str = "",
+    ny_reference_str: str = "",
+    fact_reference_block: str = "",
+) -> str:
+    """저녁 포스팅용 프롬프트: 전일 리뷰 + 프리마켓 & 당일 이슈 중심."""
+    market_text = (
+        f"{_reference_time_block(korean_datetime_str, ny_reference_str)}"
+        f"📅 포스팅 작성 날짜 (한국 시간): {korean_date}\n"
+        f"📅 전일 마감 미국 정규장 날짜: {us_market_date}\n"
+        f"※ 제목에는 반드시 한국 날짜({korean_date})를 사용하세요.\n\n"
+        "[현재 선물/프리마켓 지수]\n"
+    )
     for name, data in market_data.items():
         if name == "fear_greed" or not data:
             continue
@@ -199,9 +247,12 @@ def _build_evening_prompt(date: str, market_data: dict, news_list: list[dict]) -
         if news.get("summary"):
             news_text += f"   → {news['summary'][:200].replace(chr(10), ' ')}\n"
 
+    fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
+
     return (
         f"{market_text}{news_text}\n"
-        "위 데이터를 바탕으로 오늘 밤 미국 증시 개장 전 프리뷰 블로그 포스팅을 작성하고, "
+        f"{fact_block_text}\n"
+        "위 데이터를 바탕으로 저녁 9시 블로그 포스팅을 작성하고, "
         "지정된 JSON 형식으로만 응답해주세요.\n"
         "제목은 오늘 밤 시장에서 주목해야 할 핵심 이슈를 구체적으로 담아 "
         "독자가 클릭하고 싶게 만들어 주세요."
@@ -262,18 +313,122 @@ class ContentGenerator:
         market_data: dict,
         news_list: list[dict],
         mode: str = "morning",
+        # 타임스탬프 관련 (main.py compute_reference_times 결과)
+        korean_date: str | None = None,
+        us_market_date: str | None = None,
+        korean_datetime_str: str | None = None,
+        ny_reference_str: str | None = None,
+        # 팩트체크 관련 (fact_reference.py 결과)
+        fact_reference_block: str = "",
+        fact_lookup: dict | None = None,
     ) -> dict:
+        # korean_date/us_market_date가 전달되지 않으면 하위 호환을 위해 date로 대체
+        _korean_date         = korean_date or date
+        _us_market_date      = us_market_date or date
+        _korean_datetime_str = korean_datetime_str or ""
+        _ny_reference_str    = ny_reference_str or ""
+
         if mode == "evening":
             system = SYSTEM_EVENING
-            prompt = _build_evening_prompt(date, market_data, news_list)
+            prompt = _build_evening_prompt(
+                _korean_date, _us_market_date, market_data, news_list,
+                _korean_datetime_str, _ny_reference_str, fact_reference_block,
+            )
         else:
             system = SYSTEM_MORNING
-            prompt = _build_morning_prompt(date, market_data, news_list)
+            prompt = _build_morning_prompt(
+                _korean_date, _us_market_date, market_data, news_list,
+                _korean_datetime_str, _ny_reference_str, fact_reference_block,
+            )
 
         logger.info(f"Gemini API 호출 중 (모델: {GEMINI_MODEL}, 모드: {mode})...")
-        raw = self._call_gemini(system, prompt)
 
-        # JSON 파싱 (코드블록 방어)
+        max_json_retries = 2
+        last_error: Exception | None = None
+
+        for json_attempt in range(1, max_json_retries + 2):
+            raw = self._call_gemini(system, prompt)
+            try:
+                post = self._parse_json_response(raw)
+                # JSON 파싱 직후 HTML 엔티티 정제
+                # Gemini가 &middot; &amp; 등을 그대로 출력하는 경우 방지
+                post["title"]   = _clean_post_text(post.get("title", ""))
+                post["content"] = _clean_post_text(post.get("content", ""))
+                logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
+                logger.info(f"생성된 제목: {post.get('title', '')}")
+                # 팩트체크 (fact_lookup 있을 때만)
+                if fact_lookup:
+                    post = self._fact_check_and_correct(
+                        post, system, prompt, fact_lookup
+                    )
+                return post
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    f"JSON 파싱 실패 (시도 {json_attempt}/{max_json_retries + 1}): {e}"
+                )
+                if json_attempt <= max_json_retries:
+                    logger.info("Gemini를 재호출해 다시 시도합니다...")
+
+        raise RuntimeError(
+            f"Gemini 응답을 JSON으로 파싱하는 데 {max_json_retries + 1}회 모두 실패: {last_error}"
+        )
+
+    def _fact_check_and_correct(
+        self,
+        post: dict,
+        system: str,
+        original_prompt: str,
+        fact_lookup: dict | None,
+    ) -> dict:
+        """실적/경제지표 발표일 사실 오류 검사 및 교정."""
+        import fact_checker
+        if not fact_lookup:
+            return post
+        try:
+            violations = fact_checker.check_facts(post, fact_lookup)
+        except Exception as e:
+            logger.warning(f"팩트체크 검사 중 오류(무시하고 원본 유지): {e}")
+            return post
+
+        if not violations:
+            logger.info("팩트체크: 사실 오류 없음")
+            return post
+
+        logger.warning(f"팩트체크: {len(violations)}건 사실 오류 후보 발견")
+        post, applied, remaining = fact_checker.auto_correct_facts(post, violations)
+        if applied:
+            logger.warning(f"팩트체크: {len(applied)}건 자동 교정 완료")
+
+        if not remaining:
+            return post
+
+        # 남은 위반 → Gemini 재생성 1회
+        correction_note = fact_checker.build_correction_prompt_note(remaining)
+        corrected_prompt = original_prompt + "\n\n" + correction_note
+        try:
+            raw2 = self._call_gemini(system, corrected_prompt)
+            post2 = self._parse_json_response(raw2)
+            post2["title"]   = _clean_post_text(post2.get("title", ""))
+            post2["content"] = _clean_post_text(post2.get("content", ""))
+        except Exception as e:
+            logger.warning(f"팩트체크 재생성 실패(원본 유지): {e}")
+            return fact_checker.neutralize_unresolved(post, remaining)
+
+        violations2 = fact_checker.check_facts(post2, fact_lookup)
+        if not violations2:
+            logger.info("팩트체크: 재생성 후 모든 오류 해결")
+            return post2
+
+        post2, applied2, remaining2 = fact_checker.auto_correct_facts(post2, violations2)
+        if remaining2:
+            logger.error(f"팩트체크: 재생성 후에도 {len(remaining2)}건 미해결 → 안전 대체")
+            post2 = fact_checker.neutralize_unresolved(post2, remaining2)
+        return post2
+
+    @staticmethod
+    def _parse_json_response(raw: str) -> dict:
+        """코드블록 방어 포함 JSON 파싱."""
         if "```" in raw:
             for part in raw.split("```"):
                 part = part.strip()
@@ -283,12 +438,4 @@ class ContentGenerator:
                     return json.loads(part)
                 except json.JSONDecodeError:
                     continue
-
-        post = json.loads(raw)
-        # JSON 파싱 직후 HTML 엔티티 정제
-        # Gemini가 &middot; &amp; 등 HTML 엔티티를 그대로 출력하는 경우 방지
-        post["title"]   = _clean_post_text(post.get("title", ""))
-        post["content"] = _clean_post_text(post.get("content", ""))
-        logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
-        logger.info(f"생성된 제목: {post.get('title', '')}")
-        return post
+        return json.loads(raw)
