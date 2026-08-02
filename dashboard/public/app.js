@@ -1,36 +1,8 @@
 let currentDate = null;
 let currentMode = null;
 let currentThumbnailUrl = "";
-let currentTags = [];
 
-// ── 마스트헤드 실시간 시계 (KST / ET) ────────────────────────────────────────
-const _kstFormatter = new Intl.DateTimeFormat("ko-KR", {
-  timeZone: "Asia/Seoul",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-const _etFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-});
-
-function updateClock() {
-  const now = new Date();
-  const kstEl = document.getElementById("clock-kst");
-  const etEl = document.getElementById("clock-et");
-  if (kstEl) kstEl.textContent = _kstFormatter.format(now);
-  if (etEl) etEl.textContent = _etFormatter.format(now);
-}
-updateClock();
-setInterval(updateClock, 1000);
-
-// ── 이미지를 실제로 클립보드에 복사 (PNG로 변환해서 어디든 붙여넣기 가능하게) ──────
-// GitHub Release 자산은 CORS를 지원하지 않아 직접 fetch()가 막히므로,
-// 같은 출처(same-origin)인 /proxy-image를 거쳐서 가져옵니다.
+// ── 이미지를 실제로 클립보드에 복사 ──────────────────────────────────────────
 async function copyImageToClipboard(url) {
   const proxied = `/proxy-image?url=${encodeURIComponent(url)}`;
   const resp = await fetch(proxied);
@@ -66,23 +38,14 @@ async function loadTabs() {
   nav.innerHTML = "";
 
   if (tabs.length === 0) {
-    nav.innerHTML =
-      '<span class="muted" style="padding:8px 4px;">' +
-      "아직 생성된 포스트가 없습니다. GitHub Actions 워크플로우가 실행되면 여기에 나타납니다." +
-      "</span>";
+    nav.innerHTML = '<span class="muted" style="padding:8px 16px;">아직 등록된 포스트가 없습니다.</span>';
     return;
   }
 
   tabs.forEach((t, i) => {
     const btn = document.createElement("button");
     btn.className = "tab-btn" + (i === 0 ? " active" : "");
-    btn.dataset.mode = t.mode;
-    const parts = t.post_date.split("-");
-    const shortDate = parts.length === 3 ? `${parts[1]}.${parts[2]}` : t.post_date;
-    btn.innerHTML =
-      `<span class="tab-dot"></span>` +
-      `<span class="tab-date">${shortDate}</span>` +
-      `<span class="tab-mode">${t.mode.toUpperCase()}</span>`;
+    btn.textContent = `${t.post_date} ${t.mode}`;
     btn.onclick = () => selectTab(t.post_date, t.mode, btn);
     nav.appendChild(btn);
   });
@@ -108,7 +71,7 @@ async function loadContent(postDate, mode) {
   const post = await res.json();
 
   document.getElementById("post-title").textContent = post
-    ? `${postDate} · ${mode.toUpperCase()}`
+    ? `${postDate} ${mode}`
     : "콘텐츠 없음";
   document.getElementById("title-text").value = post?.title || "";
   document.getElementById("content-text").value = post?.content || "";
@@ -119,8 +82,7 @@ async function loadContent(postDate, mode) {
   } catch (e) {
     tags = [];
   }
-  currentTags = tags;
-  renderTagChips(tags);
+  document.getElementById("tags-text").value = tags.map((t) => `#${t}`).join(" ");
 
   const img = document.getElementById("thumb-img");
   const empty = document.getElementById("thumb-empty");
@@ -161,48 +123,20 @@ document.getElementById("thumb-copy-btn").addEventListener("click", async (e) =>
   setTimeout(() => (btn.textContent = original), 1400);
 });
 
-// ── 태그 칩 (하나씩 클릭해서 복사) ────────────────────────────────────────────
-
-function renderTagChips(tags) {
-  const container = document.getElementById("tags-chips");
-  const empty = document.getElementById("tags-empty");
-  container.innerHTML = "";
-
-  if (!tags || tags.length === 0) {
-    empty.hidden = false;
-    return;
-  }
-  empty.hidden = true;
-
-  tags.forEach((tag) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "tag-chip";
-    chip.textContent = `#${tag}`;
-    chip.title = "클릭해서 이 태그만 복사";
-    chip.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(tag);
-        chip.textContent = "복사됨!";
-      } catch (err) {
-        chip.textContent = "복사 실패";
-      }
-      setTimeout(() => (chip.textContent = `#${tag}`), 1000);
-    });
-    container.appendChild(chip);
-  });
-}
-
-document.getElementById("tags-copy-all-btn").addEventListener("click", async (e) => {
-  const btn = e.target;
-  if (!currentTags || currentTags.length === 0) return;
-  const original = btn.textContent;
-  await navigator.clipboard.writeText(currentTags.map((t) => `#${t}`).join(" "));
-  btn.textContent = "복사됨!";
-  setTimeout(() => (btn.textContent = original), 1200);
-});
-
 // ── 마케팅 결과 로딩 ─────────────────────────────────────────────────────────
+
+// 플랫폼별 표시 이름 및 아이콘
+const PLATFORM_LABELS = {
+  youtube:          "▶ YouTube",
+  facebook:         "📘 Facebook",
+  facebook_reels:   "📘 Facebook Reels",
+  instagram:        "📸 Instagram",
+  instagram_reels:  "📸 Instagram Reels",
+  threads:          "🧵 Threads",
+  threads_reels:    "🧵 Threads Reels",
+  kakao:            "💬 Kakao Story",
+  tiktok:           "🎵 TikTok",
+};
 
 async function loadMarketing(postDate, mode) {
   const res = await fetch(`/api/marketing?date=${postDate}&mode=${mode}`);
@@ -212,24 +146,31 @@ async function loadMarketing(postDate, mode) {
   grid.innerHTML = "";
 
   if (!results || results.length === 0) {
-    grid.innerHTML =
-      '<p class="muted">마케팅 워크플로우가 아직 실행되지 않았습니다. 위 "마케팅 실행" 버튼을 눌러 시작하세요.</p>';
+    grid.innerHTML = '<p class="muted">아직 마케팅 결과가 없습니다.</p>';
     return;
   }
 
   results.forEach((r) => {
+    const card = document.createElement("div");
+    const isTiktok = r.platform === "tiktok";
+    card.className = "platform-card" + (isTiktok ? " tiktok-card" : "");
+
     const statusClass =
       r.status === "ok" ? "status-ok" : r.status === "skip" ? "status-skip" : "status-error";
 
-    const card = document.createElement("div");
-    card.className = `platform-card ${statusClass}`;
+    const platformLabel = PLATFORM_LABELS[r.platform] || r.platform;
 
+    // 미디어 HTML (영상 또는 썸네일)
     let mediaHtml = "";
     if (r.video_url) {
       mediaHtml = `
-        <video src="${r.video_url}" controls></video>
+        <video src="${r.video_url}" controls playsinline></video>
         <div class="btn-row">
-          <a class="copy-btn" href="${r.video_url}" download>영상 다운로드</a>
+          <a class="copy-btn" href="${r.video_url}" download>⬇ 영상 다운로드</a>
+          ${isTiktok
+            ? `<a class="copy-btn tiktok-upload-btn" href="https://www.tiktok.com/upload"
+                 target="_blank" rel="noopener">▶ TikTok 업로드</a>`
+            : ""}
         </div>`;
     } else if (r.thumbnail_url) {
       mediaHtml = `
@@ -240,21 +181,34 @@ async function loadMarketing(postDate, mode) {
         </div>`;
     }
 
+    // TikTok 안내 박스
+    const tiktokGuideHtml = isTiktok ? `
+      <div class="tiktok-guide">
+        <p>📋 <strong>TikTok 수동 업로드 안내</strong></p>
+        <ol>
+          <li>위 영상 다운로드 버튼으로 MP4 저장</li>
+          <li>▶ TikTok 업로드 버튼 클릭 → 갤러리에서 선택</li>
+          <li>또는 <a href="https://www.tiktok.com/tiktokstudio/upload" target="_blank" rel="noopener">TikTok Studio</a>에서 업로드</li>
+          <li>아래 캡션 복사 후 붙여넣기</li>
+        </ol>
+      </div>` : "";
+
     card.innerHTML = `
-      <h3>${r.platform}</h3>
+      <h3>${platformLabel}</h3>
       <span class="status-badge ${statusClass}">${r.status || "-"}</span>
       ${mediaHtml}
       <p class="muted">${r.message || ""}</p>
-      ${r.url ? `<a href="${r.url}" target="_blank" rel="noopener">게시물 열기 →</a>` : ""}
-      ${
-        r.content_text
-          ? `<div class="field-head" style="margin-top:8px;">
-               <span class="field-label">캡션</span>
-               <button class="copy-btn" data-copy-text>복사</button>
-             </div>
-             <textarea rows="4" readonly>${r.content_text}</textarea>`
-          : ""
-      }
+      ${tiktokGuideHtml}
+      ${!isTiktok && r.url
+        ? `<a href="${r.url}" target="_blank" rel="noopener">게시물 열기 →</a>`
+        : ""}
+      ${r.content_text
+        ? `<div class="field-head" style="margin-top:8px;">
+             <span>캡션</span>
+             <button class="copy-btn" data-copy-text>복사</button>
+           </div>
+           <textarea rows="4" readonly>${r.content_text}</textarea>`
+        : ""}
     `;
 
     // 캡션 복사
@@ -304,8 +258,7 @@ document.getElementById("trigger-btn").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (res.ok && data.ok) {
-      status.textContent =
-        "요청 완료! GitHub Actions가 곧 실행됩니다. (완료까지 몇 분 소요, 이 탭을 다시 눌러 새로고침하세요)";
+      status.textContent = "요청 완료! GitHub Actions가 곧 실행됩니다. (완료까지 몇 분 소요, 이 탭을 다시 눌러 새로고침하세요)";
     } else {
       status.textContent = `실행 실패: ${data.error || "알 수 없는 오류"}`;
     }
