@@ -1,23 +1,25 @@
 """
-마케팅 자동화 메인 스크립트 v8
-변경사항 v8:
-  - [연결 수정] SNSThumbnailGenerator.generate_all()에 image_prompt 인자 추가.
-      ContentAdapter가 생성한 thumbnail_prompt(영문 SD 프롬프트)를 FLUX.1-schnell에
-      그대로 전달해 콘텐츠와 연계된 AI 생성 이미지를 배경으로 사용합니다.
-      FLUX 배경은 1회 생성 후 전 플랫폼이 공유하므로 API 호출 횟수는 1회입니다.
-  - 나머지 로직(v7) 동일 유지.
+마케팅 자동화 메인 스크립트 v7
+변경사항 v7:
+  - 틱톡 전용 영상(1분+)을 이메일 대신 대시보드(Cloudflare D1)에 업로드
+      · dashboard_client.upload_media_get_public_url()로 GitHub Release에 업로드
+      · dashboard_client.push_marketing_result()로 대시보드에 tiktok 결과 저장
+      · 대시보드에서 영상 재생 및 다운로드 가능
+  - 기존 플랫폼(YouTube, Facebook, Instagram, Threads, Kakao)은 유지
+  - TikTokPublisher 제거 (이메일 발송 방식 폐기)
 
 실행 흐름:
   1. Gist에서 처리 완료 내역 로드 → 중복 방지
   2. 티스토리 RSS 폴링 → 새 글 감지
   3. 이미 처리된 글이면 즉시 종료
-  4. Gemini로 플랫폼별 콘텐츠 생성 (thumbnail_prompt 포함)
-  5. 영상 제작 (블로그 본문 기반 나래이션 숏폼)
-  6. SNS 썸네일 제작 (FLUX.1-schnell → Pexels → Pixabay → gradient)
+  4. Gemini로 플랫폼별 콘텐츠 생성
+  5a. 쇼츠/릴스용 영상 제작 (58초 이하, 속도 자동 조정)
+  5b. 틱톡용 영상 제작 (1분+, 고정 속도 +28%, 시간 제한 없음)
+  6. SNS 썸네일 제작
   7. 발행용 공개 URL 확보 (GitHub Release 업로드)
-  8. 각 플랫폼 자동 발행 (썸네일+캡션, 릴스+캡션 추가)
-  9. 처리 완료 내역을 Gist에 저장
-  10. 채널별 발행 결과를 Cloudflare 대시보드에 업로드
+  8. 기존 플랫폼 자동 발행
+  9. 틱톡 영상 → 대시보드 전용 업로드 (GitHub Release → D1)
+  10. 처리 완료 내역을 Gist에 저장
 """
 
 import os
@@ -28,6 +30,7 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from tistory_crawler.crawler import TistoryCrawler
 from content_adapter.adapter import ContentAdapter
 from video_generator.generator import VideoGenerator
@@ -45,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 
+# 플랫폼별 캡션 키 매핑 (대시보드 업로드용)
 _PLATFORM_TEXT_KEY = {
     "youtube":          "blog_title",
     "facebook":         "facebook_post",
@@ -54,6 +58,7 @@ _PLATFORM_TEXT_KEY = {
     "threads":          "threads_post",
     "threads_reels":    "threads_post",
     "kakao":            "kakao_post",
+    "tiktok":           "tiktok_post",   # tiktok_post 없으면 x_post로 fallback
 }
 _PLATFORM_THUMB_KEY = {
     "youtube":          "facebook",
@@ -64,9 +69,13 @@ _PLATFORM_THUMB_KEY = {
     "threads":          "threads",
     "threads_reels":    "threads",
     "kakao":            "kakao",
+    "tiktok":           "facebook",  # 틱톡은 썸네일 대신 tiktok_video가 메인
 }
-_VIDEO_RESULT_PLATFORMS = {"youtube", "facebook_reels", "instagram_reels", "threads_reels"}
+# 대시보드에 영상을 보여줘야 하는 플랫폼
+_VIDEO_RESULT_PLATFORMS = {"youtube", "facebook_reels", "instagram_reels", "threads_reels", "tiktok"}
 
+
+# ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
 
 def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
     thumb_prompt = content.get("thumbnail_prompt", "")
@@ -82,18 +91,18 @@ def _extract_bg_keywords(post: dict, content: dict) -> list[str]:
 
     keyword_map = {
         "나스닥": "nasdaq stock market",
-        "S&P": "S&P 500 trading",
+        "S&P":   "S&P 500 trading",
         "반도체": "semiconductor technology",
         "빅테크": "big tech silicon valley",
-        "연준": "federal reserve wall street",
-        "금리": "interest rate finance",
-        "AI": "artificial intelligence technology",
+        "연준":   "federal reserve wall street",
+        "금리":   "interest rate finance",
+        "AI":    "artificial intelligence technology",
         "엔비디아": "nvidia gpu technology",
-        "애플": "apple technology",
-        "테슬라": "tesla electric vehicle",
-        "주식": "stock market trading floor",
-        "마감": "wall street closing bell",
-        "유가": "oil energy market",
+        "애플":   "apple technology",
+        "테슬라":  "tesla electric vehicle",
+        "주식":   "stock market trading floor",
+        "마감":   "wall street closing bell",
+        "유가":   "oil energy market",
     }
     for ko, en in keyword_map.items():
         if ko in text:
@@ -112,15 +121,29 @@ def _push_results_to_dashboard(
     media_paths: dict,
     results: dict,
 ):
+    """채널별 발행 결과를 Cloudflare 대시보드에 업로드합니다. 실패해도 무시하고 진행."""
     for platform, result in results.items():
         text_key  = _PLATFORM_TEXT_KEY.get(platform)
         thumb_key = _PLATFORM_THUMB_KEY.get(platform)
 
-        content_text   = content.get(text_key, "") if text_key else ""
+        # 캡션 텍스트
+        content_text = ""
+        if text_key:
+            content_text = content.get(text_key, "")
+            # tiktok_post 없으면 x_post → instagram_post 순으로 fallback
+            if platform == "tiktok" and not content_text:
+                content_text = content.get("x_post", "") or content.get("instagram_post", "")[:280]
+
+        # 썸네일 경로
         thumbnail_path = media_paths.get(thumb_key) if thumb_key else None
-        video_path     = (
-            media_paths.get("video") if platform in _VIDEO_RESULT_PLATFORMS else None
-        )
+
+        # 영상 경로 (플랫폼에 따라 쇼츠 vs 틱톡 구분)
+        video_path = None
+        if platform in _VIDEO_RESULT_PLATFORMS:
+            if platform == "tiktok":
+                video_path = media_paths.get("tiktok_video")
+            else:
+                video_path = media_paths.get("video")
 
         dashboard_client.push_marketing_result(
             post_date=post_date,
@@ -135,10 +158,12 @@ def _push_results_to_dashboard(
         )
 
 
+# ── 메인 ──────────────────────────────────────────────────────────────────
+
 def main():
-    force         = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
-    now_kst       = datetime.now(KST)
-    timestamp     = now_kst.strftime("%Y%m%d_%H%M")
+    force     = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
+    now_kst   = datetime.now(KST)
+    timestamp = now_kst.strftime("%Y%m%d_%H%M")
     post_date_str = now_kst.strftime("%Y-%m-%d")
 
     logger.info("=" * 60)
@@ -170,6 +195,7 @@ def main():
 
     logger.info(f"  → 최신 글: {post_title}")
     logger.info(f"  → post_id: {post_id}")
+    logger.info(f"  → URL: {post_url}")
     logger.info(f"  → 본문 길이: {len(blog_content)}자")
 
     # ── Gist 중복 체크 ────────────────────────────────────────────────────
@@ -196,7 +222,6 @@ def main():
         content = adapter.generate_all(post)
         content["blog_thumbnail_url"] = post.get("thumbnail_url", "")
         logger.info("  → 플랫폼별 텍스트 생성 완료")
-        logger.info(f"  → thumbnail_prompt: {content.get('thumbnail_prompt', '(없음)')[:80]}...")
         state.add_log("CONTENT_GENERATED", "Gemini 콘텐츠 생성 완료", post_id=post_id)
     except Exception as e:
         msg = f"Gemini 콘텐츠 생성 실패: {e}"
@@ -209,32 +234,56 @@ def main():
         sys.exit(1)
 
     bg_keywords = _extract_bg_keywords(post, content)
-    logger.info(f"  → 배경 키워드: {bg_keywords}")
+    logger.info(f"  → 배경 이미지 키워드: {bg_keywords}")
 
-    # ── 3. 영상 생성 ──────────────────────────────────────────────────────
-    logger.info("[3/7] 영상 생성 중...")
+    # ── 3. 영상 생성 ─────────────────────────────────────────────────────
+    video_gen = VideoGenerator(output_dir="videos")
+
+    # 3a. 쇼츠/릴스용 영상 (58초 이하, 속도 자동 조정)
+    logger.info("[3a/7] 쇼츠/릴스용 영상 생성 중... (58초 이하)")
     video_path = None
     try:
-        video_gen      = VideoGenerator(output_dir="videos")
-        video_filename = f"shorts_{post['mode']}_{timestamp}.mp4"
-        video_path     = video_gen.generate_with_text_only_fallback(
+        shorts_filename = f"shorts_{post['mode']}_{timestamp}.mp4"
+        video_path      = video_gen.generate_with_text_only_fallback(
             script=content.get("youtube_script", []),
             mode=post["mode"],
-            filename=video_filename,
+            filename=shorts_filename,
             thumbnail_url=post.get("thumbnail_url", ""),
             blog_url=post.get("url", ""),
             bg_keywords=bg_keywords,
             blog_content=blog_content,
             blog_title=post_title,
         )
-        logger.info(f"  → 영상 저장: {video_path}")
-        state.add_log("VIDEO_GENERATED", f"영상 생성 완료: {video_path}", post_id=post_id)
+        logger.info(f"  → 쇼츠 영상 저장: {video_path}")
+        state.add_log("SHORTS_VIDEO_GENERATED", f"쇼츠 생성: {video_path}", post_id=post_id)
     except Exception as e:
-        logger.warning(f"  → 영상 생성 실패 (계속): {e}")
-        state.add_log("VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
+        logger.warning(f"  → 쇼츠 영상 생성 실패 (계속): {e}")
+        state.add_log("SHORTS_VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
+
+    # 3b. 틱톡용 영상 (1분+, 고정 속도 +28%, 시간 제한 없음)
+    logger.info("[3b/7] 틱톡용 영상 생성 중... (1분+, 시간 제한 없음)")
+    tiktok_video_path = None
+    try:
+        tiktok_filename   = f"tiktok_{post['mode']}_{timestamp}.mp4"
+        tiktok_video_path = video_gen.generate_tiktok_with_fallback(
+            script=content.get("tiktok_script", content.get("youtube_script", [])),
+            mode=post["mode"],
+            filename=tiktok_filename,
+            thumbnail_url=post.get("thumbnail_url", ""),
+            blog_url=post.get("url", ""),
+            bg_keywords=bg_keywords,
+            blog_content=blog_content,
+            blog_title=post_title,
+        )
+        logger.info(f"  → 틱톡 영상 저장: {tiktok_video_path}")
+        state.add_log("TIKTOK_VIDEO_GENERATED", f"틱톡 생성: {tiktok_video_path}",
+                      post_id=post_id)
+    except Exception as e:
+        logger.warning(f"  → 틱톡 영상 생성 실패 (계속): {e}")
+        state.add_log("TIKTOK_VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
 
     # ── 4. SNS 썸네일 생성 ───────────────────────────────────────────────
-    logger.info("[4/7] SNS 썸네일 생성 중 (FLUX.1-schnell → Pexels → Pixabay → gradient)...")
+    logger.info("[4/7] SNS 썸네일 생성 중...")
     thumb_paths = {}
     try:
         thumb_gen = SNSThumbnailGenerator(
@@ -248,8 +297,6 @@ def main():
             blog_url="seedsup.tistory.com",
             timestamp=timestamp,
             content=content,
-            # ↓ v8 핵심 추가: Gemini가 생성한 썸네일 프롬프트를 FLUX에 전달
-            image_prompt=content.get("thumbnail_prompt", ""),
         )
         logger.info(f"  → 썸네일 {len(thumb_paths)}개 생성 완료")
         state.add_log("THUMBNAILS_GENERATED", f"썸네일 {len(thumb_paths)}개", post_id=post_id)
@@ -259,15 +306,18 @@ def main():
 
     media_paths = {**thumb_paths}
     if video_path:
-        media_paths["video"] = video_path
+        media_paths["video"]        = video_path
+    if tiktok_video_path:
+        media_paths["tiktok_video"] = tiktok_video_path
 
     # ── 5. 발행용 공개 URL 확보 (GitHub Release 업로드) ──────────────────
+    # Threads/Instagram Reels/Facebook Reels가 사용할 공개 URL
     logger.info("[5/7] 발행용 공개 URL 확보 중 (GitHub Release 업로드)...")
     try:
         if thumb_paths.get("threads"):
             url = dashboard_client.upload_media_get_public_url(
                 thumb_paths["threads"],
-                f"sns_threads_{post['mode']}_{timestamp}.jpg",
+                f"sns_threads_{post['mode']}_{timestamp}.jpg"
             )
             if url:
                 content["threads_thumbnail_url"] = url
@@ -275,7 +325,7 @@ def main():
         if thumb_paths.get("instagram"):
             url = dashboard_client.upload_media_get_public_url(
                 thumb_paths["instagram"],
-                f"sns_instagram_{post['mode']}_{timestamp}.jpg",
+                f"sns_instagram_{post['mode']}_{timestamp}.jpg"
             )
             if url:
                 content["instagram_thumbnail_url"] = url
@@ -283,29 +333,61 @@ def main():
         if video_path:
             url = dashboard_client.upload_media_get_public_url(
                 video_path,
-                f"reels_{post['mode']}_{timestamp}.mp4",
+                f"reels_{post['mode']}_{timestamp}.mp4"
             )
             if url:
                 content["video_public_url"] = url
 
-        acquired = [
-            k for k in (
-                "threads_thumbnail_url", "instagram_thumbnail_url", "video_public_url"
-            )
-            if content.get(k)
-        ]
+        acquired = [k for k in (
+            "threads_thumbnail_url", "instagram_thumbnail_url", "video_public_url"
+        ) if content.get(k)]
         logger.info(f"  → 확보된 공개 URL: {acquired or '없음'}")
-        state.add_log("PUBLIC_URLS_READY", f"공개 URL 확보: {acquired or '없음'}",
-                      post_id=post_id)
+        state.add_log("PUBLIC_URLS_READY", f"공개 URL: {acquired or '없음'}", post_id=post_id)
     except Exception as e:
-        logger.warning(f"  → 공개 URL 확보 실패 (계속): {e}")
+        logger.warning(f"  → 공개 URL 확보 중 예외 (계속): {e}")
         state.add_log("PUBLIC_URLS_FAILED", str(e), post_id=post_id, level="WARNING")
 
-    # ── 6. 플랫폼 발행 ───────────────────────────────────────────────────
-    logger.info("[6/7] 플랫폼 발행 중...")
+    # ── 6. 기존 플랫폼 발행 (YouTube/Facebook/Instagram/Threads/Kakao) ───
+    logger.info("[6/7] 플랫폼 발행 중 (YouTube/Facebook/Instagram/Threads/Kakao)...")
     dispatcher = PublisherDispatcher()
     results    = dispatcher.publish_all(content=content, media_paths=media_paths)
 
+    # ── 틱톡 영상 대시보드 업로드 (발행 결과로 기록) ──────────────────────
+    # TikTok은 공식 API 미지원으로 직접 발행 불가.
+    # 대신 틱톡 영상을 GitHub Release에 올리고 대시보드 D1에 기록해두면
+    # 대시보드에서 영상 재생 및 다운로드 버튼으로 수동 업로드 가능.
+    if tiktok_video_path:
+        logger.info("  → 틱톡 영상 GitHub Release 업로드 중...")
+        try:
+            tiktok_public_url = dashboard_client.upload_media_get_public_url(
+                tiktok_video_path,
+                f"tiktok_{post['mode']}_{timestamp}.mp4"
+            )
+            if tiktok_public_url:
+                results["tiktok"] = {
+                    "status":  "ok",
+                    "url":     tiktok_public_url,
+                    "message": f"대시보드 업로드 완료 (수동 TikTok 업로드 필요) → {tiktok_public_url[:60]}...",
+                }
+                logger.info(f"  → 틱톡 영상 업로드 완료: {tiktok_public_url[:60]}...")
+            else:
+                results["tiktok"] = {
+                    "status":  "error",
+                    "url":     "",
+                    "message": "GitHub Release 업로드 실패 (DASHBOARD_API_URL 또는 GH_RELEASE_TOKEN 확인)",
+                }
+                logger.warning("  → 틱톡 영상 업로드 실패")
+        except Exception as e:
+            results["tiktok"] = {"status": "error", "url": "", "message": str(e)}
+            logger.warning(f"  → 틱톡 영상 업로드 예외: {e}")
+    else:
+        results["tiktok"] = {
+            "status":  "skip",
+            "url":     "",
+            "message": "틱톡 영상 생성 실패 또는 미생성",
+        }
+
+    # ── 결과 요약 ─────────────────────────────────────────────────────────
     logger.info("\n" + "=" * 60)
     logger.info("발행 결과 요약")
     logger.info("=" * 60)
@@ -315,10 +397,10 @@ def main():
 
     for platform, result in results.items():
         icon = {"ok": "✅", "skip": "⏭️", "error": "❌"}.get(result["status"], "?")
-        logger.info(
-            f"  {icon} {platform.upper()}: "
-            f"{result.get('message', '')} {result.get('url', '')}"
-        )
+        msg  = result.get("message", "")
+        url  = result.get("url", "")
+        logger.info(f"  {icon} {platform.upper()}: {msg} {url}")
+
     logger.info(f"\n성공: {ok_count} | 건너뜀: {skip_count} | 실패: {error_count}")
 
     # ── 처리 완료 기록 ────────────────────────────────────────────────────
@@ -330,7 +412,7 @@ def main():
     )
     state.save()
 
-    # ── 7. Cloudflare 대시보드 업로드 ─────────────────────────────────────
+    # ── 7. Cloudflare 대시보드에 채널별 결과 업로드 ───────────────────────
     logger.info("[7/7] Cloudflare 대시보드 업로드 중...")
     try:
         _push_results_to_dashboard(
@@ -340,9 +422,9 @@ def main():
             media_paths=media_paths,
             results=results,
         )
-        logger.info("  → 대시보드 업로드 완료")
+        logger.info("  → 대시보드 업로드 완료 (DASHBOARD_API_URL 미설정 시 건너뜀)")
     except Exception as e:
-        logger.warning(f"  → 대시보드 업로드 실패 (무시하고 종료): {e}")
+        logger.warning(f"  → 대시보드 업로드 예외 (무시하고 종료): {e}")
 
     logger.info("=" * 60)
     logger.info("마케팅 자동화 완료")
