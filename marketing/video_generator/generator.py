@@ -1,23 +1,27 @@
 """
-YouTube Shorts 영상 생성기 v7
+숏폼 & 틱톡 영상 생성기 v8
 ==============================================
-변경사항 (v7 — 싱크 완벽 보장):
-  - TTS 길이가 남은 시간(budget)을 초과하면 해당 세그먼트만 속도를 단계적으로
-    올려 재TTS 생성 → 슬라이드 표시 시간을 실제 TTS 길이에 정확히 맞춤
-  - 덕분에 마지막 슬라이드에서 목소리가 잘리는 현상 완전 제거
-  - 속도 단계: +28% → +40% → +52% → +64% → +75% (최대 5단계)
-  - 기본 속도(+28%)에서 이미 budget 안에 들어오면 재TTS 없이 그대로 사용
+변경사항 (v8 — 틱톡 1분+ 영상 추가):
+  - generate_tiktok(): 틱톡 수익화 조건(1분 이상) 충족 전용 생성 메서드 추가
+      · 시간 제한 없음 (MAX_VIDEO_SEC 미적용)
+      · 고정 속도 +28% (속도 자동 조정 없이 자연스러운 속도 유지)
+      · 모든 세그먼트의 TTS가 끝난 뒤 영상 종료 (음성 잘림 없음)
+      · 블로그 전체 내용을 더 풍부하게 커버하는 8~12개 세그먼트 스크립트
+  - generate_tiktok_with_fallback(): 예외 처리 래퍼
 
-기존 유지:
-  - 블로그 본문 기반 59초 이하 나래이션 스크립트 자동 생성 (Gemini API)
-  - 나래이션 시간과 동기화된 키워드 + 부연설명 자막 오버레이
-  - BGM 완전 제거 (TTS 나래이션 단독)
-  - 배경 이미지 투명도 절반 (배경 잘 보이도록)
-  - 키워드 강조 + 부연설명 텍스트 오버레이
+v7 유지:
+  - generate(): 쇼츠/릴스용 — 58초 제한, 속도 자동 조정(+28~75%)
+  - TTS 길이 > budget 시 속도 단계적 상향, 슬라이드 = TTS 길이에 정확히 맞춤
+  - 마지막 슬라이드 음성 잘림 완전 제거
+
+공통:
+  - 블로그 본문 기반 나래이션 스크립트 자동 생성 (Gemini API)
+  - 키워드 강조 박스 + 부연설명 텍스트 오버레이
+  - BGM 없음, TTS 나래이션 단독
+  - 배경 이미지 투명도 절반
 
 TTS: edge-tts ko-KR-InJoonNeural (젊은 남성)
 규격: 1080×1920, 30fps, H.264
-최대 영상 길이: 59초
 """
 
 import asyncio
@@ -140,6 +144,33 @@ NARRATION_SYSTEM = """당신은 유튜브 쇼츠 나래이션 작가입니다.
 }"""
 
 
+# ── 틱톡 전용 나래이션 시스템 프롬프트 (쇼츠보다 세그먼트 많고 분량 넉넉) ────
+NARRATION_SYSTEM_TIKTOK = """당신은 틱톡 금융 시황 채널의 나래이션 작가입니다.
+블로그 본문 전체를 꼼꼼하게 읽고, 자연스러운 말하기 속도(초당 약 5~6음절)로
+읽었을 때 전체 길이가 1분 30초~2분이 되도록 나래이션 스크립트를 작성합니다.
+
+규칙:
+- 나래이션은 자연스러운 구어체 (문어체, 이모지 금지)
+- 블로그의 핵심 내용을 세그먼트별로 빠짐없이 담을 것 (단순 요약 금지)
+- 세그먼트당 나래이션은 10~18초 분량 (약 55~100 음절)
+- 총 8~12개 세그먼트
+- 각 세그먼트에 키워드(3~8자)와 부연설명(15~30자) 포함
+- 첫 번째 세그먼트: 강력한 훅 (인사말 없이 오늘의 핵심 수치/이슈로 시작)
+- 중간 세그먼트: 지수 동향 → 핵심 뉴스 → 섹터 흐름 → 경제 지표 순으로 전개
+- 마지막 세그먼트: 오늘의 핵심 포인트 정리 + 블로그 방문 / 팔로우 유도 CTA
+
+반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
+{
+  "segments": [
+    {
+      "narration": "실제 읽을 나래이션 텍스트 (구어체, 55~100음절)",
+      "keyword": "핵심 키워드 (3~8자)",
+      "description": "키워드 부연설명 (15~30자)"
+    }
+  ]
+}"""
+
+
 def generate_narration_script(
     blog_content: str, title: str, mode: str, api_key: str
 ) -> list[dict]:
@@ -220,6 +251,89 @@ def generate_narration_script(
     return _fallback_script(title, mode)
 
 
+def generate_narration_script_tiktok(
+    blog_content: str, title: str, mode: str, api_key: str
+) -> list[dict]:
+    """
+    틱톡용 나래이션 스크립트 생성.
+    쇼츠용보다 세그먼트 수가 많고(8~12개), 세그먼트당 분량도 충분히 길어서
+    자연스러운 속도(+28%)로 읽어도 1분 30초~2분 분량이 나옵니다.
+    """
+    if not api_key:
+        logger.warning("GEMINI_API_KEY 없음 — 틱톡 기본 스크립트 사용")
+        return _fallback_script_tiktok(title, mode)
+
+    mode_label = "전일 마감 리뷰" if mode == "morning" else "프리마켓 & 이슈"
+    prompt = (
+        f"블로그 제목: {title}\n"
+        f"포스팅 모드: {mode_label}\n\n"
+        f"블로그 본문 전문:\n{blog_content[:5000]}\n\n"
+        "위 내용을 바탕으로 틱톡용 나래이션 스크립트를 JSON으로 작성해주세요.\n"
+        "세그먼트는 8~12개, 자연스러운 속도로 읽으면 전체 1분 30초~2분이 되어야 합니다.\n"
+        "블로그의 핵심 내용을 최대한 자세히 담아주세요."
+    )
+
+    for model in [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]:
+        url     = f"{GEMINI_BASE_URL}{model}:generateContent?key={api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": NARRATION_SYSTEM_TIKTOK}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+
+        for attempt in range(1, 4):
+            try:
+                req = urllib.request.Request(
+                    url, data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+                if "```" in raw:
+                    for part in raw.split("```"):
+                        part = part.strip()
+                        if part.startswith("json"):
+                            part = part[4:].strip()
+                        try:
+                            parsed = json.loads(part)
+                            segs = parsed.get("segments", [])
+                            if segs:
+                                logger.info(f"틱톡 나래이션 스크립트 생성 완료: {len(segs)}개")
+                                return segs
+                        except json.JSONDecodeError:
+                            continue
+
+                parsed = json.loads(raw)
+                segs   = parsed.get("segments", [])
+                if segs:
+                    logger.info(f"틱톡 나래이션 스크립트 생성 완료: {len(segs)}개")
+                    return segs
+
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    time.sleep(30 * attempt)
+                elif e.code in (500, 503):
+                    time.sleep(10 * attempt)
+                else:
+                    logger.warning(f"Gemini 틱톡 나래이션 API {e.code} ({model})")
+                    break
+            except Exception as e:
+                logger.warning(f"틱톡 나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
+                if attempt < 3:
+                    time.sleep(10)
+
+    logger.warning("틱톡 나래이션 생성 전체 실패 — 기본 스크립트 사용")
+    return _fallback_script_tiktok(title, mode)
+
+
 def _fallback_script(title: str, mode: str) -> list[dict]:
     """API 실패 시 기본 스크립트."""
     clean_title = _strip_emoji(title)
@@ -243,6 +357,49 @@ def _fallback_script(title: str, mode: str) -> list[dict]:
             {"narration": "프리마켓 동향과 오늘 밤 시장 시나리오를 분석합니다.",
              "keyword": "시장 전망", "description": "강세 vs 약세 시나리오"},
             {"narration": "전체 분석은 블로그를 방문해주세요. 구독과 좋아요 감사합니다.",
+             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
+        ]
+
+
+def _fallback_script_tiktok(title: str, mode: str) -> list[dict]:
+    """틱톡용 API 실패 시 기본 스크립트 (8개 세그먼트, 1분 30초+ 분량)."""
+    clean_title = _strip_emoji(title)
+    if mode == "morning":
+        return [
+            {"narration": f"오늘 미국 증시 마감 결과를 정리해드립니다. {clean_title[:25]}",
+             "keyword": "마감 결과", "description": "미국 전일 증시 마감 총정리"},
+            {"narration": "S&P500, 나스닥, 다우존스 주요 지수의 등락 현황을 살펴보겠습니다. 어제 시장의 전반적인 분위기와 거래량 변화도 함께 짚어보겠습니다.",
+             "keyword": "지수 동향", "description": "S&P500·나스닥·다우 등락률"},
+            {"narration": "오늘 시장을 움직인 핵심 뉴스를 전해드립니다. 연준의 발언과 경제 지표 결과가 시장 심리에 어떤 영향을 미쳤는지 분석했습니다.",
+             "keyword": "핵심 뉴스", "description": "시장 움직임의 핵심 원인"},
+            {"narration": "기술주, 에너지, 금융, 헬스케어 등 섹터별 마감 흐름도 정리해드립니다. 어느 섹터가 강세였고 어디가 약세였는지 한눈에 보여드리겠습니다.",
+             "keyword": "섹터 분석", "description": "업종별 강세·약세 현황"},
+            {"narration": "공포탐욕지수와 투자자 심리 현황도 확인했습니다. 현재 시장이 과매수 구간인지 과매도 구간인지 판단하는 데 도움이 될 것입니다.",
+             "keyword": "투자 심리", "description": "공포·탐욕지수 및 시장 심리"},
+            {"narration": "오늘 발표된 주요 경제 지표 결과를 요약해드립니다. 고용 지표, 소비자물가지수 등 매크로 데이터가 시장에 미친 영향을 설명드리겠습니다.",
+             "keyword": "경제 지표", "description": "발표된 주요 경제 데이터"},
+            {"narration": "내일 미국 시장에서 주목해야 할 포인트를 미리 정리해드립니다. 예정된 경제 지표 발표와 기업 실적 발표 일정도 함께 안내드립니다.",
+             "keyword": "내일 주목", "description": "다음 거래일 핵심 이벤트"},
+            {"narration": "오늘 분석의 핵심을 한 줄로 정리하면, 시장은 여전히 변수가 많습니다. 더 자세한 분석은 블로그 seedsup.tistory.com에서 확인하시고 팔로우도 부탁드립니다.",
+             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
+        ]
+    else:
+        return [
+            {"narration": f"오늘 밤 미국 증시 개장 전 꼭 알아야 할 이슈를 정리했습니다. {clean_title[:20]}",
+             "keyword": "프리마켓", "description": "미국 장 개장 전 핵심 이슈"},
+            {"narration": "전일 미국 정규장 마감 결과부터 간략히 짚어보겠습니다. 어제 마감 이후 발생한 애프터마켓 주요 움직임도 함께 살펴보겠습니다.",
+             "keyword": "전일 마감", "description": "정규장 마감 및 애프터마켓"},
+            {"narration": "오늘 밤 개장 전 현재 선물 시장 동향을 전해드립니다. S&P500, 나스닥 선물이 어느 방향을 가리키는지 확인해보겠습니다.",
+             "keyword": "선물 동향", "description": "S&P500·나스닥 선물 방향"},
+            {"narration": "오늘 밤 미국 시간으로 발표되는 경제 지표 일정을 안내드립니다. 각 지표의 시장 예상치와 이전 수치를 함께 알려드리겠습니다.",
+             "keyword": "지표 발표", "description": "오늘 밤 예정된 경제 데이터"},
+            {"narration": "오늘 장 마감 후 또는 개장 전 실적을 발표하는 기업들을 정리했습니다. 시장 예상치 대비 어떤 결과가 나올지 투자자들이 주목하고 있습니다.",
+             "keyword": "실적 발표", "description": "오늘 예정된 기업 실적"},
+            {"narration": "연준 인사 발언과 지정학적 리스크 등 오늘 밤 시장에 영향을 줄 수 있는 변수들을 종합했습니다.",
+             "keyword": "시장 변수", "description": "오늘 밤 주요 리스크 요인"},
+            {"narration": "오늘 밤 강세와 약세 두 가지 시나리오를 분석했습니다. 각각 어떤 조건이 충족되어야 하는지, 투자자 입장에서 어떻게 대응해야 하는지 설명해드립니다.",
+             "keyword": "시나리오", "description": "강세 vs 약세 대응 전략"},
+            {"narration": "오늘 분석의 핵심 포인트를 정리해드렸습니다. 더 자세한 내용은 블로그 seedsup.tistory.com에서 확인하시고 팔로우도 부탁드립니다.",
              "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
         ]
 
@@ -910,6 +1067,178 @@ class VideoGenerator:
                 "description": desc,
             })
         return result
+
+    def generate_tiktok(
+        self,
+        script: list[dict],
+        mode: str,
+        filename: str,
+        thumbnail_url: str = "",
+        blog_url: str = "",
+        bg_keywords: list[str] | None = None,
+        blog_content: str = "",
+        blog_title: str = "",
+    ) -> str:
+        """
+        틱톡 수익화 조건(1분 이상) 충족 전용 영상 생성.
+
+        쇼츠(generate)와의 차이:
+          - MAX_VIDEO_SEC 제한 없음 — 세그먼트 수/TTS 길이에 따라 자연스럽게 결정
+          - 고정 속도 +28% (속도 자동 조정 없음, 자연스러운 말하기 속도 유지)
+          - 모든 TTS가 끝난 후 영상 종료 (슬라이드 = TTS 길이 + SLIDE_TAIL_SEC)
+          - 8~12개 세그먼트 스크립트로 1분 30초~2분 내외 분량 생성
+        """
+        theme = THEMES.get(mode, THEMES["morning"])
+        kws   = bg_keywords or PEXELS_KEYWORDS.get(mode, PEXELS_KEYWORDS["morning"])
+        out   = os.path.join(self.output_dir, filename)
+
+        # 1. 틱톡 전용 나래이션 스크립트 생성 (8~12개 세그먼트)
+        logger.info("틱톡 나래이션 스크립트 생성 중 (Gemini API)...")
+        if blog_content and self.gemini_key:
+            narration_segments = generate_narration_script_tiktok(
+                blog_content, blog_title, mode, self.gemini_key
+            )
+        else:
+            narration_segments = self._convert_script_to_narration(script, mode, blog_title)
+
+        if not narration_segments:
+            narration_segments = _fallback_script_tiktok(blog_title, mode)
+
+        logger.info(f"틱톡 나래이션 세그먼트: {len(narration_segments)}개")
+
+        with tempfile.TemporaryDirectory(prefix="tiktok_v8_") as tmp_s:
+            tmp = Path(tmp_s)
+
+            # 2. 배경 이미지 확보 (쇼츠와 동일 로직)
+            bg_path = tmp / "bg.jpg"
+            bg_ok   = False
+
+            if thumbnail_url:
+                try:
+                    r = requests.get(thumbnail_url, timeout=15,
+                                     headers={"User-Agent": "Mozilla/5.0"})
+                    r.raise_for_status()
+                    bg_path.write_bytes(r.content)
+                    Image.open(bg_path).verify()
+                    bg_ok = True
+                    logger.info("틱톡 배경: 티스토리 썸네일 로드 성공")
+                except Exception as e:
+                    logger.warning(f"썸네일 로드 실패: {e}")
+
+            if not bg_ok:
+                bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
+            if not bg_ok:
+                import hashlib
+                seed  = int(hashlib.md5(f"tiktok{mode}{filename}".encode()).hexdigest()[:8], 16)
+                bg_ok = _download_bg_picsum(bg_path, seed % 1000)
+
+            bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
+
+            # 3. 각 세그먼트: 고정 속도 +28%, 시간 제한 없이 모든 세그먼트 처리
+            slide_clips  = []
+            tts_segments = []
+            current_time = 0.0
+            total        = len(narration_segments)
+            tiktok_rate  = TTS_RATE_STEPS[0]  # +28% 고정
+
+            for i, seg in enumerate(narration_segments, 1):
+                narration   = _strip_emoji(seg.get("narration", ""))
+                keyword     = _strip_emoji(seg.get("keyword", "분석"))
+                description = _strip_emoji(seg.get("description", ""))
+
+                is_hook = (i == 1)
+                is_cta  = (i == total)
+
+                logger.info(
+                    f"[틱톡] 슬라이드 {i}/{total}: [{keyword}] "
+                    f"누적={current_time:.2f}s | {narration[:30]}..."
+                )
+
+                # TTS 생성 — 고정 속도, 시간 제한 없음
+                tts_path = str(tmp / f"tts_{i:02d}.mp3")
+                tts_ok   = _generate_tts_with_rate(narration, tts_path, tiktok_rate)
+
+                if tts_ok:
+                    tts_dur = _audio_duration(tts_path)
+                    if tts_dur <= 0:
+                        logger.warning(f"[틱톡] 슬라이드 {i} TTS 길이 0 — 4.0초 fallback")
+                        tts_dur = 4.0
+                        tts_ok  = False
+                else:
+                    tts_dur = 4.0
+                    logger.warning(f"[틱톡] 슬라이드 {i} TTS 생성 실패 — 4.0초 fallback")
+
+                # 슬라이드 표시 시간 = TTS 길이 + tail (시간 제한 없이 그대로)
+                slide_dur = tts_dur + SLIDE_TAIL_SEC
+
+                # 슬라이드 이미지 생성 (속도 배지 없음 — 기본 속도이므로)
+                slide_img = _make_slide(
+                    narration, keyword, description,
+                    theme, i, total, bg_img,
+                    is_hook, is_cta,
+                    tts_rate=tiktok_rate,  # 항상 기본 속도 → 배지 미표시
+                )
+                img_path  = str(tmp / f"slide_{i:02d}.png")
+                slide_img.save(img_path, "PNG", optimize=False)
+
+                # 이미지 → MP4 클립
+                clip_path = str(tmp / f"clip_{i:02d}.mp4")
+                _image_to_clip(img_path, slide_dur, clip_path)
+                slide_clips.append(clip_path)
+
+                if tts_ok:
+                    tts_segments.append({
+                        "path":  tts_path,
+                        "start": current_time + 0.15,
+                    })
+
+                logger.info(
+                    f"  → tts={tts_dur:.2f}s, slide={slide_dur:.2f}s, "
+                    f"누적={current_time + slide_dur:.2f}s"
+                )
+                current_time += slide_dur
+
+            if not slide_clips:
+                raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
+
+            total_duration = current_time
+            logger.info(
+                f"[틱톡] 총 영상 길이: {total_duration:.2f}초 "
+                f"({len(slide_clips)}/{total} 슬라이드) "
+                f"— {'✅ 1분 초과' if total_duration >= 60 else '⚠️ 1분 미달'}"
+            )
+
+            # 4. 클립 합치기
+            silent_video = str(tmp / "silent.mp4")
+            _concat_clips(slide_clips, silent_video)
+
+            # 5. 오디오 합성 (TTS만, BGM 없음)
+            _merge_audio_to_video(silent_video, tts_segments, total_duration, out)
+
+            logger.info(f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)")
+            return out
+
+    def generate_tiktok_with_fallback(
+        self,
+        script: list[dict],
+        mode: str,
+        filename: str,
+        thumbnail_url: str = "",
+        blog_url: str = "",
+        bg_keywords: list[str] | None = None,
+        blog_content: str = "",
+        blog_title: str = "",
+    ) -> str:
+        """틱톡 영상 생성 (예외 처리 래퍼)."""
+        try:
+            return self.generate_tiktok(
+                script, mode, filename,
+                thumbnail_url, blog_url, bg_keywords,
+                blog_content, blog_title,
+            )
+        except Exception as e:
+            logger.error(f"틱톡 영상 생성 실패: {e}", exc_info=True)
+            raise
 
     def generate_with_text_only_fallback(
         self,
