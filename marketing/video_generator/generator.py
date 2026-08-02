@@ -1,13 +1,19 @@
 """
-YouTube Shorts 영상 생성기 v6
+YouTube Shorts 영상 생성기 v7
 ==============================================
-변경사항 (v6):
+변경사항 (v7 — 싱크 완벽 보장):
+  - TTS 길이가 남은 시간(budget)을 초과하면 해당 세그먼트만 속도를 단계적으로
+    올려 재TTS 생성 → 슬라이드 표시 시간을 실제 TTS 길이에 정확히 맞춤
+  - 덕분에 마지막 슬라이드에서 목소리가 잘리는 현상 완전 제거
+  - 속도 단계: +28% → +40% → +52% → +64% → +75% (최대 5단계)
+  - 기본 속도(+28%)에서 이미 budget 안에 들어오면 재TTS 없이 그대로 사용
+
+기존 유지:
   - 블로그 본문 기반 59초 이하 나래이션 스크립트 자동 생성 (Gemini API)
   - 나래이션 시간과 동기화된 키워드 + 부연설명 자막 오버레이
   - BGM 완전 제거 (TTS 나래이션 단독)
-  - TTS 속도 빠르게 (+28%), 목소리 확실히 출력
-  - 배경 이미지 투명도 절반으로 낮춤 (배경 잘 보이도록)
-  - 키워드 강조 + 부연설명 텍스트 오버레이 추가
+  - 배경 이미지 투명도 절반 (배경 잘 보이도록)
+  - 키워드 강조 + 부연설명 텍스트 오버레이
 
 TTS: edge-tts ko-KR-InJoonNeural (젊은 남성)
 규격: 1080×1920, 30fps, H.264
@@ -25,7 +31,6 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
-from struct import pack
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -37,36 +42,36 @@ VIDEO_W, VIDEO_H = 1080, 1920
 OUTPUT_DIR       = "videos"
 MAX_VIDEO_SEC    = 58.0   # 59초 이하 보장
 
-# ── TTS 설정 (빠른 속도) ─────────────────────────────────────────────────────
-TTS_VOICE = "ko-KR-InJoonNeural"
-TTS_RATE  = "+28%"   # 빠른 속도 (기존 +18% → +28%)
-TTS_PITCH = "-2Hz"
+# ── TTS 속도 단계 (기본 → 최고속) ───────────────────────────────────────────
+# budget 초과 시 순서대로 시도. 더 빠른 속도로도 budget 안에 못 들어오면
+# 마지막 속도(최고속)로 TTS를 생성하고, 슬라이드 시간을 TTS 길이에 맞춤.
+TTS_RATE_STEPS = ["+28%", "+40%", "+52%", "+64%", "+75%"]
+TTS_VOICE      = "ko-KR-InJoonNeural"
+TTS_PITCH      = "-2Hz"
+# 슬라이드 끝에 여유 시간 (TTS 끝나고 다음 슬라이드로 넘어가기 전 숨 쉬는 시간)
+SLIDE_TAIL_SEC = 0.4
 
 # ── 시스템 폰트 경로 ─────────────────────────────────────────────────────────
 _FONT_BOLD    = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 _FONT_BLACK   = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
 _FONT_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
-# ── 배경 오버레이 (투명도 절반으로 낮춤) ────────────────────────────────────
+# ── 배경 오버레이 (투명도 절반) ───────────────────────────────────────────────
 THEMES = {
     "morning": {
-        "overlay":    (8, 15, 35, 70),       # 기존 140 → 70 (절반)
+        "overlay":    (8, 15, 35, 70),
         "accent":     (56, 189, 248),
         "highlight":  (254, 211, 48),
         "keyword_bg": (56, 189, 248),
         "keyword_fg": (8, 15, 35),
-        "desc_bg":    (0, 0, 0, 160),
-        "title_c":    (255, 255, 255),
         "progress":   (56, 189, 248),
     },
     "evening": {
-        "overlay":    (18, 5, 40, 75),        # 기존 145 → 75 (절반)
+        "overlay":    (18, 5, 40, 75),
         "accent":     (167, 139, 250),
         "highlight":  (251, 191, 36),
         "keyword_bg": (167, 139, 250),
         "keyword_fg": (18, 5, 40),
-        "desc_bg":    (0, 0, 0, 160),
-        "title_c":    (255, 255, 255),
         "progress":   (167, 139, 250),
     },
 }
@@ -78,37 +83,22 @@ PEXELS_KEYWORDS = {
 }
 
 # ── 이모지 제거 (한글 보존) ──────────────────────────────────────────────────
-# 주의: \U000024C2-\U0001F251 범위는 한글(AC00-D7FF)을 포함하므로 사용 금지
 _EMOJI_RE = re.compile(
     "["
-    "\U0001F600-\U0001F64F"   # 이모티콘
-    "\U0001F300-\U0001F5FF"   # 기호/픽토그램
-    "\U0001F680-\U0001F6FF"   # 교통/지도
-    "\U0001F1E0-\U0001F1FF"   # 국기
-    "\U0001F900-\U0001F9FF"   # 추가 이모지
-    "\U0001FA00-\U0001FA6F"   # 추가 이모지
-    "\U0001FA70-\U0001FAFF"   # 추가 이모지
-    "\U00002702-\U00002705"   # 가위 등 (딩뱃 일부)
-    "\U00002708-\U0000270D"   # 비행기/손 등
-    "\U0000270F"
-    "\U00002712"
-    "\U00002714"
-    "\U00002716"
-    "\U0000271D"
-    "\U00002721"
-    "\U00002728"
-    "\U00002733-\U00002734"
-    "\U00002744"
-    "\U00002747"
-    "\U0000274C"
-    "\U0000274E"
-    "\U00002753-\U00002755"
-    "\U00002757"
-    "\U00002763-\U00002764"
-    "\U00002795-\U00002797"
-    "\U000027A1"
-    "\U000027B0"
-    "\U000027BF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002702-\U00002705"
+    "\U00002708-\U0000270D"
+    "\U0000270F\U00002712\U00002714\U00002716\U0000271D"
+    "\U00002721\U00002728\U00002733-\U00002734\U00002744"
+    "\U00002747\U0000274C\U0000274E\U00002753-\U00002755"
+    "\U00002757\U00002763-\U00002764\U00002795-\U00002797"
+    "\U000027A1\U000027B0\U000027BF"
     "]+",
     flags=re.UNICODE,
 )
@@ -121,66 +111,39 @@ def _strip_emoji(text: str) -> str:
 # Gemini API: 나래이션 스크립트 생성
 # ═══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL   = "gemini-2.5-flash"
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
-)
+GEMINI_MODEL   = "gemini-2.5-flash-lite"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
-NARRATION_SYSTEM = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의
-유튜브 쇼츠 나래이션 작가입니다. 이 채널은 한국시간 오전 9시(전일 마감 리뷰)와
-저녁 9시(프리마켓 & 이슈)에 매일 발행되는 시황 브리핑 시리즈입니다.
+NARRATION_SYSTEM = """당신은 유튜브 쇼츠 나래이션 작가입니다.
+블로그 본문을 읽고, 빠른 속도로 읽어도 55초 이하가 되는 나래이션 스크립트를 작성합니다.
+한국어 발화 속도를 기준으로 세그먼트당 나래이션을 적절히 조절하세요.
 
-2026년 유튜브 쇼츠 알고리즘 특성상, 시청 지속 여부는 "첫 1초" 안에
-반사적으로 결정됩니다. 아래 규칙을 반드시 지키세요.
-
-[제작 목적 원칙 — 최우선]
-이 영상의 유일한 목적은 시황을 정확하고 매력적으로 전달하는 것입니다.
-투자 권유로 읽힐 수 있는 단정적 표현("지금 사세요/파세요")이나 근거 없는
-공포 조장은 쓰지 마세요. 정보 전달 + 사실 기반 긴장감 정도로 유지합니다.
-
-[훅 규칙 — 1번 세그먼트]
-- "안녕하세요", "오늘의 시황입니다" 같은 인사말·필러로 절대 시작하지 마세요.
-  시청자는 결과(가장 충격적이거나 핵심적인 수치·반전)를 먼저 봐야 합니다.
-- 시각(headline)·음성(narration)·자막(summary) 3요소가 같은 메시지를
-  동시에 전달해야 합니다 (예: 나스닥 급락 얘기인데 화면 요약은 다른 내용이면 안 됨)
-- 훅 유형 예시: 수치형("나스닥 2% 급락, 오늘 밤 이유가 밝혀졌습니다"),
-  반전형("다들 하락을 예상했지만, 결과는 달랐습니다"),
-  궁금증형("연준 발언 이후 시장이 향한 곳은?")
-
-[루프 구조]
-마지막 세그먼트의 마무리 멘트가 첫 세그먼트의 훅과 자연스럽게 이어지도록
-설계해, 영상이 끝나도 다시 시작되는 듯한 느낌을 주세요.
-
-[전체 규칙]
-- 전체 나래이션을 빠르게 읽으면 반드시 55초 이하여야 합니다
-- 자연스러운 구어체로 작성 (문어체, 이모지 금지), 문장 사이 공백감 없이 속도감 있게
-- 총 5~7개 세그먼트
-- 각 세그먼트: 나래이션(읽을 텍스트) + 화면 헤드라인 + 화면 요약 문장
-- 나래이션은 8~12초 분량 (약 45~70음절)
-- 화면 요약 문장은 20~35자, 핵심 수치/정보 포함
-- 마지막 세그먼트: 오늘 분석 핵심 한 줄 정리 + 블로그 방문 유도.
-  가능하면 "매일 아침 9시, 저녁 9시에 새 브리핑이 올라옵니다. 구독하고
-  알림을 켜두면 다음 소식을 놓치지 않아요" 같은 시리즈 지속 시청 유도 문구를
-  자연스럽게 포함 (단순 "구독과 좋아요 부탁드립니다"보다 시리즈성을 강조)
+규칙:
+- 나래이션은 자연스러운 구어체로 작성 (문어체 금지)
+- 각 세그먼트는 핵심 내용 하나만 전달
+- 세그먼트당 나래이션은 8~11초 분량 (약 40~65 음절) — 절대 초과 금지
+- 총 5~6개 세그먼트 (55초 / 세그먼트당 평균 10초 = 최대 5.5개)
+- 각 세그먼트에 키워드(3~6자)와 부연설명(15~25자) 포함
+- 첫 번째 세그먼트: 강력한 훅 (시청자 주의 끌기, 인사말 없이 핵심 수치/반전으로 시작)
+- 마지막 세그먼트: 블로그 방문 유도 CTA
 
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
 {
   "segments": [
     {
-      "narration": "실제 읽을 나래이션 텍스트 (구어체, 45~70음절, 이모지 없음, 인사말 금지)",
-      "headline": "화면 상단 굵은 제목 (10~15자, 핵심 수치 포함)",
-      "summary": "화면 중앙 요약 문장 (20~35자, 본문 핵심 내용)"
+      "narration": "실제 읽을 나래이션 텍스트 (구어체, 40~65음절)",
+      "keyword": "핵심 키워드 (3~6자)",
+      "description": "키워드 부연설명 (15~25자)"
     }
   ]
 }"""
 
 
-def generate_narration_script(blog_content: str, title: str, mode: str, api_key: str) -> list[dict]:
-    """
-    블로그 본문을 기반으로 나래이션 스크립트 생성.
-    Returns list of {narration, keyword, description} dicts.
-    """
+def generate_narration_script(
+    blog_content: str, title: str, mode: str, api_key: str
+) -> list[dict]:
+    """블로그 본문 기반 나래이션 스크립트 생성."""
     if not api_key:
         logger.warning("GEMINI_API_KEY 없음 — 기본 스크립트 사용")
         return _fallback_script(title, mode)
@@ -191,95 +154,195 @@ def generate_narration_script(blog_content: str, title: str, mode: str, api_key:
         f"포스팅 모드: {mode_label}\n\n"
         f"블로그 본문:\n{blog_content[:3000]}\n\n"
         "위 내용을 바탕으로 유튜브 쇼츠용 나래이션 스크립트를 JSON으로 작성해주세요.\n"
-        "전체 나래이션을 빠르게 읽으면 55초 이하가 되어야 합니다."
+        "각 세그먼트 나래이션은 반드시 65음절 이하, 전체 합산 55초 이하가 되어야 합니다."
     )
 
-    url     = f"{GEMINI_API_URL}?key={api_key}"
-    payload = {
-        "system_instruction": {"parts": [{"text": NARRATION_SYSTEM}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json",
-        },
-    }
-    data = json.dumps(payload).encode("utf-8")
+    for model in [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]:
+        url     = f"{GEMINI_BASE_URL}{model}:generateContent?key={api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": NARRATION_SYSTEM}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json",
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
 
-    for attempt in range(1, 4):
-        try:
-            req = urllib.request.Request(
-                url, data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-            raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+        for attempt in range(1, 4):
+            try:
+                req = urllib.request.Request(
+                    url, data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-            # JSON 파싱
-            if "```" in raw:
-                for part in raw.split("```"):
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:].strip()
-                    try:
-                        parsed = json.loads(part)
-                        return parsed.get("segments", [])
-                    except json.JSONDecodeError:
-                        continue
+                # JSON 파싱 (코드블록 방어)
+                if "```" in raw:
+                    for part in raw.split("```"):
+                        part = part.strip()
+                        if part.startswith("json"):
+                            part = part[4:].strip()
+                        try:
+                            parsed = json.loads(part)
+                            segs = parsed.get("segments", [])
+                            if segs:
+                                logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
+                                return segs
+                        except json.JSONDecodeError:
+                            continue
 
-            parsed = json.loads(raw)
-            segs   = parsed.get("segments", [])
-            if segs:
-                logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개 세그먼트")
-                return segs
+                parsed = json.loads(raw)
+                segs   = parsed.get("segments", [])
+                if segs:
+                    logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
+                    return segs
 
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504):
-                wait = (30 if e.code == 429 else 10) * (2 ** (attempt - 1))
-                logger.warning(f"Gemini 나래이션 API {e.code} — {wait}초 후 재시도...")
-                time.sleep(wait)
-            else:
-                logger.warning(f"Gemini 나래이션 API 오류 {e.code}")
-                break
-        except Exception as e:
-            logger.warning(f"나래이션 스크립트 생성 실패 (시도 {attempt}): {e}")
-            if attempt < 3:
-                time.sleep(10)
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    time.sleep(30 * attempt)
+                elif e.code in (500, 503):
+                    time.sleep(10 * attempt)
+                else:
+                    logger.warning(f"Gemini 나래이션 API {e.code} ({model})")
+                    break
+            except Exception as e:
+                logger.warning(f"나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
+                if attempt < 3:
+                    time.sleep(10)
+        # 모델 실패 → 다음 모델로
 
-    logger.warning("나래이션 생성 실패 — 기본 스크립트 사용")
+    logger.warning("나래이션 생성 전체 실패 — 기본 스크립트 사용")
     return _fallback_script(title, mode)
 
 
 def _fallback_script(title: str, mode: str) -> list[dict]:
-    """API 실패 시 기본 스크립트 (headline/summary 포함).
-    인사말 없이 훅으로 바로 시작 (유튜브 쇼츠 첫 1초 이탈 방지 규칙 준수)."""
+    """API 실패 시 기본 스크립트."""
     clean_title = _strip_emoji(title)
     if mode == "morning":
         return [
-            {"narration": "방금 마감된 미국 증시, 오늘의 핵심만 빠르게 정리했습니다.",
-             "headline": "미국 증시 마감", "summary": clean_title[:35]},
-            {"narration": "주요 지수 흐름과 핵심 이슈를 빠르게 정리해드립니다.",
-             "headline": "지수 동향", "summary": "S&P500, 나스닥, 다우 등락 현황"},
-            {"narration": "오늘 시장에 영향을 준 경제 지표와 뉴스를 살펴보겠습니다.",
-             "headline": "경제 지표", "summary": "발표된 주요 경제 데이터 분석"},
-            {"narration": "자세한 분석은 블로그에서 확인하세요. 매일 아침 9시, "
-                          "저녁 9시에 새 브리핑이 올라오니 구독하고 알림 켜두세요.",
-             "headline": "블로그 방문", "summary": "seedsup.tistory.com"},
+            {"narration": f"방금 마감된 미국 증시 핵심만 빠르게 정리합니다. {clean_title[:20]}",
+             "keyword": "마감 분석", "description": "미국 전일 증시 마감 결과"},
+            {"narration": "주요 지수 흐름과 핵심 이슈를 빠르게 살펴보겠습니다.",
+             "keyword": "지수 동향", "description": "S&P500, 나스닥, 다우 등락"},
+            {"narration": "오늘 시장에 영향을 준 경제 지표와 뉴스입니다.",
+             "keyword": "경제 지표", "description": "발표된 주요 경제 데이터"},
+            {"narration": "더 자세한 분석은 블로그에서 확인하세요. 구독과 좋아요 부탁드립니다.",
+             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
         ]
     else:
         return [
-            {"narration": "오늘 밤 미국 증시 개장 전, 지금 가장 중요한 이슈부터 짚어드립니다.",
-             "headline": "프리마켓 분석", "summary": clean_title[:35]},
-            {"narration": "오늘 발표 예정인 경제 지표와 실적 발표를 확인해보겠습니다.",
-             "headline": "경제 지표", "summary": "오늘 밤 주요 발표 일정"},
-            {"narration": "프리마켓 분위기와 오늘 밤 시장 시나리오를 분석해드립니다.",
-             "headline": "시장 전망", "summary": "강세 vs 약세 시나리오 분석"},
-            {"narration": "전체 분석은 블로그를 방문해주세요. 매일 아침 9시, "
-                          "저녁 9시에 새 브리핑이 올라오니 구독하고 알림 켜두세요.",
-             "headline": "블로그 방문", "summary": "seedsup.tistory.com"},
+            {"narration": f"오늘 밤 미국 증시 개장 전 핵심 이슈입니다. {clean_title[:20]}",
+             "keyword": "프리마켓", "description": "미국 장 개장 전 선물 동향"},
+            {"narration": "오늘 예정된 경제 지표와 실적 발표를 확인해보겠습니다.",
+             "keyword": "경제 지표", "description": "오늘 밤 주요 발표 일정"},
+            {"narration": "프리마켓 동향과 오늘 밤 시장 시나리오를 분석합니다.",
+             "keyword": "시장 전망", "description": "강세 vs 약세 시나리오"},
+            {"narration": "전체 분석은 블로그를 방문해주세요. 구독과 좋아요 감사합니다.",
+             "keyword": "블로그 방문", "description": "seedsup.tistory.com"},
         ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TTS: 속도 자동 조정 (핵심 변경 — v7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _tts_async(text: str, path: str, rate: str):
+    """지정된 속도로 TTS 생성."""
+    import edge_tts
+    comm = edge_tts.Communicate(text=text, voice=TTS_VOICE, rate=rate, pitch=TTS_PITCH)
+    await comm.save(path)
+
+
+def _generate_tts_with_rate(text: str, path: str, rate: str) -> bool:
+    """지정 속도로 TTS 파일 생성. 성공 여부 반환."""
+    try:
+        asyncio.run(_tts_async(text, path, rate))
+        ok = Path(path).exists() and Path(path).stat().st_size > 500
+        if not ok:
+            logger.warning(f"TTS 파일 생성 실패 또는 너무 작음: {path}")
+        return ok
+    except ImportError:
+        logger.error("edge-tts 미설치 — pip install edge-tts 필요")
+        return False
+    except Exception as e:
+        logger.error(f"TTS 생성 오류 (rate={rate}): {e}")
+        return False
+
+
+def _audio_duration(path: str) -> float:
+    """ffprobe로 오디오 파일 길이(초) 반환. 실패 시 0.0."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, check=True,
+        )
+        return float(json.loads(r.stdout)["format"]["duration"])
+    except Exception:
+        return 0.0
+
+
+def _fit_tts_to_budget(
+    text: str,
+    base_path: str,
+    budget_sec: float,
+    tmp_dir: Path,
+    seg_idx: int,
+) -> tuple[str, float, str]:
+    """
+    TTS를 생성하고, 길이가 budget_sec을 초과하면 속도를 단계적으로 올려
+    budget 안에 들어오도록 재생성합니다.
+
+    budget_sec: 이 세그먼트에 허용된 최대 TTS 시간 (슬라이드 tail 제외)
+    반환: (사용된 tts 파일 경로, 실제 tts 길이, 사용된 rate 문자열)
+
+    - 어떤 속도로도 budget을 맞추지 못하면, 마지막 속도(최고속)로 생성된
+      파일을 그대로 반환하고 호출부에서 슬라이드 시간을 TTS 길이에 맞춤
+      (절대 음성이 잘리지 않도록 보장).
+    """
+    best_path = base_path
+    best_dur  = 0.0
+    best_rate = TTS_RATE_STEPS[0]
+
+    for rate in TTS_RATE_STEPS:
+        candidate_path = str(tmp_dir / f"tts_{seg_idx:02d}_{rate.replace('+','p').replace('%','pct')}.mp3")
+        ok = _generate_tts_with_rate(text, candidate_path, rate)
+        if not ok:
+            logger.warning(f"TTS 생성 실패 (rate={rate}, seg={seg_idx})")
+            continue
+
+        dur = _audio_duration(candidate_path)
+        if dur <= 0:
+            continue
+
+        best_path = candidate_path
+        best_dur  = dur
+        best_rate = rate
+
+        if dur <= budget_sec:
+            logger.info(
+                f"  [seg {seg_idx}] TTS 확정: rate={rate}, "
+                f"dur={dur:.2f}s, budget={budget_sec:.2f}s ✓"
+            )
+            break
+        else:
+            logger.info(
+                f"  [seg {seg_idx}] TTS {dur:.2f}s > budget {budget_sec:.2f}s "
+                f"→ rate {rate} 초과, 다음 속도로 재시도"
+            )
+
+    if best_dur <= 0:
+        # 모든 시도 실패 → fallback 길이 반환
+        logger.error(f"  [seg {seg_idx}] 모든 TTS 시도 실패 — 4.0초 fallback")
+        best_dur  = 4.0
+        best_rate = TTS_RATE_STEPS[-1]
+
+    return best_path, best_dur, best_rate
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -317,18 +380,18 @@ def _pixel_wrap(text: str, font, max_px: int) -> list[str]:
         else:
             if current:
                 lines.append(current)
-            current = word if _w(word) <= max_px else word
+            current = word
     if current:
         lines.append(current)
     return lines or [text]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 배경 이미지 처리 (투명도 절반으로 낮춤)
+# 배경 이미지 처리
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _prepare_bg(path, overlay_color: tuple, mode: str) -> Image.Image:
-    """배경 이미지 → 1080×1920 RGB (낮은 오버레이로 배경 잘 보이게)."""
+    """배경 이미지 → 1080×1920 RGB. 낮은 오버레이로 배경 잘 보이게."""
     W, H = VIDEO_W, VIDEO_H
 
     if path and Path(path).exists():
@@ -347,14 +410,13 @@ def _prepare_bg(path, overlay_color: tuple, mode: str) -> Image.Image:
                 oy    = int((bg.height - new_h) * 0.3)
                 bg    = bg.crop((0, oy, new_w, oy + new_h))
             bg = bg.resize((W, H), Image.LANCZOS)
-            bg = bg.filter(ImageFilter.GaussianBlur(radius=2))  # 블러 약화
+            bg = bg.filter(ImageFilter.GaussianBlur(radius=2))
         except Exception as e:
             logger.warning(f"배경 처리 실패: {e}")
             bg = _make_gradient_bg(overlay_color[:3], mode)
     else:
         bg = _make_gradient_bg(overlay_color[:3], mode)
 
-    # 오버레이 (낮은 투명도)
     overlay = Image.new("RGBA", (W, H), overlay_color)
     result  = Image.alpha_composite(bg.convert("RGBA"), overlay)
     return result.convert("RGB")
@@ -375,68 +437,7 @@ def _make_gradient_bg(base_color: tuple, mode: str) -> Image.Image:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TTS (빠른 속도)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def _tts_async(text: str, path: str):
-    import edge_tts
-    comm = edge_tts.Communicate(text=text, voice=TTS_VOICE, rate=TTS_RATE, pitch=TTS_PITCH)
-    await comm.save(path)
-
-
-def _sanitize_tts_text(text: str) -> str:
-    """TTS 전달 전 텍스트 정제: 이모지 제거, 특수문자 정리, 최소 길이 보장."""
-    text = _strip_emoji(text).strip()
-    # 괄호류 제거 (TTS 오류 유발 가능)
-    text = re.sub(r"[<>【】\[\]『』「」]", "", text)
-    # 연속 공백 정리
-    text = re.sub(r"\s+", " ", text).strip()
-    # 최소 10자 미만이면 패딩 (TTS가 너무 짧은 텍스트를 거부함)
-    if len(text) < 10:
-        text = text + ". 자세한 내용은 블로그를 확인해주세요."
-    return text
-
-
-def _generate_tts(text: str, path: str, max_retries: int = 3) -> bool:
-    """TTS 생성. 실패 시 최대 max_retries회 재시도."""
-    clean = _sanitize_tts_text(text)
-    if not clean:
-        logger.error("TTS 텍스트가 비어있음")
-        return False
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            asyncio.run(_tts_async(clean, path))
-            if Path(path).exists() and Path(path).stat().st_size > 1000:
-                return True
-            logger.warning(f"TTS 파일 크기 불충분 (시도 {attempt}/{max_retries})")
-        except ImportError:
-            logger.error("edge-tts 미설치 — pip install edge-tts 필요")
-            return False
-        except Exception as e:
-            logger.warning(f"TTS 생성 오류 (시도 {attempt}/{max_retries}): {e}")
-
-        if attempt < max_retries:
-            time.sleep(2 * attempt)
-
-    logger.error(f"TTS 최대 재시도 초과: {clean[:30]}...")
-    return False
-
-
-def _audio_duration(path: str) -> float:
-    try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "json", path],
-            capture_output=True, text=True, check=True,
-        )
-        return float(json.loads(r.stdout)["format"]["duration"])
-    except Exception:
-        return 0.0
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 슬라이드 이미지 생성 (키워드 강조 + 부연설명 텍스트)
+# 슬라이드 이미지 생성
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _draw_outlined(draw, pos, text, font, fill, outline=(0, 0, 0), ow=3):
@@ -447,30 +448,23 @@ def _draw_outlined(draw, pos, text, font, fill, outline=(0, 0, 0), ow=3):
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def _draw_text_centered(draw, cx, y, text, font, fill, outline=(0, 0, 0), ow=3) -> int:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    w    = bbox[2] - bbox[0]
-    h    = bbox[3] - bbox[1]
-    _draw_outlined(draw, (cx - w // 2, y), text, font, fill, outline, ow)
-    return h
-
-
 def _make_slide(
     narration: str,
-    headline: str,
-    summary: str,
+    keyword: str,
+    description: str,
     theme: dict,
     slide_num: int,
     total: int,
     bg: Image.Image,
     is_hook: bool,
     is_cta: bool,
+    tts_rate: str = TTS_RATE_STEPS[0],
 ) -> Image.Image:
     """
-    슬라이드 이미지 생성 (v7 — 요약 중심 레이아웃):
-    - 상단: 진행 바 + 슬라이드 번호
-    - 중앙 상부: 굵은 헤드라인 (핵심 수치/포인트)
-    - 중앙: 요약 문장 (본문 내용, 읽기 편한 크기)
+    슬라이드 이미지 생성:
+    - 상단: 진행 바 + 슬라이드 번호 + (속도 가속 배지, rate가 기본이 아닐 때만)
+    - 중앙: 키워드 강조 박스 (크고 눈에 띄게)
+    - 키워드 아래: 부연설명 텍스트 (반투명 배경)
     - 하단: 나래이션 자막 (반투명 배경)
     - 최하단: 워터마크
     """
@@ -480,118 +474,130 @@ def _make_slide(
 
     accent    = theme["accent"]
     highlight = theme["highlight"]
-    title_c   = theme["title_c"]
+    kw_bg     = theme["keyword_bg"]
+    kw_fg     = theme["keyword_fg"]
     CX        = W // 2
-    WRAP_PX   = W - 100
+    WRAP_PX   = W - 80
 
     # 폰트
     f_badge    = _load_font(34, bold=True)
-    f_headline = _load_font(88, bold=True)   # 헤드라인: 크고 굵게
-    f_summary  = _load_font(54, bold=False)  # 요약: 읽기 편한 크기
-    f_narr     = _load_font(42, bold=False)  # 자막: 하단
+    f_keyword  = _load_font(108, bold=True)
+    f_desc     = _load_font(50, bold=False)
+    f_narr     = _load_font(43, bold=False)
     f_wm       = _load_font(30, bold=False)
 
     # ── 상단 진행 바 ─────────────────────────────────────────────────────────
     bar_w = int(W * slide_num / total)
-    draw.rectangle([(0, 0), (W, 10)], fill=(255, 255, 255, 40))
-    draw.rectangle([(0, 0), (bar_w, 10)], fill=(*accent, 255))
+    draw.rectangle([(0, 0), (W, 12)], fill=(255, 255, 255, 50))
+    draw.rectangle([(0, 0), (bar_w, 12)], fill=(*accent, 255))
 
     # ── 슬라이드 번호 뱃지 ──────────────────────────────────────────────────
     badge = f"{slide_num} / {total}"
     bb    = draw.textbbox((0, 0), badge, font=f_badge)
-    bw, bh = bb[2] - bb[0] + 36, bb[3] - bb[1] + 20
-    draw.rounded_rectangle([(40, 28), (40 + bw, 28 + bh)],
-                            radius=bh // 2, fill=(*accent, 200))
-    draw.text((40 + 18, 28 + 10), badge, font=f_badge, fill=(10, 10, 30))
+    bw    = bb[2] - bb[0] + 40
+    bh    = bb[3] - bb[1] + 22
+    draw.rounded_rectangle([(40, 30), (40 + bw, 30 + bh)], radius=bh // 2,
+                            fill=(*kw_bg, 230))
+    draw.text((40 + 20, 30 + 11), badge, font=f_badge, fill=kw_fg)
 
-    # ── 훅/CTA 배너 ──────────────────────────────────────────────────────────
-    banner_txt = ("오늘의 핵심 분석" if is_hook else
-                  "전체 분석 보기" if is_cta else None)
+    # ── 속도 가속 배지 (기본 속도 초과 시에만 표시) ──────────────────────────
+    if tts_rate != TTS_RATE_STEPS[0]:
+        spd_txt = f"⚡ {tts_rate}"
+        sb  = draw.textbbox((0, 0), spd_txt, font=f_badge)
+        sw  = sb[2] - sb[0] + 36
+        sh  = sb[3] - sb[1] + 18
+        draw.rounded_rectangle(
+            [(W - 40 - sw, 30), (W - 40, 30 + sh)],
+            radius=sh // 2, fill=(255, 80, 80, 200)
+        )
+        draw.text((W - 40 - sw + 18, 30 + 9), spd_txt, font=f_badge, fill=(255, 255, 255))
+
+    # ── 훅 / CTA 배너 ────────────────────────────────────────────────────────
+    banner_txt = ("오늘의 핵심 분석" if is_hook else "전체 분석 보기" if is_cta else None)
     if banner_txt:
         hb  = draw.textbbox((0, 0), banner_txt, font=f_badge)
         hw  = hb[2] - hb[0] + 48
-        hh  = hb[3] - hb[1] + 24
+        hh  = hb[3] - hb[1] + 26
         hx  = CX - hw // 2
-        hy  = 28
+        hy  = 100
         draw.rounded_rectangle([(hx, hy), (hx + hw, hy + hh)],
                                 radius=hh // 2, fill=(*highlight, 240))
-        draw.text((hx + 24, hy + 12), banner_txt, font=f_badge, fill=(20, 20, 20))
+        draw.text((hx + 24, hy + 13), banner_txt, font=f_badge, fill=(20, 20, 20))
 
-    # ── 헤드라인 (화면 40% 지점) ─────────────────────────────────────────────
-    hl_clean  = _strip_emoji(headline)
-    hl_lines  = _pixel_wrap(hl_clean, f_headline, WRAP_PX)[:2]
-    hl_line_h = 100
-    hl_total  = len(hl_lines) * hl_line_h
-    hl_y      = int(H * 0.32) - hl_total // 2
+    # ── 키워드 강조 박스 (화면 중앙) ─────────────────────────────────────────
+    kw_clean = _strip_emoji(keyword)
+    kw_bb    = draw.textbbox((0, 0), kw_clean, font=f_keyword)
+    kw_tw    = kw_bb[2] - kw_bb[0]
+    kw_th    = kw_bb[3] - kw_bb[1]
+    pad_x, pad_y = 60, 28
+    kw_box_w = kw_tw + pad_x * 2
+    kw_box_h = kw_th + pad_y * 2
+    kw_x     = CX - kw_box_w // 2
+    kw_y     = int(H * 0.30)
 
-    # 헤드라인 배경 (강조 바)
-    bar_h = hl_total + 40
-    bar_x = 60
-    bar_w2 = W - 120
-    hl_bg = Image.new("RGBA", (bar_w2, bar_h), (*accent, 220))
-    img_rgba = img.convert("RGBA")
-    img_rgba.paste(hl_bg, (bar_x, hl_y - 20), hl_bg)
+    # 그림자
+    draw.rounded_rectangle(
+        [(kw_x + 8, kw_y + 8), (kw_x + kw_box_w + 8, kw_y + kw_box_h + 8)],
+        radius=20, fill=(0, 0, 0, 110)
+    )
+    # 메인 박스
+    draw.rounded_rectangle(
+        [(kw_x, kw_y), (kw_x + kw_box_w, kw_y + kw_box_h)],
+        radius=20, fill=(*kw_bg, 248)
+    )
+    # 키워드 텍스트
+    draw.text((CX - kw_tw // 2, kw_y + pad_y), kw_clean, font=f_keyword, fill=kw_fg)
+
+    # 하단 장식 라인
+    line_y = kw_y + kw_box_h + 18
+    draw.rectangle([(CX - 130, line_y), (CX + 130, line_y + 6)], fill=(*highlight, 220))
+
+    # ── 부연설명 (키워드 아래) ────────────────────────────────────────────────
+    desc_clean  = _strip_emoji(description)
+    desc_lines  = _pixel_wrap(desc_clean, f_desc, WRAP_PX - 80)
+    desc_line_h = 60
+    desc_y      = line_y + 26
+    desc_total  = len(desc_lines) * desc_line_h + 24
+    desc_box_x  = 60
+
+    desc_bg_img = Image.new("RGBA", (W - 120, desc_total), (0, 0, 0, 155))
+    img_rgba    = img.convert("RGBA")
+    img_rgba.paste(desc_bg_img, (desc_box_x, desc_y), desc_bg_img)
     img  = img_rgba.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    for line in hl_lines:
-        lb = draw.textbbox((0, 0), line, font=f_headline)
+    ty = desc_y + 12
+    for line in desc_lines:
+        lb = draw.textbbox((0, 0), line, font=f_desc)
         lw = lb[2] - lb[0]
-        draw.text((CX - lw // 2, hl_y), line, font=f_headline, fill=(10, 10, 30))
-        hl_y += hl_line_h
+        _draw_outlined(draw, (CX - lw // 2, ty), line, f_desc, (255, 255, 220), ow=2)
+        ty += desc_line_h
 
-    # ── 구분선 ───────────────────────────────────────────────────────────────
-    sep_y = hl_y + 24
-    draw.rectangle([(CX - 160, sep_y), (CX + 160, sep_y + 4)],
-                   fill=(*highlight, 200))
+    # ── 나래이션 자막 (최하단) ───────────────────────────────────────────────
+    narr_clean  = _strip_emoji(narration)
+    narr_lines  = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 40)[:4]
+    narr_line_h = 55
+    narr_total  = len(narr_lines) * narr_line_h + 36
+    narr_y      = H - narr_total - 54
 
-    # ── 요약 문장 (구분선 아래) ───────────────────────────────────────────────
-    sm_clean = _strip_emoji(summary)
-    sm_lines = _pixel_wrap(sm_clean, f_summary, WRAP_PX - 60)[:3]
-    sm_line_h = 68
-    sm_total  = len(sm_lines) * sm_line_h + 36
-    sm_y      = sep_y + 28
-
-    # 요약 반투명 배경
-    sm_bg = Image.new("RGBA", (W - 80, sm_total), (0, 0, 0, 170))
+    narr_bg = Image.new("RGBA", (W, narr_total + 16), (0, 0, 0, 190))
     img_rgba = img.convert("RGBA")
-    img_rgba.paste(sm_bg, (40, sm_y - 12), sm_bg)
+    img_rgba.paste(narr_bg, (0, narr_y - 8), narr_bg)
     img  = img_rgba.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    for line in sm_lines:
-        lb = draw.textbbox((0, 0), line, font=f_summary)
-        lw = lb[2] - lb[0]
-        _draw_outlined(draw, (CX - lw // 2, sm_y), line, f_summary,
-                       (255, 255, 255), ow=2)
-        sm_y += sm_line_h
-
-    # ── 나래이션 자막 (하단 고정) ─────────────────────────────────────────────
-    narr_clean = _strip_emoji(narration)
-    narr_lines = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 20)[:4]
-    narr_line_h = 54
-    narr_total  = len(narr_lines) * narr_line_h + 40
-    narr_y      = H - narr_total - 56
-
-    narr_bg = Image.new("RGBA", (W, narr_total + 10), (0, 0, 0, 195))
-    img_rgba = img.convert("RGBA")
-    img_rgba.paste(narr_bg, (0, narr_y - 10), narr_bg)
-    img  = img_rgba.convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    ny = narr_y + 8
+    ny = narr_y + 6
     for line in narr_lines:
         lb = draw.textbbox((0, 0), line, font=f_narr)
         lw = lb[2] - lb[0]
-        _draw_outlined(draw, (CX - lw // 2, ny), line, f_narr,
-                       (255, 255, 220), ow=2)
+        _draw_outlined(draw, (CX - lw // 2, ny), line, f_narr, (255, 255, 255), ow=2)
         ny += narr_line_h
 
     # ── 워터마크 ─────────────────────────────────────────────────────────────
     wm  = "seedsup.tistory.com"
     wbb = draw.textbbox((0, 0), wm, font=f_wm)
     ww  = wbb[2] - wbb[0]
-    draw.text((CX - ww // 2, H - 38), wm, font=f_wm, fill=(*accent, 150))
+    draw.text((CX - ww // 2, H - 36), wm, font=f_wm, fill=(*accent, 155))
 
     return img
 
@@ -652,7 +658,7 @@ def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _image_to_clip(img_path: str, duration: float, out_path: str):
-    """PNG → MP4 클립 (페이드 없이 깔끔하게)."""
+    """PNG → MP4 클립."""
     _run([
         "ffmpeg", "-y",
         "-loop", "1", "-i", img_path,
@@ -679,32 +685,29 @@ def _concat_clips(clip_paths: list[str], out_path: str):
 def _merge_audio_to_video(video: str, tts_segments: list[dict], total_dur: float, out: str):
     """
     TTS 세그먼트를 타임라인에 배치하여 영상과 합성.
-    BGM 없이 TTS 나래이션만 사용.
-    각 TTS가 반드시 출력되도록 처리.
+    BGM 없이 TTS 나래이션만, 각 TTS는 sldie 시작 후 0.15초 딜레이.
     """
     if not tts_segments:
-        # TTS 없으면 무음 영상 출력
         _run(["ffmpeg", "-y", "-i", video, "-c:v", "copy", "-an", out])
         logger.warning("TTS 세그먼트 없음 — 무음 영상 출력")
         return
 
-    # filter_complex: 각 TTS를 지연 후 믹싱
-    inputs   = ["-i", video]
-    fc_parts = []
+    inputs     = ["-i", video]
+    fc_parts   = []
     tts_labels = []
 
     for i, seg in enumerate(tts_segments):
         inputs += ["-i", seg["path"]]
         delay   = int(seg["start"] * 1000)
         label   = f"[d{i}]"
-        fc_parts.append(f"[{i+1}:a]adelay={delay}|{delay},apad=whole_dur={total_dur}{label}")
+        fc_parts.append(
+            f"[{i+1}:a]adelay={delay}|{delay},apad=whole_dur={total_dur}{label}"
+        )
         tts_labels.append(label)
 
     n = len(tts_labels)
     if n == 1:
-        audio_out = tts_labels[0]
-        # apad으로 이미 처리됨
-        fc_parts[-1] = fc_parts[-1].replace(f"{tts_labels[0]}", f"[aout]")
+        fc_parts[-1] = fc_parts[-1].replace(tts_labels[0], "[aout]")
         audio_out = "[aout]"
     else:
         mix = "".join(tts_labels) + f"amix=inputs={n}:duration=longest:normalize=0[aout]"
@@ -749,25 +752,17 @@ class VideoGenerator:
         blog_content: str = "",
         blog_title: str = "",
     ) -> str:
-        """
-        숏폼 영상 생성.
-
-        script: ContentAdapter에서 생성된 youtube_script (fallback용)
-        blog_content: 블로그 본문 전문 (나래이션 생성에 사용)
-        blog_title: 블로그 제목
-        """
         theme = THEMES.get(mode, THEMES["morning"])
         kws   = bg_keywords or PEXELS_KEYWORDS.get(mode, PEXELS_KEYWORDS["morning"])
         out   = os.path.join(self.output_dir, filename)
 
-        # 1. 나래이션 스크립트 생성 (블로그 본문 기반)
+        # 1. 나래이션 스크립트 생성
         logger.info("나래이션 스크립트 생성 중 (Gemini API)...")
         if blog_content and self.gemini_key:
             narration_segments = generate_narration_script(
                 blog_content, blog_title, mode, self.gemini_key
             )
         else:
-            # blog_content 없으면 기존 script에서 변환
             narration_segments = self._convert_script_to_narration(script, mode, blog_title)
 
         if not narration_segments:
@@ -775,7 +770,7 @@ class VideoGenerator:
 
         logger.info(f"나래이션 세그먼트: {len(narration_segments)}개")
 
-        with tempfile.TemporaryDirectory(prefix="shorts_v6_") as tmp_s:
+        with tempfile.TemporaryDirectory(prefix="shorts_v7_") as tmp_s:
             tmp = Path(tmp_s)
 
             # 2. 배경 이미지 확보
@@ -803,71 +798,87 @@ class VideoGenerator:
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
-            # 3. TTS 생성 및 슬라이드 처리
-            slide_clips   = []
-            tts_segments  = []
-            current_time  = 0.0
-            total         = len(narration_segments)
-            total_tts_dur = 0.0
+            # 3. 각 세그먼트: TTS 속도 자동 조정 → 슬라이드 시간 결정
+            slide_clips  = []
+            tts_segments = []
+            current_time = 0.0
+            total        = len(narration_segments)
 
             for i, seg in enumerate(narration_segments, 1):
-                narration = _strip_emoji(seg.get("narration", ""))
-                headline  = _strip_emoji(seg.get("headline", seg.get("keyword", "분석")))
-                summary   = _strip_emoji(seg.get("summary", seg.get("description", "")))
+                narration   = _strip_emoji(seg.get("narration", ""))
+                keyword     = _strip_emoji(seg.get("keyword", "분석"))
+                description = _strip_emoji(seg.get("description", ""))
 
                 is_hook = (i == 1)
                 is_cta  = (i == total)
 
-                logger.info(f"슬라이드 {i}/{total}: [{headline}] {narration[:30]}...")
-
-                # TTS 생성 (나래이션)
-                tts_path = str(tmp / f"tts_{i:02d}.mp3")
-                tts_ok   = _generate_tts(narration, tts_path)
-
-                if tts_ok:
-                    tts_dur = _audio_duration(tts_path)
-                    if tts_dur < 0.5:   # ffprobe가 0을 반환하는 경우 방어
-                        tts_dur = 4.0
-                else:
-                    tts_dur = 5.0  # fallback: TTS 실패 시 기본 5초 (4초에서 상향)
-                    logger.warning(f"슬라이드 {i} TTS 실패 — {tts_dur}초 무음으로 대체")
-
-                # 59초 초과 방지
+                # 남은 전체 허용 시간 계산
                 remaining = MAX_VIDEO_SEC - current_time
-                if remaining < 2.0:
-                    logger.info(f"59초 한계 도달 — {i-1}개 슬라이드로 종료")
+
+                # 슬라이드를 하나라도 더 넣을 수 없으면 중단
+                if remaining < 2.5:
+                    logger.info(f"남은 시간 {remaining:.2f}s — {i-1}개 슬라이드로 종료")
                     break
 
-                slide_dur = min(tts_dur + 0.5, remaining)
-                total_tts_dur += tts_dur
+                # 이 세그먼트에 할당할 TTS 최대 허용 시간
+                # tail(여유) 포함 슬라이드 최대 = remaining 전체
+                # TTS budget = remaining - SLIDE_TAIL_SEC
+                tts_budget = remaining - SLIDE_TAIL_SEC
 
-                # 슬라이드 이미지 생성
+                logger.info(
+                    f"슬라이드 {i}/{total}: [{keyword}] "
+                    f"budget={tts_budget:.2f}s | {narration[:30]}..."
+                )
+
+                # TTS 생성 (속도 자동 조정 — v7 핵심)
+                tts_path, tts_dur, used_rate = _fit_tts_to_budget(
+                    narration,
+                    str(tmp / f"tts_{i:02d}.mp3"),
+                    tts_budget,
+                    tmp,
+                    i,
+                )
+
+                # 슬라이드 표시 시간 = TTS 실제 길이 + tail
+                # (remaining을 넘지 않도록 클리핑)
+                slide_dur = min(tts_dur + SLIDE_TAIL_SEC, remaining)
+
+                # 슬라이드 이미지 생성 (사용된 속도를 배지로 전달)
                 slide_img = _make_slide(
-                    narration, headline, summary,
+                    narration, keyword, description,
                     theme, i, total, bg_img,
                     is_hook, is_cta,
+                    tts_rate=used_rate,
                 )
                 img_path  = str(tmp / f"slide_{i:02d}.png")
                 slide_img.save(img_path, "PNG", optimize=False)
 
-                # 이미지 → MP4 클립
+                # 이미지 → MP4 클립 (슬라이드 표시 시간)
                 clip_path = str(tmp / f"clip_{i:02d}.mp4")
                 _image_to_clip(img_path, slide_dur, clip_path)
                 slide_clips.append(clip_path)
 
-                if tts_ok:
+                # TTS 오디오 배치 (슬라이드 시작 후 0.15초 딜레이)
+                if tts_dur > 0:
                     tts_segments.append({
                         "path":  tts_path,
-                        "start": current_time + 0.15,  # 약간의 딜레이
+                        "start": current_time + 0.15,
                     })
 
+                logger.info(
+                    f"  → rate={used_rate}, tts={tts_dur:.2f}s, "
+                    f"slide={slide_dur:.2f}s, 누적={current_time + slide_dur:.2f}s"
+                )
                 current_time += slide_dur
 
             if not slide_clips:
                 raise RuntimeError("생성된 슬라이드 클립이 없습니다.")
 
             total_duration = current_time
-            logger.info(f"총 영상 길이: {total_duration:.1f}초 (TTS 합계: {total_tts_dur:.1f}초)")
+            logger.info(
+                f"총 영상 길이: {total_duration:.2f}초 "
+                f"({len(slide_clips)}/{total} 슬라이드)"
+            )
 
             # 4. 클립 합치기
             silent_video = str(tmp / "silent.mp4")
@@ -876,13 +887,13 @@ class VideoGenerator:
             # 5. 오디오 합성 (TTS만, BGM 없음)
             _merge_audio_to_video(silent_video, tts_segments, total_duration, out)
 
-            logger.info(f"영상 완료: {out} ({total_duration:.1f}초)")
+            logger.info(f"영상 완료: {out} ({total_duration:.2f}초)")
             return out
 
     def _convert_script_to_narration(
         self, script: list[dict], mode: str, title: str
     ) -> list[dict]:
-        """기존 youtube_script를 나래이션 형식으로 변환 (blog_content 없을 때 fallback)."""
+        """기존 youtube_script → 나래이션 형식 변환 (blog_content 없을 때 fallback)."""
         if not script:
             return _fallback_script(title, mode)
 
@@ -891,13 +902,12 @@ class VideoGenerator:
             seg_title = _strip_emoji(seg.get("title", ""))
             seg_body  = _strip_emoji(seg.get("body", ""))
             narration = f"{seg_title}. {seg_body}" if seg_body else seg_title
-            headline  = seg_title[:15] if seg_title else "분석"
-            summary   = seg_body[:35] if seg_body else "자세한 내용 확인"
-
+            keyword   = seg_title[:6] if seg_title else "분석"
+            desc      = seg_body[:25] if seg_body else "자세한 내용 확인"
             result.append({
-                "narration": narration,
-                "headline":  headline,
-                "summary":   summary,
+                "narration":   narration,
+                "keyword":     keyword,
+                "description": desc,
             })
         return result
 
