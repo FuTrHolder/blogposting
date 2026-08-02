@@ -445,3 +445,47 @@ textarea:focus { border-color: var(--amber); }
 ::-webkit-scrollbar { height: 8px; width: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+
+
+/* ── TikTok 카드 전용 스타일 (style.css 맨 끝에 추가) ─────────────────── */
+
+/* TikTok 카드 테두리 강조 */
+.tiktok-card {
+  border: 2px solid #fe2c55;
+  background: linear-gradient(135deg, #fff 90%, #fff0f3 100%);
+}
+
+/* TikTok 업로드 버튼 */
+.tiktok-upload-btn {
+  background: #000 !important;
+  color: #fff !important;
+  border-color: #000 !important;
+  margin-left: 4px;
+}
+.tiktok-upload-btn:hover {
+  background: #222 !important;
+}
+
+/* TikTok 안내 박스 */
+.tiktok-guide {
+  background: #fff0f3;
+  border: 1px solid #ffc0cb;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0 6px;
+  font-size: 12px;
+  color: #5a0020;
+}
+.tiktok-guide p {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.tiktok-guide ol {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.8;
+}
+.tiktok-guide a {
+  color: #fe2c55;
+  text-decoration: underline;
+}
