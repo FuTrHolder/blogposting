@@ -96,11 +96,6 @@ jobs:
           # (INSTAGRAM_IMAGE_URL을 공유하거나 별도 설정)
           THREADS_IMAGE_URL: ${{ secrets.THREADS_IMAGE_URL }}
 
-          # ── 카카오 메일 발송 (카카오 텍스트 + 썸네일 + 영상) ──────────
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-
           # ── Cloudflare 대시보드 업로드 (미설정 시 자동 스킵) ─────────────
           DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
