@@ -152,7 +152,13 @@ SYSTEM_MORNING = (
   "content": "마크다운 형식의 전체 블로그 본문",
   "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
   "image_prompt": "Stable Diffusion용 영문 이미지 프롬프트 (마감 후 조용한 월스트리트 분위기)"
-}"""
+}
+
+JSON 출력 시 반드시 지켜야 할 규칙:
+- content 필드 안의 줄바꿈은 반드시 \\n 으로 이스케이프하세요 (리터럴 줄바꿈 금지)
+- content 필드 안의 큰따옴표(")는 반드시 \\" 로 이스케이프하세요
+- 백슬래시(\\)는 \\\\ 로 이스케이프하세요
+- JSON 전체가 단 하나의 유효한 JSON 객체여야 합니다"""
 )
 
 # ── 저녁 시스템 프롬프트 (전일 리뷰 + 애프터마켓~프리장 이슈 + 당일 지표) ────────
@@ -201,7 +207,13 @@ SYSTEM_EVENING = (
   "content": "마크다운 형식의 전체 블로그 본문",
   "tags": ["태그1", "태그2", "태그3", "태그4", "태그5"],
   "image_prompt": "Stable Diffusion용 영문 이미지 프롬프트 (긴장감 있는 프리마켓 트레이딩 분위기)"
-}"""
+}
+
+JSON 출력 시 반드시 지켜야 할 규칙:
+- content 필드 안의 줄바꿈은 반드시 \\n 으로 이스케이프하세요 (리터럴 줄바꿈 금지)
+- content 필드 안의 큰따옴표(")는 반드시 \\" 로 이스케이프하세요
+- 백슬래시(\\)는 \\\\ 로 이스케이프하세요
+- JSON 전체가 단 하나의 유효한 JSON 객체여야 합니다"""
 )
 
 
@@ -580,6 +592,21 @@ class ContentGenerator:
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
+        """
+        Gemini 응답을 JSON으로 파싱합니다.
+
+        단계별 파싱 전략:
+          1) 코드블록(```) 제거 후 json.loads
+          2) 원본 그대로 json.loads
+          3) 줄바꿈·탭 정규화 후 json.loads
+          4) content/title/tags/image_prompt 필드를 정규식으로 직접 추출
+             (Gemini가 content 필드 안에 이스케이프되지 않은 큰따옴표·줄바꿈을
+              넣어 JSON 구조가 깨질 때 최후 수단으로 사용)
+        """
+        import re
+
+        # ── 1단계: 코드블록 제거 ────────────────────────────────────────────
+        candidate = raw
         if "```" in raw:
             for part in raw.split("```"):
                 part = part.strip()
@@ -588,5 +615,82 @@ class ContentGenerator:
                 try:
                     return json.loads(part)
                 except json.JSONDecodeError:
-                    continue
+                    pass
+            # 코드블록 내용만 추출 실패 시 코드블록 제거 후 이어서 시도
+            candidate = re.sub(r"```(?:json)?", "", raw).strip()
+
+        # ── 2단계: 직접 파싱 ────────────────────────────────────────────────
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+        # ── 3단계: 줄바꿈/탭 정규화 후 파싱 ────────────────────────────────
+        # Gemini가 JSON 문자열 값 안에 리터럴 줄바꿈을 넣는 경우
+        # "content": "줄1\n줄2" 가 아니라 "content": "줄1
+        # 줄2" 처럼 생성하는 버그 대응
+        try:
+            # JSON 문자열 값 안의 리터럴 줄바꿈을 \\n 으로 치환
+            # (JSON 키-값 구조 바깥의 줄바꿈은 그대로 유지)
+            normalized = re.sub(
+                r'(?<=: ")(.*?)(?="(?:\s*[,}\]]))',
+                lambda m: m.group(0).replace("\n", "\\n").replace("\t", "\\t").replace('"', '\\"'),
+                candidate,
+                flags=re.DOTALL,
+            )
+            return json.loads(normalized)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+        # ── 4단계: 필드별 정규식 직접 추출 (최후 수단) ──────────────────────
+        # content 필드는 "content": "..." 구조에서 가장 긴 문자열을 추출
+        logger.warning("JSON 파싱 전략 1~3 실패 — 정규식 필드 추출 시도 (4단계)")
+
+        def _extract_field(text: str, field: str) -> str:
+            # "field": "값" 패턴에서 값 추출 (내부 따옴표 포함 가능)
+            pattern = rf'"{re.escape(field)}"\s*:\s*"(.*?)"(?=\s*[,}}])'
+            m = re.search(pattern, text, re.DOTALL)
+            if m:
+                val = m.group(1)
+                # 이미 이스케이프된 \\n 은 \n 으로, 리터럴 줄바꿈은 \n으로 정규화
+                val = val.replace("\\n", "\n")
+                return val
+            return ""
+
+        def _extract_tags(text: str) -> list:
+            m = re.search(r'"tags"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            if m:
+                tags_raw = m.group(1)
+                return [t.strip().strip('"') for t in tags_raw.split(",") if t.strip().strip('"')]
+            return []
+
+        title        = _extract_field(candidate, "title")
+        image_prompt = _extract_field(candidate, "image_prompt")
+        tags         = _extract_tags(candidate)
+
+        # content 는 가장 긴 "content": "..." 블록으로 추출
+        content_m = re.search(r'"content"\s*:\s*"(.*)', candidate, re.DOTALL)
+        content = ""
+        if content_m:
+            raw_content = content_m.group(1)
+            # 닫는 따옴표 위치: "tags" 키가 나오기 직전까지
+            end_m = re.search(r'",\s*"(?:tags|image_prompt)"', raw_content, re.DOTALL)
+            if end_m:
+                content = raw_content[:end_m.start()]
+            else:
+                # 마지막 " 바로 앞까지
+                last_q = raw_content.rfind('"')
+                content = raw_content[:last_q] if last_q > 0 else raw_content
+            content = content.replace("\\n", "\n").replace('\\"', '"')
+
+        if title and content:
+            logger.warning(f"4단계 정규식 추출 성공 (title={title[:30]}..., content={len(content)}자)")
+            return {
+                "title":        title,
+                "content":      content,
+                "tags":         tags,
+                "image_prompt": image_prompt,
+            }
+
+        # 4단계도 실패하면 원래 json.loads 예외를 다시 발생
         return json.loads(raw)
