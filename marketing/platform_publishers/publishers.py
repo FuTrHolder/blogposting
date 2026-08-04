@@ -33,15 +33,9 @@
 import os
 import time
 import logging
-import smtplib
 import requests
 import json
 from abc import ABC, abstractmethod
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from email.mime.image import MIMEImage
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from google.oauth2.credentials import Credentials
@@ -93,15 +87,15 @@ class YouTubePublisher(PlatformPublisher):
         title    = content["blog_title"][:100]
         blog_url = content.get("blog_url", "")
 
-        # 설명란: 카카오 스토리채널 게시물 본문을 그대로 사용
-        # (KakaoStoryPublisher와 동일하게 [블로그 URL] 플레이스홀더 치환)
-        kakao_text = content.get("kakao_post", "")
+        # 설명란: kakao_post(친근한 어투 텍스트)를 재사용
+        # ([블로그 URL] 플레이스홀더를 실제 URL로 치환)
+        description_text = content.get("kakao_post", "")
         if blog_url:
-            kakao_text = kakao_text.replace("[블로그 URL]", blog_url)
-            kakao_text = kakao_text.replace("[Blog URL]", blog_url)
+            description_text = description_text.replace("[블로그 URL]", blog_url)
+            description_text = description_text.replace("[Blog URL]", blog_url)
 
         description = (
-            f"{kakao_text}\n\n"
+            f"{description_text}\n\n"
             f"🔗 전체 분석: {blog_url}\n\n"
             "⚠️ 투자 권유가 아닌 정보 제공 목적입니다."
         )
@@ -746,173 +740,13 @@ class InstagramPublisher(PlatformPublisher):
                 logger.warning(f"컨테이너 상태 확인 실패: {e}")
         return False
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 카카오 스토리채널 + 숏폼 영상 메일 발송 (통합)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class KakaoStoryPublisher(PlatformPublisher):
-    """
-    카카오 스토리채널 텍스트 + 썸네일 + 숏폼 영상을 이메일로 발송.
-    """
-
-    def __init__(self):
-        self.gmail     = os.environ.get("GMAIL_ADDRESS", "")
-        self.password  = os.environ.get("GMAIL_APP_PASSWORD", "")
-        self.recipient = os.environ.get("RECIPIENT_EMAIL", "")
-
-    def publish(self, content: dict, media_paths: dict) -> dict:
-        if not self.gmail or not self.recipient:
-            return {"status": "skip", "message": "Gmail 설정 미완료"}
-
-        kakao_text = content.get("kakao_post", "")
-        blog_url   = content.get("blog_url", "")
-        blog_title = content.get("blog_title", "")
-        mode       = content.get("mode", "morning")
-        mode_label = "전일 마감 리뷰" if mode == "morning" else "프리마켓 & 이슈"
-        now_kst    = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-
-        if blog_url:
-            kakao_text = kakao_text.replace("[블로그 URL]", blog_url)
-
-        thumb_path = (
-            media_paths.get("kakao")
-            or media_paths.get("facebook")
-            or media_paths.get("instagram")
-        )
-        video_path = media_paths.get("video")
-
-        html = f"""<!DOCTYPE html>
-<html lang="ko">
-<head><meta charset="UTF-8">
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          line-height: 1.8; color: #333; max-width: 620px;
-          margin: 0 auto; padding: 20px; background: #fafafa; }}
-  .container {{ background: #fff; border-radius: 12px;
-                padding: 32px 36px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
-  .header {{ background: linear-gradient(135deg, #FAE100, #F5C400);
-             padding: 22px 28px; border-radius: 10px; margin-bottom: 24px; }}
-  .header h1 {{ margin: 0 0 6px; font-size: 19px; color: #1a1200; }}
-  .header p  {{ margin: 0; color: #5a4800; font-size: 13px; }}
-  .badge {{ display: inline-block; background: #1a1200; color: #FAE100;
-            padding: 3px 12px; border-radius: 20px;
-            font-size: 12px; font-weight: 700; margin-bottom: 10px; }}
-  .kakao-box {{ background: #FFFDE7; border: 2px solid #FAE100;
-                border-radius: 10px; padding: 20px 22px;
-                margin: 20px 0; white-space: pre-wrap;
-                font-size: 15px; color: #2c2000; line-height: 1.9; }}
-  .guide {{ background: #fff8e1; border-left: 4px solid #FAE100;
-            padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 16px 0; }}
-  .guide h3 {{ margin: 0 0 8px; color: #c97d00; font-size: 14px; }}
-  .guide ol  {{ margin: 0; padding-left: 18px; font-size: 13px; color: #5a3a00; }}
-  .btn {{ display: inline-block; background: #FAE100; color: #1a1200;
-          padding: 10px 22px; border-radius: 8px; text-decoration: none;
-          font-weight: 700; font-size: 14px; margin: 10px 0; }}
-  .footer {{ margin-top: 28px; padding-top: 14px; border-top: 1px solid #f0e8b0;
-             font-size: 12px; color: #aaa; text-align: center; }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div class="badge">카카오 스토리채널</div>
-    <h1>📣 {blog_title}</h1>
-    <p>{mode_label} | 생성: {now_kst}</p>
-  </div>
-
-  <div class="guide">
-    <h3>📋 수동 업로드 안내</h3>
-    <ol>
-      <li>아래 텍스트를 카카오 스토리채널에 복사 붙여넣기</li>
-      <li>첨부된 썸네일 이미지를 함께 업로드</li>
-      <li>숏폼 영상(MP4)이 있으면 함께 업로드하거나 TikTok/Reels에 활용</li>
-    </ol>
-  </div>
-
-  <p><strong>카카오 스토리채널 게시물</strong></p>
-  <div class="kakao-box">{kakao_text or "(내용 없음)"}</div>
-
-  <p><a href="{blog_url}" class="btn">📖 블로그 원문 보기</a></p>
-
-  <div class="footer">
-    ⚠️ 투자 권유가 아닌 정보 제공 목적입니다.<br>
-    © 미국 증시 블로그 자동화 | seedsup.tistory.com
-  </div>
-</div>
-</body></html>"""
-
-        msg            = MIMEMultipart("mixed")
-        msg["Subject"] = f"[카카오 스토리채널] {blog_title} ({mode_label})"
-        msg["From"]    = self.gmail
-        msg["To"]      = self.recipient
-
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(html, "html", "utf-8"))
-        msg.attach(alt)
-
-        attached_files = []
-
-        if thumb_path and Path(thumb_path).exists():
-            try:
-                with open(thumb_path, "rb") as f:
-                    img = MIMEImage(f.read())
-                    img.add_header("Content-Disposition", "attachment",
-                                   filename="kakao_thumbnail.jpg")
-                msg.attach(img)
-                attached_files.append(f"썸네일({Path(thumb_path).name})")
-                logger.info(f"카카오 썸네일 첨부: {thumb_path}")
-            except Exception as e:
-                logger.warning(f"썸네일 첨부 실패: {e}")
-
-        video_attached = False
-        if video_path and Path(video_path).exists():
-            video_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
-            if video_size_mb <= 24:
-                try:
-                    with open(video_path, "rb") as f:
-                        video_data = f.read()
-                    video_part = MIMEBase("video", "mp4")
-                    video_part.set_payload(video_data)
-                    encoders.encode_base64(video_part)
-                    video_part.add_header(
-                        "Content-Disposition", "attachment",
-                        filename=Path(video_path).name,
-                    )
-                    msg.attach(video_part)
-                    attached_files.append(f"영상({video_size_mb:.1f}MB)")
-                    video_attached = True
-                    logger.info(f"숏폼 영상 첨부: {video_path} ({video_size_mb:.1f}MB)")
-                except Exception as e:
-                    logger.warning(f"영상 첨부 실패: {e}")
-            else:
-                logger.warning(f"영상 크기 초과({video_size_mb:.1f}MB) — 첨부 생략")
-                attached_files.append(f"영상 생략({video_size_mb:.1f}MB 초과)")
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(self.gmail, self.password)
-                server.sendmail(self.gmail, self.recipient, msg.as_string())
-            msg_detail = ", ".join(attached_files) if attached_files else "텍스트만"
-            logger.info(f"카카오 메일 발송 완료: {self.recipient} [{msg_detail}]")
-            return {
-                "status": "ok",
-                "url": "",
-                "message": f"메일 발송 완료 [{msg_detail}] → {self.recipient}",
-            }
-        except Exception as e:
-            logger.error(f"카카오 메일 발송 실패: {e}")
-            return {"status": "error", "message": str(e)}
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # PublisherDispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PublisherDispatcher:
     # 썸네일 발행(publish)과 별개로 릴스(영상) 추가 발행(publish_reels)을
-    # 지원하는 플랫폼. YouTube는 이미 영상 자체가 본 발행물이고, Kakao는
-    # 이메일 첨부로 영상을 이미 함께 보내므로 대상에서 제외합니다.
+    # 지원하는 플랫폼. YouTube는 이미 영상 자체가 본 발행물입니다.
     REELS_CAPABLE_PLATFORMS = ("facebook", "instagram", "threads")
 
     def __init__(self):
@@ -921,7 +755,6 @@ class PublisherDispatcher:
             "facebook":  FacebookPublisher(),
             "instagram": InstagramPublisher(),
             "threads":   ThreadsPublisher(),
-            "kakao":     KakaoStoryPublisher(),
         }
 
     def publish_all(self, content: dict, media_paths: dict) -> dict[str, dict]:
