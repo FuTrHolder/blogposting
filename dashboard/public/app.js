@@ -92,7 +92,9 @@ async function loadContent(postDate, mode) {
   currentThumbnailUrl = post?.thumbnail_url || "";
 
   if (currentThumbnailUrl) {
-    img.src = currentThumbnailUrl;
+    // GitHub Release 자산은 리다이렉트+CORS 문제로 <img>에서 직접 로드 불가.
+    // /proxy-image 를 통해 same-origin으로 우회해서 표시.
+    img.src = `/proxy-image?url=${encodeURIComponent(currentThumbnailUrl)}`;
     img.hidden = false;
     empty.hidden = true;
     downloadLink.href = currentThumbnailUrl;
@@ -162,7 +164,12 @@ async function loadMarketing(postDate, mode) {
 
     // 미디어 HTML (영상 또는 썸네일)
     let mediaHtml = "";
+    // GitHub Release URL은 직접 로드 시 리다이렉트+CORS 문제 → /proxy-image 우회
+    const proxyUrl = (url) => url ? `/proxy-image?url=${encodeURIComponent(url)}` : "";
+
     if (r.video_url) {
+      // 영상은 proxy 불필요 (video 태그는 리다이렉트 추적 가능)
+      // 단, proxy-image의 ALLOWED_HOSTS에 포함되어 있으면 proxy를 통해도 됨
       mediaHtml = `
         <video src="${r.video_url}" controls playsinline></video>
         <div class="btn-row">
@@ -174,7 +181,7 @@ async function loadMarketing(postDate, mode) {
         </div>`;
     } else if (r.thumbnail_url) {
       mediaHtml = `
-        <img src="${r.thumbnail_url}" alt="${r.platform} 썸네일">
+        <img src="${proxyUrl(r.thumbnail_url)}" alt="${r.platform} 썸네일">
         <div class="btn-row">
           <button class="copy-btn" data-copy-img="${r.thumbnail_url}">이미지 복사</button>
           <a class="copy-btn" href="${r.thumbnail_url}" download>다운로드</a>
