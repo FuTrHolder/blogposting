@@ -580,38 +580,13 @@ class ContentGenerator:
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
-    import re
-
-    raw = raw.strip()
-
-    # Markdown JSON 제거
-    if "```" in raw:
-        blocks = raw.split("```")
-        for block in blocks:
-            block = block.strip()
-            if block.startswith("json"):
-                raw = block[4:].strip()
-                break
-            elif block.startswith("{"):
-                raw = block
-                break
-
-    # JSON 시작/끝 추출
-    start = raw.find("{")
-    end = raw.rfind("}")
-
-    if start >= 0 and end > start:
-        raw = raw[start:end + 1]
-
-    try:
+        if "```" in raw:
+            for part in raw.split("```"):
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                try:
+                    return json.loads(part)
+                except json.JSONDecodeError:
+                    continue
         return json.loads(raw)
-
-    except json.JSONDecodeError:
-        # Gemini가 escape 누락한 따옴표 보정
-        fixed = re.sub(
-            r'(?<!\\)"(?=[^"]*":)',
-            '\\"',
-            raw
-        )
-
-        return json.loads(fixed)
