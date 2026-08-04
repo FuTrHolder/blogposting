@@ -57,7 +57,6 @@ _PLATFORM_TEXT_KEY = {
     "instagram_reels":  "instagram_post",
     "threads":          "threads_post",
     "threads_reels":    "threads_post",
-    "kakao":            "kakao_post",
     "tiktok":           "tiktok_post",   # tiktok_post 없으면 x_post로 fallback
 }
 _PLATFORM_THUMB_KEY = {
@@ -68,7 +67,6 @@ _PLATFORM_THUMB_KEY = {
     "instagram_reels":  "instagram",
     "threads":          "threads",
     "threads_reels":    "threads",
-    "kakao":            "kakao",
     "tiktok":           "facebook",  # 틱톡은 썸네일 대신 tiktok_video가 메인
 }
 # 대시보드에 영상을 보여줘야 하는 플랫폼
@@ -260,8 +258,8 @@ def main():
         logger.warning(f"  → 쇼츠 영상 생성 실패 (계속): {e}")
         state.add_log("SHORTS_VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
 
-    # 3b. 틱톡용 영상 (1분+, 고정 속도 +28%, 시간 제한 없음)
-    logger.info("[3b/7] 틱톡용 영상 생성 중... (1분+, 시간 제한 없음)")
+    # 3b. 틱톡용 영상 (1분+, 이탈률 개선판: 짧은 세그먼트 + 여성 목소리 + 해시태그)
+    logger.info("[3b/7] 틱톡용 영상 생성 중... (1분+, 이탈률 개선 버전)")
     tiktok_video_path = None
     try:
         tiktok_filename   = f"tiktok_{post['mode']}_{timestamp}.mp4"
@@ -278,6 +276,19 @@ def main():
         logger.info(f"  → 틱톡 영상 저장: {tiktok_video_path}")
         state.add_log("TIKTOK_VIDEO_GENERATED", f"틱톡 생성: {tiktok_video_path}",
                       post_id=post_id)
+
+        # 영상 생성 과정에서 함께 만들어진 해시태그를 캡션에 자동 반영
+        # (검색 유입 개선 — content_adapter가 만든 tiktok_post/x_post 캡션
+        #  끝에 아직 해시태그가 없으면 추가)
+        generated_tags = getattr(video_gen, "last_tiktok_hashtags", [])
+        if generated_tags:
+            tag_line = " ".join(f"#{t}" for t in generated_tags)
+            for key in ("tiktok_post", "x_post"):
+                existing = content.get(key, "")
+                if existing and "#" not in existing:
+                    content[key] = f"{existing}\n\n{tag_line}"
+            content["tiktok_hashtags"] = generated_tags
+            logger.info(f"  → 틱톡 해시태그 반영: {generated_tags}")
     except Exception as e:
         logger.warning(f"  → 틱톡 영상 생성 실패 (계속): {e}")
         state.add_log("TIKTOK_VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
