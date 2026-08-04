@@ -579,7 +579,7 @@ class ContentGenerator:
         return post2
 
     @staticmethod
-def _parse_json_response(raw: str) -> dict:
+    def _parse_json_response(raw: str) -> dict:
     import re
 
     raw = raw.strip()
