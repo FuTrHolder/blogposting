@@ -1,12 +1,18 @@
 """
-마케팅 자동화 메인 스크립트 v7
-변경사항 v7:
-  - 틱톡 전용 영상(1분+)을 이메일 대신 대시보드(Cloudflare D1)에 업로드
+마케팅 자동화 메인 스크립트 v8
+변경사항 v8:
+  - 카카오스토리채널: 공식 발행 API가 없어 자동 발행 대상에서는 제외되지만,
+    kakao_post 캡션 + 블로그 URL을 대시보드(D1)에 status="skip"으로 저장해
+    대시보드 상단 전용 박스에서 수동 복사할 수 있게 함
+  - blog_url을 posts 테이블에도 반영 (main.py는 실제 발행 URL을 모르므로,
+    이 파이프라인이 tistory_crawler로 확인한 실제 URL을 채워 넣음)
+
+v7 유지:
+  - 틱톡 전용 영상(1분+)을 대시보드(Cloudflare D1)에 업로드
       · dashboard_client.upload_media_get_public_url()로 GitHub Release에 업로드
       · dashboard_client.push_marketing_result()로 대시보드에 tiktok 결과 저장
       · 대시보드에서 영상 재생 및 다운로드 가능
-  - 기존 플랫폼(YouTube, Facebook, Instagram, Threads, Kakao)은 유지
-  - TikTokPublisher 제거 (이메일 발송 방식 폐기)
+  - YouTube/Facebook/Instagram/Threads 자동 발행
 
 실행 흐름:
   1. Gist에서 처리 완료 내역 로드 → 중복 방지
@@ -14,12 +20,13 @@
   3. 이미 처리된 글이면 즉시 종료
   4. Gemini로 플랫폼별 콘텐츠 생성
   5a. 쇼츠/릴스용 영상 제작 (58초 이하, 속도 자동 조정)
-  5b. 틱톡용 영상 제작 (1분+, 고정 속도 +28%, 시간 제한 없음)
+  5b. 틱톡용 영상 제작 (1분+, 이탈률 개선판)
   6. SNS 썸네일 제작
   7. 발행용 공개 URL 확보 (GitHub Release 업로드)
-  8. 기존 플랫폼 자동 발행
+  8. 기존 플랫폼 자동 발행 (YouTube/Facebook/Instagram/Threads)
   9. 틱톡 영상 → 대시보드 전용 업로드 (GitHub Release → D1)
-  10. 처리 완료 내역을 Gist에 저장
+  10. 카카오스토리채널 캡션 → 대시보드 전용 저장 (수동 게시용)
+  11. 처리 완료 내역을 Gist에 저장
 """
 
 import os
@@ -153,6 +160,32 @@ def _push_results_to_dashboard(
             content_text=content_text,
             thumbnail_path=thumbnail_path,
             video_path=video_path,
+            blog_url=content.get("blog_url", ""),
+        )
+
+    # ── 카카오스토리채널: 자동 발행 대상이 아니므로 results에는 없지만,
+    # 대시보드 상단 전용 박스에 본문+블로그링크를 수동 복사용으로 표시하기
+    # 위해 kakao_post 캡션만 별도로 대시보드에 저장합니다. status는 항상
+    # "skip"으로 기록해(발행을 시도한 적이 없으므로 ok/error가 아님) 마케팅
+    # 카드 그리드에는 노출되지 않고(app.js가 platform === "kakao"는
+    # 필터링), 상단 카카오 박스가 이 content_text를 읽어와 표시합니다.
+    kakao_text = content.get("kakao_post", "")
+    if kakao_text:
+        blog_url = content.get("blog_url", "")
+        if blog_url:
+            kakao_text = kakao_text.replace("[블로그 URL]", blog_url)
+            kakao_text = kakao_text.replace("[Blog URL]", blog_url)
+        dashboard_client.push_marketing_result(
+            post_date=post_date,
+            mode=mode,
+            platform="kakao",
+            status="skip",
+            message="수동 게시 대기 (카카오스토리채널 공식 API 미지원)",
+            url="",
+            content_text=kakao_text,
+            thumbnail_path=media_paths.get("facebook"),
+            video_path=None,
+            blog_url=content.get("blog_url", ""),
         )
 
 
