@@ -149,6 +149,22 @@
         <button id="trigger-btn">마케팅 실행</button>
       </div>
       <p id="trigger-status" class="muted"></p>
+
+      <div id="kakao-box" class="kakao-box">
+        <div class="kakao-box-head">
+          <span class="kakao-badge">💬 카카오스토리채널</span>
+          <button class="copy-btn" id="kakao-copy-btn">본문+링크 복사</button>
+        </div>
+        <textarea id="kakao-text" rows="6" readonly placeholder="카카오스토리채널 게시용 본문이 여기에 표시됩니다."></textarea>
+        <div class="kakao-box-foot">
+          <span class="field-label">티스토리 원문 링크</span>
+          <div class="kakao-link-row">
+            <input type="text" id="kakao-blog-url" readonly placeholder="블로그 링크 없음">
+            <button class="copy-btn" id="kakao-url-copy-btn">링크 복사</button>
+          </div>
+        </div>
+      </div>
+
       <div id="marketing-grid" class="marketing-grid"></div>
     </section>
   </main>
