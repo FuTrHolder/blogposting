@@ -1,6 +1,11 @@
 // POST /api/ingest/marketing-result
 // GitHub Actions(marketing_automation.yml)가 채널별 발행 결과 + 미디어 URL(GitHub
 // Release 링크)을 JSON으로 전송하는 엔드포인트. X-Ingest-Secret 헤더로 검증합니다.
+//
+// blog_url이 함께 전달되면 posts 테이블의 blog_url도 갱신합니다. main.py는
+// 원고만 생성하고 실제 티스토리 발행 URL을 모르지만, 마케팅 파이프라인
+// (tistory_crawler)은 RSS로 실제 발행된 글의 URL을 알고 있으므로, 여기서
+// posts.blog_url을 채워 대시보드(카카오 박스 등)에서 사용할 수 있게 합니다.
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -21,6 +26,7 @@ export async function onRequestPost(context) {
     const contentText = body.content_text || "";
     const thumbnailUrl = body.thumbnail_url || "";
     const videoUrl = body.video_url || "";
+    const blogUrl = body.blog_url || "";
 
     if (!postDate || !mode || !platform) {
       return json({ error: "post_date, mode, platform은 필수입니다." }, 400);
@@ -46,6 +52,15 @@ export async function onRequestPost(context) {
     )
       .bind(id, postDate, mode, platform, status, message, url, thumbnailUrl, videoUrl, contentText)
       .run();
+
+    if (blogUrl) {
+      const postId = `${postDate}_${mode}`;
+      await env.DB.prepare(
+        `UPDATE posts SET blog_url = ?1 WHERE id = ?2`
+      )
+        .bind(blogUrl, postId)
+        .run();
+    }
 
     return json({ ok: true, id });
   } catch (err) {
