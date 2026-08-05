@@ -45,11 +45,22 @@ def _clean_text(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-# ── HuggingFace FLUX.1-schnell ────────────────────────────────────────────────
-HF_FLUX_URL = (
-    "https://router.huggingface.co/hf-inference/models/"
-    "black-forest-labs/FLUX.1-schnell"
-)
+# ── HuggingFace FLUX.1-schnell (Inference Providers 경유) ──────────────────
+# 2026-07-15경 hf-inference provider에서 FLUX.1-schnell 서빙이 중단되어
+# (HTTP 410 "deprecated and no longer supported by provider hf-inference")
+# 라우팅 경로를 hf-inference → fal-ai로 변경했습니다.
+# HuggingFace는 여러 파트너(Fal AI, Together, Replicate 등)를 통해 동일 모델을
+# 서빙하는 "Inference Providers" 라우팅 구조로 전환되었으며, HF_TOKEN 하나로
+# 그대로 무료 크레딧을 사용할 수 있습니다 (별도 fal.ai 가입/키 불필요).
+# 요청 URL 형식: https://router.huggingface.co/{provider}/models/{model}
+# provider가 죽거나 모델을 내리면 다음 provider로 자동 폴백합니다.
+HF_FLUX_PROVIDERS = ["fal-ai", "together", "replicate"]
+HF_FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
+
+
+def _hf_flux_url(provider: str) -> str:
+    return f"https://router.huggingface.co/{provider}/models/{HF_FLUX_MODEL}"
+
 
 # 모드별 프롬프트 접미사 (FLUX는 자연어 지시에 강함)
 FLUX_SUFFIX = {
@@ -198,9 +209,9 @@ class ImageGenerator:
         self.last_image_source = ""
         return self._gradient_fallback(filename, mode)
 
-    # ── FLUX.1-schnell ────────────────────────────────────────────────────────
+    # ── FLUX.1-schnell (Fal AI → Together → Replicate 순으로 폴백) ────────────
     def _generate_flux(
-        self, prompt: str, filename: str, mode: str, max_retries: int = 3
+        self, prompt: str, filename: str, mode: str, max_retries: int = 2
     ) -> str | None:
         if not self.hf_token:
             logger.info("HF_API_TOKEN 미설정 — FLUX 건너뜀")
@@ -226,62 +237,95 @@ class ImageGenerator:
         }
         headers = {"Authorization": f"Bearer {self.hf_token}"}
 
-        logger.info(f"FLUX.1-schnell 이미지 생성 중 (모드: {mode}, 시드: {seed})...")
+        for provider in HF_FLUX_PROVIDERS:
+            url = _hf_flux_url(provider)
+            logger.info(
+                f"FLUX.1-schnell 이미지 생성 중 (provider: {provider}, "
+                f"모드: {mode}, 시드: {seed})..."
+            )
+            result = self._try_flux_provider(
+                url, provider, headers, payload, filename, max_retries
+            )
+            if result:
+                return result
+            logger.warning(f"provider={provider} 실패 — 다음 provider로 폴백")
 
+        logger.warning(
+            f"모든 FLUX provider 실패({', '.join(HF_FLUX_PROVIDERS)}) — Pexels로 전환"
+        )
+        return None
+
+    def _try_flux_provider(
+        self,
+        url: str,
+        provider: str,
+        headers: dict,
+        payload: dict,
+        filename: str,
+        max_retries: int,
+    ) -> str | None:
+        """단일 provider에 대해 재시도 로직을 수행. 이 provider가 확정적으로
+        사용 불가(410/404)면 즉시 None(다음 provider로), 일시적 오류(503/429)면
+        재시도 후에도 실패 시 None을 반환합니다."""
         for attempt in range(1, max_retries + 1):
             try:
-                resp = requests.post(
-                    HF_FLUX_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=60,
-                )
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
 
                 if resp.status_code == 200:
                     if len(resp.content) < 10_000:
-                        logger.warning("FLUX 응답 크기 불충분")
+                        logger.warning(f"[{provider}] FLUX 응답 크기 불충분")
                         return None
                     file_path = os.path.join(
                         OUTPUT_DIR, filename.replace(".png", ".jpg")
                     )
-                    # FLUX는 PNG 바이너리 반환 → JPEG로 저장
                     img = Image.open(BytesIO(resp.content)).convert("RGB")
                     img.save(file_path, "JPEG", quality=92, optimize=True)
-                    _add_watermark(file_path, "FLUX.1-schnell / HuggingFace")
+                    _add_watermark(file_path, f"FLUX.1-schnell / {provider}")
                     logger.info(
-                        f"FLUX 이미지 저장: {file_path} "
+                        f"[{provider}] FLUX 이미지 저장: {file_path} "
                         f"({len(resp.content) // 1024}KB)"
                     )
                     return file_path
 
                 elif resp.status_code == 503:
-                    # 모델 cold start — estimated_time만큼 대기 후 재시도
                     try:
                         wait = min(resp.json().get("estimated_time", 20), 40)
                     except Exception:
                         wait = 20
                     logger.warning(
-                        f"FLUX 모델 로딩 중 (503) — {wait:.0f}초 대기 "
+                        f"[{provider}] FLUX 모델 로딩 중 (503) — {wait:.0f}초 대기 "
                         f"(시도 {attempt}/{max_retries})..."
                     )
-                    time.sleep(wait)
+                    if attempt < max_retries:
+                        time.sleep(wait)
+                    else:
+                        return None
 
                 elif resp.status_code == 429:
-                    logger.warning("FLUX 요청 한도 초과 (429) — Pexels로 전환")
+                    logger.warning(f"[{provider}] FLUX 요청 한도 초과 (429)")
+                    return None
+
+                elif resp.status_code in (404, 410):
+                    # 이 provider에서 모델이 더 이상 서빙되지 않음 — 재시도 무의미,
+                    # 즉시 다음 provider로 넘어감
+                    logger.warning(
+                        f"[{provider}] FLUX 모델 미지원 ({resp.status_code}): "
+                        f"{resp.text[:150]}"
+                    )
                     return None
 
                 else:
                     logger.warning(
-                        f"FLUX 실패 ({resp.status_code}): {resp.text[:150]}"
+                        f"[{provider}] FLUX 실패 ({resp.status_code}): {resp.text[:150]}"
                     )
                     return None
 
             except requests.exceptions.Timeout:
-                logger.warning(f"FLUX 타임아웃 (시도 {attempt}/{max_retries})")
+                logger.warning(f"[{provider}] FLUX 타임아웃 (시도 {attempt}/{max_retries})")
                 if attempt < max_retries:
                     time.sleep(5)
             except Exception as e:
-                logger.warning(f"FLUX 오류: {e}")
+                logger.warning(f"[{provider}] FLUX 오류: {e}")
                 return None
 
         return None
