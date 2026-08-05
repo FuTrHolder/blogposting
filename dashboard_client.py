@@ -238,8 +238,14 @@ def push_marketing_result(
     content_text: str = "",
     thumbnail_path: str | None = None,
     video_path: str | None = None,
+    blog_url: str = "",
 ) -> bool:
-    """플랫폼별 마케팅 발행 결과를 대시보드(D1)에 업로드합니다. 미디어는 GitHub Release로."""
+    """플랫폼별 마케팅 발행 결과를 대시보드(D1)에 업로드합니다. 미디어는 GitHub Release로.
+
+    blog_url이 전달되면 posts.blog_url도 함께 갱신합니다 (main.py는 실제
+    티스토리 발행 URL을 모르지만, 마케팅 파이프라인의 tistory_crawler는
+    RSS로 이 URL을 알고 있으므로 여기서 대시보드에 채워 넣습니다).
+    """
     base = _dashboard_base_url()
     if not base:
         logger.info("DASHBOARD_API_URL 미설정 — 대시보드 업로드 건너뜀")
@@ -264,6 +270,7 @@ def push_marketing_result(
         "content_text": content_text,
         "thumbnail_url": thumbnail_url,
         "video_url": video_url,
+        "blog_url": blog_url,
     }
 
     try:
