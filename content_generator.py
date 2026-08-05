@@ -56,9 +56,10 @@ _MARKDOWN_FORMAT_RULE = """
    ### FOMC 금리 동결, 시장 반응은?
     연준은 이번 회의에서 금리를 동결했습니다...
 
-④ 이미지 플레이스홀더: 지수 리스트 바로 다음(섹션 설명 문단 시작 전)에
-   아래 한 줄을 정확히 삽입합니다. alt 텍스트는 포스팅 제목으로 채웁니다.
-   [##_Image|썸네일|CDM|1.3|{"originWidth":1200,"originHeight":630,"style":"alignCenter","alt":"{{제목}}","caption":"{{제목}}"}_##]
+④ 이미지: 본문 안에 이미지 태그나 플레이스홀더를 절대 삽입하지 않습니다.
+   썸네일은 대시보드에서 별도로 관리되므로, 본문(content)은 순수 텍스트
+   콘텐츠에만 집중합니다. [##_Image...] 같은 티스토리 이미지 태그, 마크다운
+   이미지 문법(![]()), <img> 태그 등 어떤 형태의 이미지 삽입 구문도 쓰지 않습니다.
 
 ⑤ 면책 조항: 글 말미 마무리 문단 바로 다음에 blockquote(>)로 작성합니다.
    이탤릭(*텍스트*) 형식은 사용하지 않습니다.
@@ -512,6 +513,7 @@ class ContentGenerator:
             raw = self._call_gemini(system, prompt)
             try:
                 post = self._parse_json_response(raw)
+                post = self._strip_image_tags(post)
                 logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
                 logger.info(f"생성된 제목: {post.get('title', '')}")
                 post = self._fact_check_and_correct(post, system, prompt, fact_lookup)
@@ -571,6 +573,7 @@ class ContentGenerator:
         try:
             raw2 = self._call_gemini(system, corrected_prompt)
             post2 = self._parse_json_response(raw2)
+            post2 = self._strip_image_tags(post2)
         except Exception as e:
             logger.warning(f"팩트체크 재생성 실패(원본 유지): {e}")
             return fact_checker.neutralize_unresolved(post, remaining)
@@ -589,6 +592,41 @@ class ContentGenerator:
             post2 = fact_checker.neutralize_unresolved(post2, remaining2)
 
         return post2
+
+    @staticmethod
+    def _strip_image_tags(post: dict) -> dict:
+        """
+        본문(content)에 혹시라도 남아있는 이미지 삽입 구문을 안전하게 제거합니다.
+
+        시스템 프롬프트에서 이미지 태그를 쓰지 말라고 지시하지만, Gemini가
+        과거 학습 데이터의 티스토리 포맷 습관대로 [##_Image...] 태그나
+        마크다운 이미지 문법(![]())을 넣을 가능성에 대비한 안전망입니다.
+        썸네일은 대시보드에서 별도(thumbnail_url)로 관리되므로, 본문에
+        이런 태그가 남아있으면 텍스트 사이에 불필요한 줄이 섞여 보입니다.
+        """
+        import re
+        content = post.get("content", "") or ""
+        if not content:
+            return post
+
+        before_len = len(content)
+
+        # 티스토리 [##_Image|...|{...}_##] 형태
+        content = re.sub(r"\[##_Image\|[^\]]*_##\]", "", content)
+        # 마크다운 이미지 문법 ![alt](url)
+        content = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", content)
+        # 남은 빈 줄이 3개 이상 연속되면 2개로 축소
+        content = re.sub(r"\n{3,}", "\n\n", content)
+        content = content.strip()
+
+        if len(content) != before_len:
+            logger.warning(
+                f"본문에서 이미지 태그 제거함 ({before_len - len(content)}자 감소)"
+            )
+
+        post = dict(post)
+        post["content"] = content
+        return post
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
