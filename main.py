@@ -192,11 +192,12 @@ def main():
     )
     logger.info(f"  → 이미지: {image_path}")
 
-    # 3-1. 썸네일 저작자 표시 본문에 추가
+    # 3-1. 썸네일 저작자 표시는 로그로만 남기고 본문에는 추가하지 않음
+    #      (블로그 포스팅 본문은 순수 콘텐츠에만 집중 — 사진 출처 표기가
+    #      필요하면 대시보드나 발행 후 별도로 관리)
     attribution = img_gen.get_attribution_text()
     if attribution:
-        post["content"] = post["content"].rstrip() + f"\n\n---\n*{attribution}*"
-        logger.info(f"  → 저작자 표시 추가: {attribution}")
+        logger.info(f"  → 썸네일 출처: {attribution} (본문에는 추가하지 않음)")
 
     # 4. Cloudflare 대시보드 업로드
     logger.info("[4/4] Cloudflare 대시보드 업로드 중...")
