@@ -48,18 +48,18 @@ logger = logging.getLogger(__name__)
 # ── HuggingFace FLUX.1-schnell (Inference Providers 경유) ──────────────────
 # 2026-07-15경 hf-inference provider에서 FLUX.1-schnell 서빙이 중단되어
 # (HTTP 410 "deprecated and no longer supported by provider hf-inference")
-# 라우팅 경로를 hf-inference → fal-ai로 변경했습니다.
-# HuggingFace는 여러 파트너(Fal AI, Together, Replicate 등)를 통해 동일 모델을
-# 서빙하는 "Inference Providers" 라우팅 구조로 전환되었으며, HF_TOKEN 하나로
-# 그대로 무료 크레딧을 사용할 수 있습니다 (별도 fal.ai 가입/키 불필요).
-# 요청 URL 형식: https://router.huggingface.co/{provider}/models/{model}
-# provider가 죽거나 모델을 내리면 다음 provider로 자동 폴백합니다.
-HF_FLUX_PROVIDERS = ["fal-ai", "together", "replicate"]
+# fal-ai/together/replicate로 순서대로 폴백을 시도했으나, 이 provider들도
+# raw REST 요청(router.huggingface.co/{provider}/models/{model} 직접 호출)에는
+# 즉시 400 "Model not supported by provider"를 반환했습니다.
+#
+# 원인: HuggingFace 라우터는 provider별로 실제 내부 모델 ID가 다를 수 있어
+# (예: google/gemma-3-27b-it → scaleway에서는 google/gemma-3-27b-it-fast)
+# 이 매핑을 huggingface_hub 파이썬 라이브러리(InferenceClient)가 내부적으로
+# 해석해서 요청을 보냅니다. raw HTTP로 모델 원본 ID를 그대로 넣으면 이
+# 변환이 적용되지 않아 라우터가 매핑을 못 찾고 400을 반환합니다.
+# → huggingface_hub 라이브러리를 사용하도록 변경해 이 문제를 해결합니다.
+HF_FLUX_PROVIDERS = ["fal-ai", "together", "replicate", "hf-inference"]
 HF_FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
-
-
-def _hf_flux_url(provider: str) -> str:
-    return f"https://router.huggingface.co/{provider}/models/{HF_FLUX_MODEL}"
 
 
 # 모드별 프롬프트 접미사 (FLUX는 자연어 지시에 강함)
@@ -209,12 +209,22 @@ class ImageGenerator:
         self.last_image_source = ""
         return self._gradient_fallback(filename, mode)
 
-    # ── FLUX.1-schnell (Fal AI → Together → Replicate 순으로 폴백) ────────────
+    # ── FLUX.1-schnell (huggingface_hub 라이브러리 경유, provider 순차 폴백) ──
     def _generate_flux(
         self, prompt: str, filename: str, mode: str, max_retries: int = 2
     ) -> str | None:
         if not self.hf_token:
             logger.info("HF_API_TOKEN 미설정 — FLUX 건너뜀")
+            return None
+
+        try:
+            from huggingface_hub import InferenceClient
+            from huggingface_hub.errors import HfHubHTTPError
+        except ImportError:
+            logger.error(
+                "huggingface_hub 미설치 — requirements.txt에 "
+                "huggingface_hub 추가 필요 (pip install huggingface_hub)"
+            )
             return None
 
         suffix = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
@@ -225,26 +235,14 @@ class ImageGenerator:
             f"{datetime.now().strftime('%Y%m%d')}{mode}".encode()
         ).hexdigest()[:8], 16) % (2 ** 32)
 
-        payload = {
-            "inputs": full_prompt,
-            "parameters": {
-                "num_inference_steps": 4,   # schnell 권장값
-                "guidance_scale": 0.0,       # schnell은 0이 최적
-                "width": 1024,
-                "height": 576,
-                "seed": seed,
-            },
-        }
-        headers = {"Authorization": f"Bearer {self.hf_token}"}
-
         for provider in HF_FLUX_PROVIDERS:
-            url = _hf_flux_url(provider)
             logger.info(
                 f"FLUX.1-schnell 이미지 생성 중 (provider: {provider}, "
                 f"모드: {mode}, 시드: {seed})..."
             )
             result = self._try_flux_provider(
-                url, provider, headers, payload, filename, max_retries
+                InferenceClient, HfHubHTTPError,
+                provider, full_prompt, seed, filename, max_retries,
             )
             if result:
                 return result
@@ -257,76 +255,82 @@ class ImageGenerator:
 
     def _try_flux_provider(
         self,
-        url: str,
+        InferenceClient,
+        HfHubHTTPError,
         provider: str,
-        headers: dict,
-        payload: dict,
+        full_prompt: str,
+        seed: int,
         filename: str,
         max_retries: int,
     ) -> str | None:
-        """단일 provider에 대해 재시도 로직을 수행. 이 provider가 확정적으로
-        사용 불가(410/404)면 즉시 None(다음 provider로), 일시적 오류(503/429)면
-        재시도 후에도 실패 시 None을 반환합니다."""
+        """
+        단일 provider에 대해 huggingface_hub.InferenceClient로 이미지 생성을
+        시도합니다. 이 클라이언트는 provider별 실제 내부 모델 ID 매핑을
+        자동으로 처리하므로, raw REST 호출에서 발생했던
+        "Model not supported by provider" 400 오류를 피할 수 있습니다.
+
+        확정적으로 사용 불가한 오류(404/400 모델 미지원)는 즉시 None을
+        반환해 다음 provider로 넘어가고, 일시적 오류(503/429)는 재시도합니다.
+        """
+        client = InferenceClient(provider=provider, api_key=self.hf_token, timeout=60)
+
         for attempt in range(1, max_retries + 1):
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                image = client.text_to_image(
+                    full_prompt,
+                    model=HF_FLUX_MODEL,
+                    guidance_scale=0.0,
+                    num_inference_steps=4,
+                    width=1024,
+                    height=576,
+                    seed=seed,
+                )
+                file_path = os.path.join(
+                    OUTPUT_DIR, filename.replace(".png", ".jpg")
+                )
+                image.convert("RGB").save(file_path, "JPEG", quality=92, optimize=True)
+                _add_watermark(file_path, f"FLUX.1-schnell / {provider}")
+                logger.info(f"[{provider}] FLUX 이미지 저장: {file_path}")
+                return file_path
 
-                if resp.status_code == 200:
-                    if len(resp.content) < 10_000:
-                        logger.warning(f"[{provider}] FLUX 응답 크기 불충분")
-                        return None
-                    file_path = os.path.join(
-                        OUTPUT_DIR, filename.replace(".png", ".jpg")
-                    )
-                    img = Image.open(BytesIO(resp.content)).convert("RGB")
-                    img.save(file_path, "JPEG", quality=92, optimize=True)
-                    _add_watermark(file_path, f"FLUX.1-schnell / {provider}")
-                    logger.info(
-                        f"[{provider}] FLUX 이미지 저장: {file_path} "
-                        f"({len(resp.content) // 1024}KB)"
-                    )
-                    return file_path
+            except HfHubHTTPError as e:
+                status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
+                msg = str(e)[:200]
 
-                elif resp.status_code == 503:
-                    try:
-                        wait = min(resp.json().get("estimated_time", 20), 40)
-                    except Exception:
-                        wait = 20
+                if status == 503 or "loading" in msg.lower():
+                    wait = 20
                     logger.warning(
-                        f"[{provider}] FLUX 모델 로딩 중 (503) — {wait:.0f}초 대기 "
+                        f"[{provider}] FLUX 모델 로딩 중 (503) — {wait}초 대기 "
                         f"(시도 {attempt}/{max_retries})..."
                     )
                     if attempt < max_retries:
                         time.sleep(wait)
-                    else:
-                        return None
+                        continue
+                    return None
 
-                elif resp.status_code == 429:
+                if status == 429:
                     logger.warning(f"[{provider}] FLUX 요청 한도 초과 (429)")
                     return None
 
-                elif resp.status_code in (404, 410):
-                    # 이 provider에서 모델이 더 이상 서빙되지 않음 — 재시도 무의미,
+                if status in (400, 404, 410):
+                    # 이 provider에서 모델이 지원되지 않음 — 재시도 무의미,
                     # 즉시 다음 provider로 넘어감
                     logger.warning(
-                        f"[{provider}] FLUX 모델 미지원 ({resp.status_code}): "
-                        f"{resp.text[:150]}"
+                        f"[{provider}] FLUX 모델 미지원 ({status}): {msg}"
                     )
                     return None
 
-                else:
-                    logger.warning(
-                        f"[{provider}] FLUX 실패 ({resp.status_code}): {resp.text[:150]}"
-                    )
-                    return None
+                logger.warning(f"[{provider}] FLUX 실패 ({status}): {msg}")
+                return None
 
-            except requests.exceptions.Timeout:
-                logger.warning(f"[{provider}] FLUX 타임아웃 (시도 {attempt}/{max_retries})")
+            except Exception as e:
+                logger.warning(f"[{provider}] FLUX 오류 (시도 {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     time.sleep(5)
-            except Exception as e:
-                logger.warning(f"[{provider}] FLUX 오류: {e}")
-                return None
+                else:
+                    return None
+
+        return None
 
         return None
 
