@@ -160,9 +160,11 @@ NARRATION_SYSTEM_TIKTOK = """당신은 틱톡 금융 시황 채널의 바이럴 
 이 문제를 해결하기 위해, 아래 규칙을 반드시 지키는 짧고 강렬한 스크립트를 작성합니다.
 
 핵심 원칙:
-- 전체 나래이션 길이(자연스러운 속도로 읽었을 때) = 55초~70초 (기존 90초+에서 단축)
-- 총 5~7개 세그먼트 (기존 8~12개에서 축소 — 세그먼트가 많을수록 늘어지고 이탈 증가)
-- 세그먼트당 나래이션은 8~13초 분량 (약 45~75 음절)
+- 전체 나래이션 길이(자연스러운 속도로 읽었을 때) = 65초~80초
+  (실제 음성 합성은 이보다 빠른 속도로 재생되므로, 목표를 넉넉히 잡아야
+  최종 영상이 60초 미만이 되는 것을 방지할 수 있습니다)
+- 총 6~7개 세그먼트 (기존 8~12개에서 축소하되, 60초 확보를 위해 최소 6개는 유지)
+- 세그먼트당 나래이션은 10~15초 분량 (약 55~85 음절)
 - 나래이션은 자연스러운 구어체, 밝고 빠른 텐션 (문어체·이모지 금지)
 - 블로그의 핵심 내용 중 "가장 임팩트 있는 것"만 우선순위 높게 선별 (전체 요약 금지 — 다 담으려 하지 말 것)
 
@@ -304,7 +306,8 @@ def generate_narration_script_tiktok(
         f"포스팅 모드: {mode_label}\n\n"
         f"블로그 본문 전문:\n{blog_content[:5000]}\n\n"
         "위 내용을 바탕으로 틱톡용 나래이션 스크립트를 JSON으로 작성해주세요.\n"
-        "세그먼트는 5~7개, 전체 길이는 55초~70초여야 합니다.\n"
+        "세그먼트는 6~7개, 전체 길이는 65초~80초여야 합니다 (실제 음성 재생은 "
+        "이보다 빨라지므로 목표를 넉넉히 잡아야 최종 영상이 60초를 넘습니다).\n"
         "블로그의 핵심 내용 중 가장 임팩트 있는 것만 선별하고, 다 담으려 하지 마세요.\n"
         "1번 세그먼트는 반드시 강력한 훅으로 시작해야 합니다 (인사말 절대 금지)."
     )
@@ -383,6 +386,41 @@ def _fallback_hashtags_tiktok(mode: str) -> list[str]:
     else:
         base.append("증시마감")
     return base
+
+
+# ── 1분 미달 시 덧붙이는 참여 유도(좋아요/팔로우/공유) 마무리 세그먼트 ──────
+# generate_narration_script_tiktok()이 만든 스크립트를 다 읽어도 60초에
+# 못 미치면, 내용을 새로 만들지 않고 이 풀에서 순서대로 골라 이어 붙입니다.
+# 매번 같은 문구가 반복되지 않도록 여러 버전을 준비해 두고 필요한 만큼만
+# 사용합니다 (append_engagement_cta_segments 참고).
+_ENGAGEMENT_CTA_POOL = [
+    {"narration": "이 영상이 도움이 되셨다면 좋아요 눌러주세요. 다음 소식도 놓치지 않게 팔로우까지 부탁드려요.",
+     "keyword": "좋아요 부탁", "description": "매일 업데이트되는 시황 브리핑"},
+    {"narration": "주변에 투자 정보가 필요한 분이 있다면 이 영상 공유해주세요. 함께 보면 더 좋아요.",
+     "keyword": "공유하기", "description": "투자 정보가 필요한 분께 공유"},
+    {"narration": "다음 브리핑도 궁금하시다면 리포스트로 저장해두세요. 놓치지 않고 바로 확인하실 수 있어요.",
+     "keyword": "리포스트", "description": "다음 브리핑 놓치지 않기"},
+    {"narration": "매일 새벽 업데이트되는 시황, 팔로우 한 번이면 계속 받아보실 수 있습니다.",
+     "keyword": "팔로우 필수", "description": "매일 업데이트되는 시황 브리핑"},
+]
+
+
+def append_engagement_cta_segments(
+    segments: list[dict], mode: str, count: int = 1
+) -> list[dict]:
+    """
+    engagement CTA 세그먼트를 count개만큼 풀에서 순서대로 골라 뒤에 덧붙입니다.
+    같은 스크립트 안에서 중복 문구가 나오지 않도록 이미 쓰인 인덱스를 건너뜁니다.
+    """
+    if count <= 0:
+        return segments
+
+    extended = list(segments)
+    pool_len = len(_ENGAGEMENT_CTA_POOL)
+    for i in range(count):
+        cta = dict(_ENGAGEMENT_CTA_POOL[i % pool_len])
+        extended.append(cta)
+    return extended
 
 
 def _fallback_script(title: str, mode: str) -> list[dict]:
@@ -1172,6 +1210,12 @@ class VideoGenerator:
           - 세그먼트 간 TTS 이어붙임 gap을 최소화(TTS_GAP_SEC_TIKTOK)해
             음성 끊김 체감 완화
           - 해시태그를 화면에도 표시하고, 대시보드/발행용 콘텐츠에도 반환
+          - [1분 미달 방지] 실제 TTS 합성 결과가 60초 미만이면, 스크립트를
+            처음부터 다시 만들지 않고 "좋아요/팔로우/공유" 유도 세그먼트를
+            뒤에 추가로 이어 붙여 60초를 넘길 때까지 보강합니다(최대 3회 시도).
+            빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
+            끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
+            이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
         """
         theme = THEMES.get(mode, THEMES["morning"])
         kws   = bg_keywords or PEXELS_KEYWORDS.get(mode, PEXELS_KEYWORDS["morning"])
@@ -1192,7 +1236,9 @@ class VideoGenerator:
         if not hashtags:
             hashtags = _fallback_hashtags_tiktok(mode)
 
-        # 이탈률 방지를 위해 세그먼트 수를 강제로도 상한선 적용 (최대 7개)
+        # 이탈률 방지를 위해 세그먼트 수를 강제로도 상한선 적용 (최대 7개).
+        # 단, 이 상한은 "본편" 세그먼트에만 적용 — 60초 미달 시 뒤에 붙는
+        # 참여 유도 CTA 세그먼트는 이 개수에 포함되지 않습니다.
         if len(narration_segments) > 7:
             logger.warning(
                 f"틱톡 세그먼트 {len(narration_segments)}개 → 7개로 축소 (이탈률 방지)"
@@ -1233,85 +1279,146 @@ class VideoGenerator:
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
-            # 3. 각 세그먼트: 젊은 여성 목소리 고정, 시간 제한 없이 모든 세그먼트 처리
+            # 3. 세그먼트 렌더링 (본편 + 필요 시 참여 유도 CTA 추가 보강)
             slide_clips  = []
             tts_segments = []
             current_time = 0.0
-            total        = len(narration_segments)
+            all_segments = list(narration_segments)
+            rendered_count = 0  # all_segments 중 이미 렌더링된 개수
+            cta_rounds = 0
+            MAX_CTA_ROUNDS = 3  # 무한 루프 방지 (최대 3회, 라운드당 1개씩 추가)
 
-            for i, seg in enumerate(narration_segments, 1):
-                narration   = _strip_emoji(seg.get("narration", ""))
-                keyword     = _strip_emoji(seg.get("keyword", "분석"))
-                description = _strip_emoji(seg.get("description", ""))
+            while True:
+                total = len(all_segments)
+                # 아직 렌더링하지 않은 세그먼트만 순서대로 처리
+                for i in range(rendered_count + 1, total + 1):
+                    seg = all_segments[i - 1]
+                    narration   = _strip_emoji(seg.get("narration", ""))
+                    keyword     = _strip_emoji(seg.get("keyword", "분석"))
+                    description = _strip_emoji(seg.get("description", ""))
 
-                is_hook = (i == 1)
-                is_cta  = (i == total)
+                    is_hook = (i == 1)
+                    # 해시태그/CTA 배너는 "현재 라운드의 마지막"이 아니라 "이후에
+                    # CTA가 더 붙을 가능성이 있는지"를 감안해서 판단해야 합니다.
+                    # cta_rounds가 이미 MAX_CTA_ROUNDS에 도달했거나 이번 세그먼트
+                    # 렌더링 후 60초를 넘길 게 확실하지 않다면, 안전하게 "60초를
+                    # 넘긴 이후에 마지막으로 렌더링되는 세그먼트에만" 표시되도록
+                    # 실제 최종 여부는 라운드 종료 후 별도 후처리로 확정합니다.
+                    is_cta  = False  # 아래 최종 후처리 단계에서 마지막 슬라이드에만 다시 그림
 
-                logger.info(
-                    f"[틱톡] 슬라이드 {i}/{total}: [{keyword}] "
-                    f"누적={current_time:.2f}s | {narration[:30]}..."
-                )
+                    logger.info(
+                        f"[틱톡] 슬라이드 {i}/{total}: [{keyword}] "
+                        f"누적={current_time:.2f}s | {narration[:30]}..."
+                    )
 
-                # TTS 생성 — 젊은 여성 목소리, 빠른 속도, 시간 제한 없음
-                tts_path = str(tmp / f"tts_{i:02d}.mp3")
-                tts_ok   = _generate_tts_with_rate(
-                    narration, tts_path, TTS_RATE_TIKTOK,
-                    voice=TTS_VOICE_TIKTOK, pitch=TTS_PITCH_TIKTOK,
-                )
+                    # TTS 생성 — 젊은 여성 목소리, 빠른 속도, 시간 제한 없음
+                    tts_path = str(tmp / f"tts_{i:02d}.mp3")
+                    tts_ok   = _generate_tts_with_rate(
+                        narration, tts_path, TTS_RATE_TIKTOK,
+                        voice=TTS_VOICE_TIKTOK, pitch=TTS_PITCH_TIKTOK,
+                    )
 
-                if tts_ok:
-                    tts_dur = _audio_duration(tts_path)
-                    if tts_dur <= 0:
-                        logger.warning(f"[틱톡] 슬라이드 {i} TTS 길이 0 — 4.0초 fallback")
+                    if tts_ok:
+                        tts_dur = _audio_duration(tts_path)
+                        if tts_dur <= 0:
+                            logger.warning(f"[틱톡] 슬라이드 {i} TTS 길이 0 — 4.0초 fallback")
+                            tts_dur = 4.0
+                            tts_ok  = False
+                    else:
                         tts_dur = 4.0
-                        tts_ok  = False
-                else:
-                    tts_dur = 4.0
-                    logger.warning(f"[틱톡] 슬라이드 {i} TTS 생성 실패 — 4.0초 fallback")
+                        logger.warning(f"[틱톡] 슬라이드 {i} TTS 생성 실패 — 4.0초 fallback")
 
-                # 슬라이드 표시 시간 = TTS 길이 + 최소 여유(gap).
-                # 기존 SLIDE_TAIL_SEC(0.4초)보다 훨씬 좁은 TTS_GAP_SEC_TIKTOK을
-                # 사용해 세그먼트 사이 "말이 끊겼다 다시 시작하는" 체감을 줄임.
-                slide_dur = tts_dur + TTS_GAP_SEC_TIKTOK
+                    # 슬라이드 표시 시간 = TTS 길이 + 최소 여유(gap).
+                    slide_dur = tts_dur + TTS_GAP_SEC_TIKTOK
 
-                # 슬라이드 이미지 생성 (safe_bottom_zone=True — TikTok UI 회피,
-                # 마지막 세그먼트에서만 해시태그 표시)
-                slide_img = _make_slide(
-                    narration, keyword, description,
-                    theme, i, total, bg_img,
-                    is_hook, is_cta,
-                    tts_rate=TTS_RATE_STEPS[0],  # 속도 배지 로직 재사용 안 함(항상 미표시)
-                    safe_bottom_zone=True,
-                    hashtags=hashtags if is_cta else None,
+                    # 슬라이드 이미지 생성 (safe_bottom_zone=True — TikTok UI 회피,
+                    # 마지막 세그먼트에서만 해시태그 표시)
+                    slide_img = _make_slide(
+                        narration, keyword, description,
+                        theme, i, total, bg_img,
+                        is_hook, is_cta,
+                        tts_rate=TTS_RATE_STEPS[0],  # 속도 배지 로직 재사용 안 함(항상 미표시)
+                        safe_bottom_zone=True,
+                        hashtags=hashtags if is_cta else None,
+                    )
+                    img_path  = str(tmp / f"slide_{i:02d}.png")
+                    slide_img.save(img_path, "PNG", optimize=False)
+
+                    # 이미지 → MP4 클립
+                    clip_path = str(tmp / f"clip_{i:02d}.mp4")
+                    _image_to_clip(img_path, slide_dur, clip_path)
+                    slide_clips.append(clip_path)
+
+                    if tts_ok:
+                        # 세그먼트 시작 딜레이도 최소화(0.05초)해 음성 사이 공백 축소
+                        tts_segments.append({
+                            "path":  tts_path,
+                            "start": current_time + 0.05,
+                        })
+
+                    logger.info(
+                        f"  → tts={tts_dur:.2f}s, slide={slide_dur:.2f}s, "
+                        f"누적={current_time + slide_dur:.2f}s"
+                    )
+                    current_time += slide_dur
+
+                rendered_count = total
+
+                # ── 1분 미달 여부 확인 → 미달이면 CTA 세그먼트 1개 추가 후 재시도 ──
+                if current_time >= 60.0:
+                    break
+                if cta_rounds >= MAX_CTA_ROUNDS:
+                    logger.warning(
+                        f"[틱톡] {MAX_CTA_ROUNDS}회 보강 후에도 "
+                        f"{current_time:.2f}초로 1분 미달 — 더 이상 보강하지 않고 종료"
+                    )
+                    break
+
+                cta_rounds += 1
+                logger.warning(
+                    f"[틱톡] 현재 {current_time:.2f}초로 1분 미달 — "
+                    f"참여 유도 CTA 세그먼트 추가 (보강 {cta_rounds}/{MAX_CTA_ROUNDS})"
                 )
-                img_path  = str(tmp / f"slide_{i:02d}.png")
-                slide_img.save(img_path, "PNG", optimize=False)
-
-                # 이미지 → MP4 클립
-                clip_path = str(tmp / f"clip_{i:02d}.mp4")
-                _image_to_clip(img_path, slide_dur, clip_path)
-                slide_clips.append(clip_path)
-
-                if tts_ok:
-                    # 세그먼트 시작 딜레이도 최소화(0.05초)해 음성 사이 공백 축소
-                    tts_segments.append({
-                        "path":  tts_path,
-                        "start": current_time + 0.05,
-                    })
-
-                logger.info(
-                    f"  → tts={tts_dur:.2f}s, slide={slide_dur:.2f}s, "
-                    f"누적={current_time + slide_dur:.2f}s"
-                )
-                current_time += slide_dur
+                all_segments = append_engagement_cta_segments(all_segments, mode, count=1)
 
             if not slide_clips:
                 raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
 
+            # ── 최종 마지막 슬라이드만 is_cta=True로 다시 렌더링 ───────────────
+            # 위 루프에서는 몇 개의 세그먼트가 추가될지 미리 알 수 없어 모든
+            # 세그먼트를 is_cta=False로 그렸습니다. 이제 전체 세그먼트 수가
+            # 확정됐으므로, 실제 마지막 슬라이드(해시태그·CTA 배너가 보여야
+            # 하는 화면)만 다시 그려서 해당 클립 하나만 교체합니다. TTS는
+            # 이미 생성된 것을 재사용하므로 음성/타이밍에는 영향이 없습니다.
+            final_total = len(all_segments)
+            final_seg   = all_segments[-1]
+            final_narration   = _strip_emoji(final_seg.get("narration", ""))
+            final_keyword     = _strip_emoji(final_seg.get("keyword", "분석"))
+            final_description = _strip_emoji(final_seg.get("description", ""))
+
+            final_slide_img = _make_slide(
+                final_narration, final_keyword, final_description,
+                theme, final_total, final_total, bg_img,
+                False, True,  # is_hook=False, is_cta=True
+                tts_rate=TTS_RATE_STEPS[0],
+                safe_bottom_zone=True,
+                hashtags=hashtags,
+            )
+            final_img_path  = str(tmp / f"slide_{final_total:02d}_final.png")
+            final_slide_img.save(final_img_path, "PNG", optimize=False)
+
+            # 마지막 클립의 재생 시간(slide_dur)은 그대로 유지하고 이미지만 교체
+            last_tts_dur = _audio_duration(tts_segments[-1]["path"]) if tts_segments else 4.0
+            last_slide_dur = max(last_tts_dur + TTS_GAP_SEC_TIKTOK, 1.0)
+            final_clip_path = str(tmp / f"clip_{final_total:02d}_final.mp4")
+            _image_to_clip(final_img_path, last_slide_dur, final_clip_path)
+            slide_clips[-1] = final_clip_path
+
             total_duration = current_time
             logger.info(
                 f"[틱톡] 총 영상 길이: {total_duration:.2f}초 "
-                f"({len(slide_clips)}/{total} 슬라이드) "
+                f"({len(slide_clips)}/{final_total} 슬라이드, "
+                f"참여 유도 CTA {cta_rounds}개 추가) "
                 f"— {'✅ 1분 초과' if total_duration >= 60 else '⚠️ 1분 미달'}"
             )
 
