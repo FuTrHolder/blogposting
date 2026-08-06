@@ -175,11 +175,9 @@ function updateKakaoText(kakaoText) {
 document.getElementById("kakao-copy-btn").addEventListener("click", async (e) => {
   const btn = e.target;
   const text = document.getElementById("kakao-text").value;
-  const url = document.getElementById("kakao-blog-url").value;
-  if (!text && !url) return;
-  const combined = url ? `${text}\n\n${url}` : text;
+  if (!text) return;
   try {
-    await navigator.clipboard.writeText(combined);
+    await navigator.clipboard.writeText(text);
     const original = btn.textContent;
     btn.textContent = "복사됨!";
     setTimeout(() => (btn.textContent = original), 1200);
