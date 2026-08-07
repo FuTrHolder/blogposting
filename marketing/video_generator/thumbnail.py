@@ -33,12 +33,15 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "images"
 
-# ── HuggingFace FLUX.1-schnell ────────────────────────────────────────────────
-HF_FLUX_URL = (
-    "https://router.huggingface.co/hf-inference/models/"
-    "black-forest-labs/FLUX.1-schnell"
-)
+# ── HuggingFace FLUX.1-schnell (Inference Providers 경유) ──────────────────
+# raw REST(router.huggingface.co/hf-inference/...)는 hf-inference provider에서
+# FLUX.1-schnell 서빙이 중단(410)된 이후 다른 provider에서도 모델-provider
+# 매핑을 못 찾아 400을 반환합니다. huggingface_hub 라이브러리를 쓰면 이
+# 매핑을 자동으로 처리해주므로 이 방식으로 교체합니다 (image_generator.py와 동일).
+HF_FLUX_PROVIDERS = ["fal-ai", "together", "replicate", "hf-inference"]
+HF_FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
 
+# 모드별(시간대) 기본 프롬프트 접미사
 FLUX_SUFFIX = {
     "morning": (
         ", Wall Street financial district at dawn, calm after market close, "
@@ -51,6 +54,30 @@ FLUX_SUFFIX = {
         "professional financial photography, urgent market atmosphere, "
         "purple and amber color palette, dramatic lighting, 8K resolution, "
         "no text, no watermark, no logo"
+    ),
+}
+
+# ── 채널별 비주얼 톤 접미사 ───────────────────────────────────────────────────
+# 같은 콘텐츠라도 플랫폼 성격에 맞게 배경 분위기를 다르게 생성합니다.
+# FLUX_SUFFIX(시간대)와 조합되어 최종 프롬프트를 구성합니다.
+PLATFORM_STYLE_SUFFIX = {
+    # Facebook: 범용 정보 전달 — 신뢰감 있는 정통 금융 사진 톤 (기본값과 동일)
+    "facebook": "",
+    # Kakao: Facebook과 동일한 범용 톤 재사용
+    "kakao": "",
+    # Instagram: 비주얼 중심 트렌디 플랫폼 — 채도 높고 세련된 편집샷 느낌
+    "instagram": (
+        ", vibrant saturated colors, sleek modern editorial photography style, "
+        "high contrast, trendy aesthetic, glossy finish"
+    ),
+    "instagram_portrait": (
+        ", vibrant saturated colors, sleek modern editorial photography style, "
+        "high contrast, trendy aesthetic, glossy finish"
+    ),
+    # Threads: 텍스트 중심 캐주얼 플랫폼 — 미니멀하고 차분한 스냅샷 톤
+    "threads": (
+        ", minimalist composition, soft natural lighting, candid snapshot feel, "
+        "understated and calm mood, muted tones"
     ),
 }
 
@@ -325,71 +352,87 @@ class SNSThumbnailGenerator:
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
 
-    # ── FLUX.1-schnell 배경 이미지 생성 ──────────────────────────────────────
+    # ── FLUX.1-schnell 배경 이미지 생성 (huggingface_hub 경유, 채널별 스타일) ──
     def _generate_flux_bg(
-        self, prompt: str, mode: str, W: int, H: int, max_retries: int = 3
+        self, prompt: str, mode: str, W: int, H: int,
+        platform: str = "", max_retries: int = 2,
     ) -> Image.Image | None:
         if not self.hf_token:
             logger.info("HF_API_TOKEN 미설정 — FLUX 건너뜀")
             return None
 
-        suffix = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
-        full_prompt = f"{prompt}{suffix}"
+        try:
+            from huggingface_hub import InferenceClient
+            from huggingface_hub.errors import HfHubHTTPError
+        except ImportError:
+            logger.error("huggingface_hub 미설치 — requirements.txt 확인 필요")
+            return None
+
+        mode_suffix     = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
+        platform_suffix = PLATFORM_STYLE_SUFFIX.get(platform, "")
+        full_prompt = f"{prompt}{mode_suffix}{platform_suffix}"
+
+        # 날짜+모드+플랫폼 기반 시드 — 플랫폼마다 살짝 다른 구도의 이미지가
+        # 나오도록 시드를 분리 (동일 시드면 프롬프트만 달라도 구도가 유사해짐)
         seed = int(hashlib.md5(
-            f"{datetime.now().strftime('%Y%m%d')}{mode}".encode()
+            f"{datetime.now().strftime('%Y%m%d')}{mode}{platform}".encode()
         ).hexdigest()[:8], 16) % (2 ** 32)
 
-        payload = {
-            "inputs": full_prompt,
-            "parameters": {
-                "num_inference_steps": 4,
-                "guidance_scale": 0.0,
-                "width": 1024,
-                "height": 1024,   # 정사각형으로 생성 후 각 플랫폼에 맞게 크롭
-                "seed": seed,
-            },
-        }
-        headers = {"Authorization": f"Bearer {self.hf_token}"}
+        logger.info(
+            f"FLUX SNS 배경 생성 중 (모드: {mode}, 채널: {platform or '공용'}, "
+            f"시드: {seed})..."
+        )
 
-        logger.info(f"FLUX SNS 배경 생성 중 (모드: {mode}, 시드: {seed})...")
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                resp = requests.post(
-                    HF_FLUX_URL, headers=headers, json=payload, timeout=60
-                )
-                if resp.status_code == 200 and len(resp.content) > 10_000:
-                    img = Image.open(BytesIO(resp.content)).convert("RGB")
-                    logger.info(f"FLUX SNS 배경 생성 성공: {img.size}")
-                    return img
-
-                elif resp.status_code == 503:
-                    try:
-                        wait = min(resp.json().get("estimated_time", 20), 40)
-                    except Exception:
-                        wait = 20
-                    logger.warning(
-                        f"FLUX 모델 로딩 중 (503) — {wait:.0f}초 대기 "
-                        f"(시도 {attempt}/{max_retries})..."
+        for provider in HF_FLUX_PROVIDERS:
+            client = InferenceClient(provider=provider, api_key=self.hf_token, timeout=60)
+            for attempt in range(1, max_retries + 1):
+                try:
+                    image = client.text_to_image(
+                        full_prompt,
+                        model=HF_FLUX_MODEL,
+                        guidance_scale=0.0,
+                        num_inference_steps=4,
+                        width=1024,
+                        height=1024,  # 정사각형으로 생성 후 각 플랫폼에 맞게 크롭
+                        seed=seed,
                     )
-                    time.sleep(wait)
+                    logger.info(f"[{provider}] FLUX SNS 배경 생성 성공: {image.size}")
+                    return image.convert("RGB")
 
-                elif resp.status_code == 429:
-                    logger.warning("FLUX 요청 한도 초과 (429)")
-                    return None
+                except HfHubHTTPError as e:
+                    status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
+                    msg = str(e)[:150]
 
-                else:
-                    logger.warning(f"FLUX SNS 실패 ({resp.status_code}): {resp.text[:150]}")
-                    return None
+                    if status == 503 or "loading" in msg.lower():
+                        wait = 20
+                        logger.warning(
+                            f"[{provider}] FLUX 모델 로딩 중 (503) — {wait}초 대기 "
+                            f"(시도 {attempt}/{max_retries})..."
+                        )
+                        if attempt < max_retries:
+                            time.sleep(wait)
+                            continue
+                        break
 
-            except requests.exceptions.Timeout:
-                logger.warning(f"FLUX SNS 타임아웃 (시도 {attempt}/{max_retries})")
-                if attempt < max_retries:
-                    time.sleep(5)
-            except Exception as e:
-                logger.warning(f"FLUX SNS 오류: {e}")
-                return None
+                    if status == 429:
+                        logger.warning(f"[{provider}] FLUX 요청 한도 초과 (429)")
+                        break
 
+                    if status in (400, 404, 410):
+                        logger.warning(f"[{provider}] FLUX 모델 미지원 ({status})")
+                        break
+
+                    logger.warning(f"[{provider}] FLUX 실패 ({status}): {msg}")
+                    break
+
+                except Exception as e:
+                    logger.warning(f"[{provider}] FLUX 오류 (시도 {attempt}/{max_retries}): {e}")
+                    if attempt < max_retries:
+                        time.sleep(5)
+                    else:
+                        break
+
+        logger.warning("모든 FLUX provider 실패 — Pexels/Pixabay로 대체")
         return None
 
     # ── Pexels 배경 이미지 ────────────────────────────────────────────────────
@@ -457,10 +500,11 @@ class SNSThumbnailGenerator:
         W: int,
         H: int,
         image_prompt: str = "",
+        platform: str = "",
     ) -> Image.Image | None:
-        # 0순위: FLUX.1-schnell (image_prompt 또는 title 기반)
+        # 0순위: FLUX.1-schnell (image_prompt 또는 title 기반, 채널별 스타일 적용)
         flux_prompt = image_prompt or title
-        img = self._generate_flux_bg(flux_prompt, mode, W, H)
+        img = self._generate_flux_bg(flux_prompt, mode, W, H, platform=platform)
         if img:
             return img
 
@@ -531,35 +575,47 @@ class SNSThumbnailGenerator:
         platform_list = ["facebook", "threads", "instagram", "instagram_portrait", "kakao"]
         paths: dict[str, str] = {}
 
-        # FLUX는 1회 생성해 모든 플랫폼이 공유 (API 호출 최소화)
-        shared_bg: Image.Image | None = None
-        flux_attempted = False
+        # ── 채널별 배경을 "스타일 그룹" 단위로 생성 ──────────────────────────
+        # 플랫폼마다 매번 새로 생성하면 API 호출이 5배로 늘어나므로, 비주얼
+        # 톤이 같은 채널끼리는 배경을 공유하되 톤이 다른 채널은 별도 생성합니다.
+        #   그룹 A "범용/정보 전달": facebook, kakao (기본 톤)
+        #   그룹 B "비주얼/트렌디": instagram, instagram_portrait (채도 높은 편집샷 톤)
+        #   그룹 C "미니멀/캐주얼": threads (차분한 스냅샷 톤)
+        style_groups: dict[str, list[str]] = {
+            "facebook": ["facebook", "kakao"],
+            "instagram": ["instagram", "instagram_portrait"],
+            "threads": ["threads"],
+        }
+        group_bg: dict[str, Image.Image | None] = {}
+
+        for group_key in style_groups:
+            flux_prompt = image_prompt or title
+            bg = self._generate_flux_bg(
+                flux_prompt, mode, W=1024, H=1024, platform=group_key
+            )
+            if not bg:
+                query = self._extract_query(title, mode, content)
+                bg = self._fetch_pexels_bg(query, 1024, 1024)
+                if not bg:
+                    bg = self._fetch_pixabay_bg(query, 1024, 1024)
+            group_bg[group_key] = bg
+            logger.info(
+                f"[{group_key} 그룹] 배경 확보: "
+                f"{'FLUX/스톡 성공' if bg else '실패 → gradient 예정'}"
+            )
+
+        def _group_for(platform: str) -> str:
+            for gkey, members in style_groups.items():
+                if platform in members:
+                    return gkey
+            return "facebook"
 
         for platform in platform_list:
             try:
                 logger.info(f"[{platform}] 썸네일 생성 중...")
                 W, H = _get_platform_size(platform)
 
-                # FLUX 배경은 첫 플랫폼에서 1회만 생성하고 이후 재사용
-                if not flux_attempted:
-                    flux_prompt = image_prompt or title
-                    shared_bg = self._generate_flux_bg(flux_prompt, mode, W=1024, H=1024)
-                    flux_attempted = True
-                    if shared_bg:
-                        logger.info("FLUX 배경 생성 성공 — 전 플랫폼 공유")
-                    else:
-                        logger.info("FLUX 실패 → Pexels/Pixabay로 대체")
-
-                # 배경 확정
-                if shared_bg:
-                    bg_img = shared_bg
-                else:
-                    query  = self._extract_query(title, mode, content)
-                    bg_img = self._fetch_pexels_bg(query, W, H)
-                    if not bg_img:
-                        bg_img = self._fetch_pixabay_bg(query, W, H)
-                    # None이면 _build_thumbnail 내부에서 gradient 사용
-
+                bg_img = group_bg.get(_group_for(platform))
                 img = _build_thumbnail(bg_img, title, mode, platform, date_str, blog_url)
 
                 filename  = f"thumb_{platform}_{mode}_{timestamp}.jpg"
