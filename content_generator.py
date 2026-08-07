@@ -513,6 +513,9 @@ class ContentGenerator:
             raw = self._call_gemini(system, prompt)
             try:
                 post = self._parse_json_response(raw)
+
+                logger.info(post)
+              
                 post = self._strip_image_tags(post)
                 logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
                 logger.info(f"생성된 제목: {post.get('title', '')}")
