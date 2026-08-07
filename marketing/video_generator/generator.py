@@ -96,6 +96,14 @@ PEXELS_KEYWORDS = {
     "evening": ["city night finance", "new york night skyline", "stock exchange night"],
 }
 
+# 틱톡 전용 키워드 — 쇼츠/릴스보다 더 역동적이고 화제성 있는 톤으로 차별화
+# (틱톡은 빠른 스크롤 환경이라 정적인 사무실/야경보다 움직임이 느껴지는
+# 비주얼이 시청 지속률에 유리)
+PEXELS_KEYWORDS_TIKTOK = {
+    "morning": ["stock trading screens closeup", "financial data dashboard dynamic", "trading floor energy"],
+    "evening": ["stock market chart neon", "trading screens night dynamic", "financial data glow"],
+}
+
 # ── 이모지 제거 (한글 보존) ──────────────────────────────────────────────────
 _EMOJI_RE = re.compile(
     "["
@@ -706,6 +714,40 @@ def _draw_outlined(draw, pos, text, font, fill, outline=(0, 0, 0), ow=3):
     draw.text((x, y), text, font=font, fill=fill)
 
 
+def _text_size(draw, text, font) -> tuple[int, int, int]:
+    """
+    텍스트의 (너비, 높이, 상단 오프셋)을 반환합니다.
+    상단 오프셋(bbox[1])은 폰트마다 다른 글리프 상단 여백으로, 이 값을
+    무시하고 y좌표만으로 배치하면 텍스트가 박스 안에서 아래로 치우쳐
+    보이는 원인이 됩니다 (예: 도형 안 키워드 텍스트가 세로 중앙이 아니라
+    아래쪽에 쏠려 보이는 현상). 세로 중앙 정렬 시 이 오프셋을 반드시
+    빼줘야 실제 글리프가 박스 정중앙에 오게 됩니다.
+    """
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width  = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    top_offset = bbox[1]
+    return width, height, top_offset
+
+
+def _draw_text_v_centered(
+    draw, text, font, fill,
+    box_top: int, box_height: int, center_x: int,
+    outline: tuple | None = None, ow: int = 2,
+) -> None:
+    """
+    주어진 박스 영역(box_top ~ box_top+box_height) 안에서 텍스트를 정확히
+    세로 중앙 정렬하고, 가로로는 center_x를 기준으로 가운데 정렬합니다.
+    """
+    width, height, top_offset = _text_size(draw, text, font)
+    x = center_x - width // 2
+    y = box_top + (box_height - height) // 2 - top_offset
+    if outline is not None:
+        _draw_outlined(draw, (x, y), text, font, fill, outline, ow)
+    else:
+        draw.text((x, y), text, font=font, fill=fill)
+
+
 def _make_slide(
     narration: str,
     keyword: str,
@@ -765,7 +807,7 @@ def _make_slide(
     bh    = bb[3] - bb[1] + 22
     draw.rounded_rectangle([(40, 30), (40 + bw, 30 + bh)], radius=bh // 2,
                             fill=(*kw_bg, 230))
-    draw.text((40 + 20, 30 + 11), badge, font=f_badge, fill=kw_fg)
+    _draw_text_v_centered(draw, badge, f_badge, kw_fg, 30, bh, 40 + bw // 2)
 
     # ── 속도 가속 배지 (기본 속도 초과 시에만 표시) ──────────────────────────
     if tts_rate != TTS_RATE_STEPS[0]:
@@ -777,7 +819,10 @@ def _make_slide(
             [(W - 40 - sw, 30), (W - 40, 30 + sh)],
             radius=sh // 2, fill=(255, 80, 80, 200)
         )
-        draw.text((W - 40 - sw + 18, 30 + 9), spd_txt, font=f_badge, fill=(255, 255, 255))
+        _draw_text_v_centered(
+            draw, spd_txt, f_badge, (255, 255, 255),
+            30, sh, W - 40 - sw // 2,
+        )
 
     # ── 훅 / CTA 배너 ────────────────────────────────────────────────────────
     banner_txt = ("오늘의 핵심 분석" if is_hook else "전체 분석 보기" if is_cta else None)
@@ -789,13 +834,11 @@ def _make_slide(
         hy  = 100
         draw.rounded_rectangle([(hx, hy), (hx + hw, hy + hh)],
                                 radius=hh // 2, fill=(*highlight, 240))
-        draw.text((hx + 24, hy + 13), banner_txt, font=f_badge, fill=(20, 20, 20))
+        _draw_text_v_centered(draw, banner_txt, f_badge, (20, 20, 20), hy, hh, CX)
 
     # ── 키워드 강조 박스 (화면 중앙) ─────────────────────────────────────────
     kw_clean = _strip_emoji(keyword)
-    kw_bb    = draw.textbbox((0, 0), kw_clean, font=f_keyword)
-    kw_tw    = kw_bb[2] - kw_bb[0]
-    kw_th    = kw_bb[3] - kw_bb[1]
+    kw_tw, kw_th, _ = _text_size(draw, kw_clean, f_keyword)
     pad_x, pad_y = 60, 28
     kw_box_w = kw_tw + pad_x * 2
     kw_box_h = kw_th + pad_y * 2
@@ -812,16 +855,19 @@ def _make_slide(
         [(kw_x, kw_y), (kw_x + kw_box_w, kw_y + kw_box_h)],
         radius=20, fill=(*kw_bg, 248)
     )
-    # 키워드 텍스트
-    draw.text((CX - kw_tw // 2, kw_y + pad_y), kw_clean, font=f_keyword, fill=kw_fg)
+    # 키워드 텍스트 (박스 안에서 세로·가로 정확히 중앙 정렬)
+    _draw_text_v_centered(draw, kw_clean, f_keyword, kw_fg, kw_y, kw_box_h, CX)
 
     # 하단 장식 라인
     line_y = kw_y + kw_box_h + 18
     draw.rectangle([(CX - 130, line_y), (CX + 130, line_y + 6)], fill=(*highlight, 220))
 
     # ── 부연설명 (키워드 아래) ────────────────────────────────────────────────
+    # 자동 줄바꿈 폭을 화면 폭의 약 78%로 좁혀, 긴 설명도 자연스럽게
+    # 2~3줄로 나뉘어 시각적으로 편안하게 읽히도록 함
     desc_clean  = _strip_emoji(description)
-    desc_lines  = _pixel_wrap(desc_clean, f_desc, WRAP_PX - 80)
+    desc_wrap_px = int(WRAP_PX * 0.78)
+    desc_lines  = _pixel_wrap(desc_clean, f_desc, desc_wrap_px)
     desc_line_h = 60
     desc_y      = line_y + 26
     desc_total  = len(desc_lines) * desc_line_h + 24
@@ -845,6 +891,7 @@ def _make_slide(
     narr_lines  = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 40)[:4]
     narr_line_h = 55
     narr_total  = len(narr_lines) * narr_line_h + 36
+    narr_left_x = 48  # 왼쪽 정렬 시작 x좌표 (배경 패딩 고려)
 
     if safe_bottom_zone:
         # 틱톡 모드: TikTok 자체 UI(계정명·캡션·좋아요/공유 버튼)가 차지하는
@@ -862,9 +909,8 @@ def _make_slide(
 
     ny = narr_y + 6
     for line in narr_lines:
-        lb = draw.textbbox((0, 0), line, font=f_narr)
-        lw = lb[2] - lb[0]
-        _draw_outlined(draw, (CX - lw // 2, ny), line, f_narr, (255, 255, 255), ow=2)
+        # 나래이션은 가독성을 위해 왼쪽 정렬 (기존 가운데 정렬에서 변경)
+        _draw_outlined(draw, (narr_left_x, ny), line, f_narr, (255, 255, 255), ow=2)
         ny += narr_line_h
 
     if safe_bottom_zone:
@@ -1235,7 +1281,8 @@ class VideoGenerator:
             이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
         """
         theme = THEMES.get(mode, THEMES["morning"])
-        kws   = bg_keywords or PEXELS_KEYWORDS.get(mode, PEXELS_KEYWORDS["morning"])
+        # bg_keywords가 명시적으로 전달되지 않았으면 틱톡 전용(더 역동적인) 키워드 사용
+        kws   = bg_keywords or PEXELS_KEYWORDS_TIKTOK.get(mode, PEXELS_KEYWORDS_TIKTOK["morning"])
         out   = os.path.join(self.output_dir, filename)
 
         # 1. 틱톡 전용 나래이션 스크립트 생성 (5~7개 세그먼트 + 해시태그)
@@ -1271,11 +1318,14 @@ class VideoGenerator:
         with tempfile.TemporaryDirectory(prefix="tiktok_v9_") as tmp_s:
             tmp = Path(tmp_s)
 
-            # 2. 배경 이미지 확보 (쇼츠와 동일 로직)
+            # 2. 배경 이미지 확보 (쇼츠와 차별화 — 틱톡은 역동적인 Pexels 배경을
+            #    우선 시도하고, 실패 시에만 쇼츠와 동일한 티스토리 썸네일로 폴백.
+            #    쇼츠(generate())는 반대로 티스토리 썸네일을 최우선으로 씁니다 —
+            #    두 채널이 항상 같은 배경을 쓰지 않도록 우선순위를 분리했습니다.)
             bg_path = tmp / "bg.jpg"
-            bg_ok   = False
+            bg_ok   = _download_bg_pexels(kws, bg_path, self.pexels_key)
 
-            if thumbnail_url:
+            if not bg_ok and thumbnail_url:
                 try:
                     r = requests.get(thumbnail_url, timeout=15,
                                      headers={"User-Agent": "Mozilla/5.0"})
@@ -1283,12 +1333,10 @@ class VideoGenerator:
                     bg_path.write_bytes(r.content)
                     Image.open(bg_path).verify()
                     bg_ok = True
-                    logger.info("틱톡 배경: 티스토리 썸네일 로드 성공")
+                    logger.info("틱톡 배경: 티스토리 썸네일로 폴백")
                 except Exception as e:
                     logger.warning(f"썸네일 로드 실패: {e}")
 
-            if not bg_ok:
-                bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
             if not bg_ok:
                 import hashlib
                 seed  = int(hashlib.md5(f"tiktok{mode}{filename}".encode()).hexdigest()[:8], 16)
