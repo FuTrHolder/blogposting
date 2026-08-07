@@ -25,6 +25,16 @@ GEMINI_MODELS = [
 # 재시도 가능한 HTTP 상태코드 (일시적 서버 오류·과부하 포함)
 _RETRYABLE_CODES = {429, 500, 502, 503, 504}
 
+# Gemini 응답에서 image_prompt 필드가 누락됐을 때 사용할 안전한 기본값
+# (main.py가 post["image_prompt"]로 dict 접근을 하므로, 키 자체가 없으면
+# KeyError로 파이프라인 전체가 죽는 것을 방지)
+FALLBACK_IMAGE_PROMPT = {
+    "morning": "quiet Wall Street financial district after market close, "
+               "calm analytical mood, stock exchange building, soft morning light",
+    "evening": "tense premarket trading floor, New York financial district at night, "
+               "dynamic energetic mood, city skyline with stock market data overlay",
+}
+
 
 def _gemini_url(model: str) -> str:
     return (
@@ -513,13 +523,11 @@ class ContentGenerator:
             raw = self._call_gemini(system, prompt)
             try:
                 post = self._parse_json_response(raw)
-
-                logger.info(post)
-              
                 post = self._strip_image_tags(post)
+                post = self._ensure_required_fields(post, mode)
                 logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
                 logger.info(f"생성된 제목: {post.get('title', '')}")
-                post = self._fact_check_and_correct(post, system, prompt, fact_lookup)
+                post = self._fact_check_and_correct(post, system, prompt, fact_lookup, mode)
                 return post
             except json.JSONDecodeError as e:
                 last_error = e
@@ -539,6 +547,7 @@ class ContentGenerator:
         system: str,
         original_prompt: str,
         fact_lookup: dict | None,
+        mode: str = "morning",
     ) -> dict:
         if not fact_lookup:
             return post
@@ -577,6 +586,7 @@ class ContentGenerator:
             raw2 = self._call_gemini(system, corrected_prompt)
             post2 = self._parse_json_response(raw2)
             post2 = self._strip_image_tags(post2)
+            post2 = self._ensure_required_fields(post2, mode)
         except Exception as e:
             logger.warning(f"팩트체크 재생성 실패(원본 유지): {e}")
             return fact_checker.neutralize_unresolved(post, remaining)
@@ -595,6 +605,46 @@ class ContentGenerator:
             post2 = fact_checker.neutralize_unresolved(post2, remaining2)
 
         return post2
+
+    @staticmethod
+    def _ensure_required_fields(post: dict, mode: str) -> dict:
+        """
+        generate_post()가 반환하기 직전, 파이프라인 뒤쪽(main.py의
+        img_gen.generate(prompt=post["image_prompt"], ...) 등)에서 KeyError로
+        죽지 않도록 필수 필드(title/content/tags/image_prompt)의 존재를
+        보장합니다.
+
+        이 검증이 필요한 이유: JSON 파싱 자체는 성공했더라도(1~3단계 중 하나가
+        유효한 JSON을 반환), Gemini가 응답에서 특정 키를 통째로 빠뜨리는
+        경우가 실제로 발생합니다. 특히 3단계(리터럴 줄바꿈 정규화) 정규식은
+        content 값 안에 콜론(:)이나 따옴표가 포함된 문장이 있으면 필드 경계를
+        잘못 판단해 다음 필드(image_prompt 등)까지 흡수해버릴 수 있어, 결과
+        JSON 자체는 유효하지만 image_prompt 키가 사라진 상태로 파싱될 수
+        있습니다. post["image_prompt"]처럼 dict 접근을 그대로 쓰는 호출부가
+        있으므로, 여기서 항상 안전한 기본값을 채워 KeyError를 원천 차단합니다.
+        """
+        post = dict(post)
+
+        if not post.get("title"):
+            logger.warning("Gemini 응답에 title 필드 누락 — 기본값으로 대체")
+            post["title"] = "미국 증시 브리핑"
+
+        if not post.get("content"):
+            logger.warning("Gemini 응답에 content 필드 누락 — 빈 문자열로 대체")
+            post["content"] = ""
+
+        if not post.get("tags"):
+            logger.warning("Gemini 응답에 tags 필드 누락 — 기본 태그로 대체")
+            post["tags"] = ["미국증시", "주식", "나스닥", "S&P500", "증시분석"]
+
+        if not post.get("image_prompt"):
+            logger.warning(
+                "Gemini 응답에 image_prompt 필드 누락 — 기본 프롬프트로 대체"
+            )
+            default_prompt = FALLBACK_IMAGE_PROMPT.get(mode, FALLBACK_IMAGE_PROMPT["morning"])
+            post["image_prompt"] = default_prompt
+
+        return post
 
     @staticmethod
     def _strip_image_tags(post: dict) -> dict:
@@ -669,16 +719,38 @@ class ContentGenerator:
         # ── 3단계: 줄바꿈/탭 정규화 후 파싱 ────────────────────────────────
         # Gemini가 JSON 문자열 값 안에 리터럴 줄바꿈을 넣는 경우
         # "content": "줄1\n줄2" 가 아니라 "content": "줄1
-        # 줄2" 처럼 생성하는 버그 대응
+        # 줄2" 처럼 생성하는 버그 대응.
+        #
+        # 주의: 이전 버전은 `: "..."(?="[,}])` 형태의 non-greedy 정규식으로
+        # 필드 값의 끝을 판단했는데, content 값 안에 콜론+따옴표가 우연히
+        # 등장하면(예: '9시: "발표"' 같은 인용구) 그 지점에서 필드가 끝났다고
+        # 오판해 뒤따르는 tags/image_prompt 필드까지 content 안으로 흡수해
+        # 통째로 유실시키는 문제가 있었습니다. 알려진 필드 이름(title/content/
+        # tags/image_prompt) 바로 앞에서만 값이 끝난다고 판단하도록 경계
+        # 기준을 명확히 해서 이 문제를 방지합니다.
         try:
-            # JSON 문자열 값 안의 리터럴 줄바꿈을 \\n 으로 치환
-            # (JSON 키-값 구조 바깥의 줄바꿈은 그대로 유지)
-            normalized = re.sub(
-                r'(?<=: ")(.*?)(?="(?:\s*[,}\]]))',
-                lambda m: m.group(0).replace("\n", "\\n").replace("\t", "\\t").replace('"', '\\"'),
-                candidate,
-                flags=re.DOTALL,
+            known_fields = ("title", "content", "tags", "image_prompt")
+            next_field_pattern = "|".join(re.escape(f) for f in known_fields)
+            # 각 "필드": 뒤에 오는 값을, 다음 필드 이름이 나오기 직전까지로 확정
+            field_value_re = re.compile(
+                rf'"({next_field_pattern})"\s*:\s*"(.*?)"\s*(?=,\s*"(?:{next_field_pattern})"\s*:|\s*}})',
+                re.DOTALL,
             )
+
+            def _escape_value(m: "re.Match") -> str:
+                field, value = m.group(1), m.group(2)
+                escaped = (
+                    value.replace("\\", "\\\\")
+                    .replace("\n", "\\n")
+                    .replace("\t", "\\t")
+                    .replace('"', '\\"')
+                )
+                # 위에서 백슬래시를 먼저 이스케이프했으므로, 이미 유효했던
+                # \\n, \\" 같은 시퀀스가 이중 이스케이프되지 않도록 원복
+                escaped = escaped.replace("\\\\n", "\\n").replace('\\\\"', '\\"')
+                return f'"{field}": "{escaped}"'
+
+            normalized = field_value_re.sub(_escape_value, candidate)
             return json.loads(normalized)
         except (json.JSONDecodeError, Exception):
             pass
