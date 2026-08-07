@@ -98,7 +98,7 @@ async function loadContent(postDate, mode) {
       chip.className = "tag-chip";
       chip.textContent = `#${t}`;
       chip.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(`#${t}`);
+        await navigator.clipboard.writeText(t);
         const original = chip.textContent;
         chip.textContent = "복사됨!";
         setTimeout(() => (chip.textContent = original), 1000);
@@ -107,7 +107,7 @@ async function loadContent(postDate, mode) {
     });
   }
   document.getElementById("tags-copy-all-btn").onclick = async () => {
-    await navigator.clipboard.writeText(tags.map((t) => `#${t}`).join(" "));
+    await navigator.clipboard.writeText(tags.join(" "));
     const btn = document.getElementById("tags-copy-all-btn");
     const original = btn.textContent;
     btn.textContent = "복사됨!";
