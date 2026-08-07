@@ -302,7 +302,10 @@ def main():
             filename=tiktok_filename,
             thumbnail_url=post.get("thumbnail_url", ""),
             blog_url=post.get("url", ""),
-            bg_keywords=bg_keywords,
+            # bg_keywords를 쇼츠와 공유하지 않고 비워서, generate_tiktok() 내부의
+            # PEXELS_KEYWORDS_TIKTOK(더 역동적인 톤)이 적용되도록 함 — 채널별
+            # 배경 차별화(쇼츠는 차분한 정보 전달 톤, 틱톡은 화제성 있는 톤)
+            bg_keywords=None,
             blog_content=blog_content,
             blog_title=post_title,
         )
