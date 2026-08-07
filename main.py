@@ -185,7 +185,10 @@ def main():
     img_gen = ImageGenerator(hf_token=os.environ.get("HF_API_TOKEN", ""))
     timestamp = now_kst.strftime("%Y%m%d_%H%M")
     image_path = img_gen.generate(
-        prompt=post["image_prompt"],
+        prompt = post.get("image_prompt") or (
+             "Wall Street skyline, stock market chart, "
+             "modern finance illustration"
+        ),
         filename=f"thumbnail_{mode}_{timestamp}.png",
         content=post["content"],
         mode=mode,
