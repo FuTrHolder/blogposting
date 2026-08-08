@@ -559,19 +559,25 @@ def _fit_tts_to_budget(
     budget_sec: float,
     tmp_dir: Path,
     seg_idx: int,
-) -> tuple[str, float, str]:
+) -> tuple[str | None, float, str]:
     """
     TTS를 생성하고, 길이가 budget_sec을 초과하면 속도를 단계적으로 올려
     budget 안에 들어오도록 재생성합니다.
 
     budget_sec: 이 세그먼트에 허용된 최대 TTS 시간 (슬라이드 tail 제외)
-    반환: (사용된 tts 파일 경로, 실제 tts 길이, 사용된 rate 문자열)
+    반환: (사용된 tts 파일 경로 또는 None, 실제 tts 길이, 사용된 rate 문자열)
 
     - 어떤 속도로도 budget을 맞추지 못하면, 마지막 속도(최고속)로 생성된
       파일을 그대로 반환하고 호출부에서 슬라이드 시간을 TTS 길이에 맞춤
       (절대 음성이 잘리지 않도록 보장).
+    - 5단계 속도를 모두 시도해도 TTS 자체가 실패하면(edge-tts 오류 등)
+      경로로 None을 반환합니다. base_path(아직 생성되지 않은 경로)를 그대로
+      돌려주면 호출부가 이를 실제 존재하는 파일로 착각해 tts_segments에
+      추가하고, 이후 ffmpeg가 없는 파일을 열려다 예외로 전체 영상 생성이
+      실패하는 문제가 있었습니다. None이면 호출부에서 반드시 무음(자막만)
+      슬라이드로 처리해야 합니다.
     """
-    best_path = base_path
+    best_path: str | None = None
     best_dur  = 0.0
     best_rate = TTS_RATE_STEPS[0]
 
@@ -603,8 +609,9 @@ def _fit_tts_to_budget(
             )
 
     if best_dur <= 0:
-        # 모든 시도 실패 → fallback 길이 반환
-        logger.error(f"  [seg {seg_idx}] 모든 TTS 시도 실패 — 4.0초 fallback")
+        # 모든 시도 실패 → 파일 경로 없이 fallback 길이만 반환
+        logger.error(f"  [seg {seg_idx}] 모든 TTS 시도 실패 — 무음 4.0초로 대체")
+        best_path = None
         best_dur  = 4.0
         best_rate = TTS_RATE_STEPS[-1]
 
@@ -1196,7 +1203,9 @@ class VideoGenerator:
                 slide_clips.append(clip_path)
 
                 # TTS 오디오 배치 (슬라이드 시작 후 0.15초 딜레이)
-                if tts_dur > 0:
+                # tts_path가 None이면 모든 속도 시도가 실패한 것이므로
+                # (실제 파일 없음) tts_segments에 추가하지 않고 무음 슬라이드로 둠
+                if tts_path:
                     tts_segments.append({
                         "path":  tts_path,
                         "start": current_time + 0.15,
@@ -1346,6 +1355,7 @@ class VideoGenerator:
 
             # 3. 세그먼트 렌더링 (본편 + 필요 시 참여 유도 CTA 추가 보강)
             slide_clips  = []
+            slide_durs   = []  # slide_clips와 1:1 대응하는 실제 재생 시간(초)
             tts_segments = []
             current_time = 0.0
             all_segments = list(narration_segments)
@@ -1413,6 +1423,7 @@ class VideoGenerator:
                     clip_path = str(tmp / f"clip_{i:02d}.mp4")
                     _image_to_clip(img_path, slide_dur, clip_path)
                     slide_clips.append(clip_path)
+                    slide_durs.append(slide_dur)
 
                     if tts_ok:
                         # 세그먼트 시작 딜레이도 최소화(0.05초)해 음성 사이 공백 축소
@@ -1472,9 +1483,16 @@ class VideoGenerator:
             final_img_path  = str(tmp / f"slide_{final_total:02d}_final.png")
             final_slide_img.save(final_img_path, "PNG", optimize=False)
 
-            # 마지막 클립의 재생 시간(slide_dur)은 그대로 유지하고 이미지만 교체
-            last_tts_dur = _audio_duration(tts_segments[-1]["path"]) if tts_segments else 4.0
-            last_slide_dur = max(last_tts_dur + TTS_GAP_SEC_TIKTOK, 1.0)
+            # 마지막 클립의 재생 시간은 렌더링 당시 계산된 slide_durs[-1]을
+            # 그대로 재사용합니다 (이미지만 교체, 음성 타이밍은 원래 값 유지).
+            #
+            # 주의: 이전 버전은 tts_segments[-1]에서 길이를 다시 구했는데,
+            # 만약 실제 마지막 세그먼트의 TTS 생성이 실패했다면(tts_ok=False)
+            # 그 세그먼트는 tts_segments에 추가되지 않으므로 tts_segments[-1]이
+            # 그 이전(성공한) 세그먼트를 가리키게 되어 재생 시간이 실제 마지막
+            # 슬라이드와 어긋나는 버그가 있었습니다. slide_durs는 성공/실패와
+            # 무관하게 매 세그먼트마다 항상 추가되므로 이 문제가 없습니다.
+            last_slide_dur = slide_durs[-1] if slide_durs else 4.0 + TTS_GAP_SEC_TIKTOK
             final_clip_path = str(tmp / f"clip_{final_total:02d}_final.mp4")
             _image_to_clip(final_img_path, last_slide_dur, final_clip_path)
             slide_clips[-1] = final_clip_path
