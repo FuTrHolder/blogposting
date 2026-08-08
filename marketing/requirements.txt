@@ -9,5 +9,6 @@ imageio-ffmpeg>=0.4.9
 google-api-python-client>=2.100.0
 google-auth>=2.23.0
 google-auth-oauthlib>=1.1.0
+huggingface_hub>=0.28.0
 # TTS (젊은 남성 한국어 음성: ko-KR-InJoonNeural)
 edge-tts>=6.1.9
