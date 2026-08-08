@@ -633,8 +633,8 @@ class ContentGenerator:
             logger.warning("Gemini 응답에 content 필드 누락 — 빈 문자열로 대체")
             post["content"] = ""
 
-        if not post.get("tags"):
-            logger.warning("Gemini 응답에 tags 필드 누락 — 기본 태그로 대체")
+        if not isinstance(post.get("tags"), list) or not post.get("tags"):
+            logger.warning("Gemini 응답에 tags 필드 누락(또는 리스트 아님) — 기본 태그로 대체")
             post["tags"] = ["미국증시", "주식", "나스닥", "S&P500", "증시분석"]
 
         if not post.get("image_prompt"):
