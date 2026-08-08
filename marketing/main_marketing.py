@@ -344,6 +344,7 @@ def main():
             blog_url="seedsup.tistory.com",
             timestamp=timestamp,
             content=content,
+            image_prompt=content.get("thumbnail_prompt", ""),
         )
         logger.info(f"  → 썸네일 {len(thumb_paths)}개 생성 완료")
         state.add_log("THUMBNAILS_GENERATED", f"썸네일 {len(thumb_paths)}개", post_id=post_id)
