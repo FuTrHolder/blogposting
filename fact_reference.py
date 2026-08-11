@@ -306,9 +306,22 @@ def build_fact_reference(
     lines.append("")
 
     if macro_upcoming:
-        lines.append("[다가오는 주요 경제지표/이벤트 발표일]")
+        lines.append("[다가오는 주요 경제지표/이벤트 발표일 — D-day는 포스팅 작성일 기준]")
         for ind in macro_upcoming:
-            lines.append(f"  - {ind['name']}: {', '.join(ind['dates'])}")
+            dated_entries = []
+            for d in ind["dates"]:
+                parsed = _parse_iso(d)
+                if parsed is not None:
+                    delta = (parsed - today).days
+                    dated_entries.append(f"{d} (D{delta:+d})")
+                else:
+                    dated_entries.append(d)
+            lines.append(f"  - {ind['name']}: {', '.join(dated_entries)}")
+        lines.append(
+            "  ※ D+0은 '오늘', D+1은 '내일'을 의미합니다. D+0이 아닌 날짜를 "
+            "'오늘' 또는 '오늘 밤'으로 서술하지 마세요. 날짜와 D-day가 일치하는지 "
+            "반드시 재확인한 뒤 본문에 반영하세요."
+        )
     else:
         lines.append("[다가오는 주요 경제지표/이벤트 발표일] 확인된 항목 없음")
 
