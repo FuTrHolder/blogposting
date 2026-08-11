@@ -141,8 +141,14 @@ def _check_earnings(content: str, earnings_lookup: dict, ref_year: int, source: 
     return violations
 
 
-def _check_macro(content: str, macro_list: list[dict], ref_year: int, source: str) -> list[dict]:
+def _check_macro(
+    content: str, macro_list: list[dict], ref_year: int, source: str,
+    today: date | None = None,
+) -> list[dict]:
     violations = []
+    seen_imminent = set()  # (entity, window) 중복 방지 — 같은 지표의 여러 키워드
+                            # 별칭(예: "PPI"와 "생산자물가지수")이 같은 문장에서
+                            # 동시에 매칭되어 동일 위반이 중복 생성되는 것을 방지
     for ind in macro_list:
         expected_dates = {
             datetime.strptime(d, "%Y-%m-%d").date() for d in ind["dates"]
@@ -166,6 +172,26 @@ def _check_macro(content: str, macro_list: list[dict], ref_year: int, source: st
                                 # (어느 날짜가 맞는지 문맥상 확정이 어려움) 재생성 요청으로 처리
                                 "auto_fixable": False,
                             })
+                elif today is not None and _has_any(window, IMMINENT_WORDS):
+                    # 날짜는 명시하지 않았지만 "오늘/오늘 밤" 등 임박 표현을 썼는데,
+                    # 실제로는 오늘(D+0)에 해당하는 날짜가 expected_dates에 없는 경우
+                    # → "오늘"의 기준점 자체가 잘못됐을 가능성이 높으므로 위반 처리
+                    if today not in expected_dates:
+                        dedup_key = (ind["name"], window.strip())
+                        if dedup_key in seen_imminent:
+                            continue
+                        seen_imminent.add(dedup_key)
+                        nearest = min(expected_dates, key=lambda d: abs((d - today).days))
+                        violations.append({
+                            "type": "macro_implicit_imminent",
+                            "entity": ind["name"],
+                            "symbol": None,
+                            "found_date": None,
+                            "expected_date": nearest.isoformat(),
+                            "context": window.strip(),
+                            "source": source,
+                            "auto_fixable": False,
+                        })
     return violations
 
 
@@ -181,7 +207,12 @@ def check_facts(post: dict, fact_lookup: dict) -> list[dict]:
     if not fact_lookup:
         return []
 
-    ref_year = int(fact_lookup.get("reference_date", str(date.today().year))[:4])
+    reference_date_str = fact_lookup.get("reference_date", str(date.today()))
+    ref_year = int(reference_date_str[:4])
+    try:
+        today = datetime.strptime(reference_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        today = None
 
     violations = []
     for field in ("title", "content"):
@@ -189,7 +220,7 @@ def check_facts(post: dict, fact_lookup: dict) -> list[dict]:
         if not text:
             continue
         violations += _check_earnings(text, fact_lookup.get("earnings", {}), ref_year, source=field)
-        violations += _check_macro(text, fact_lookup.get("macro", []), ref_year, source=field)
+        violations += _check_macro(text, fact_lookup.get("macro", []), ref_year, source=field, today=today)
     return violations
 
 
@@ -273,13 +304,15 @@ def neutralize_unresolved(post: dict, remaining_violations: list[dict]) -> dict:
         if v.get("source") != "content":
             continue  # title은 손대지 않음
 
-        if v["type"] == "earnings_implicit_imminent":
-            for word in IMMINENT_WORDS:
+        if v["type"] in ("earnings_implicit_imminent", "macro_implicit_imminent"):
+            # 긴 표현("오늘 밤")을 짧은 표현("오늘")보다 먼저 시도해야
+            # "오늘 밤" → "추후 밤"처럼 어색하게 부분 치환되는 것을 방지합니다.
+            for word in sorted(IMMINENT_WORDS, key=len, reverse=True):
                 if word in v.get("context", "") and word in content:
                     content = content.replace(word, "추후", 1)
                     logger.warning(
                         f"[팩트체크 최종 안전 대체] '{word}' → '추후' "
-                        f"(근거: {v['entity']} 실적일 불일치, 확인된 날짜: {v['expected_date']})"
+                        f"(근거: {v['entity']} 발표일 불일치, 확인된 날짜: {v['expected_date']})"
                     )
                     break
 
@@ -326,6 +359,16 @@ def build_correction_prompt_note(remaining_violations: list[dict]) -> str:
                 f"시점과 상당한 차이가 있습니다. 이 문장은 삭제하거나, "
                 f"'{v['expected_date']}에 실적 발표가 예정되어 있다' 처럼 "
                 f"사실에 맞게 다시 쓰세요."
+            )
+        elif v["type"] == "macro_implicit_imminent":
+            lines.append(
+                f"- '{v['entity']}'가 마치 오늘/오늘 밤 발표되는 것처럼 서술되어 "
+                f"있으나, 실제로는 오늘이 아닙니다(가장 가까운 예정일: "
+                f"{v['expected_date']}). '오늘'의 기준 날짜 자체를 착각했을 "
+                f"가능성이 높으니, 글 전체에서 '오늘'/'오늘 밤'으로 지칭하는 "
+                f"날짜가 위에 명시된 [분석 기준 시각 - 미국 뉴욕]과 정확히 "
+                f"일치하는지 다시 확인하고, 이 지표는 'D+n일 후 발표 예정'처럼 "
+                f"정확한 시점으로 고쳐 쓰세요."
             )
         elif v["type"] == "macro_explicit_date":
             lines.append(
