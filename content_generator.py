@@ -81,6 +81,12 @@ _MARKDOWN_FORMAT_RULE = """
 
 ⑦ 사진 제공 크레딧(*사진 제공: Pexels* 등)은 별도로 추가하지 않습니다.
    면책 조항 blockquote 하나로 글을 마무리합니다.
+
+⑧ 시장이 상승도 하락도 아닌 애매한 상태를 표현할 때 "혼조" "혼조세"만 반복해서
+   쓰지 말고, "방향성 없이 엇갈린 흐름", "업종별로 희비가 갈리는 모습",
+   "뚜렷한 방향 없이 등락을 거듭", "종목별로 온도차를 보임" 등 다양한 표현을
+   상황에 맞게 섞어 쓰세요. 제목과 본문 안에서도 같은 표현을 두 번 이상
+   반복하지 않도록 주의하세요.
 ────────────────────────────────────────
 """
 
@@ -260,6 +266,25 @@ def _reference_time_block(korean_datetime_str: str, ny_reference_str: str) -> st
     )
 
 
+_MIXED_MARKET_SYNONYMS = [
+    "혼조세를 보였습니다.",
+    "방향성 없이 엇갈린 흐름을 나타냈습니다.",
+    "업종별로 희비가 갈리는 모습이었습니다.",
+    "뚜렷한 방향 없이 등락을 거듭했습니다.",
+    "종목·업종별로 온도차를 보였습니다.",
+]
+
+
+def _pick_mixed_market_phrase(korean_date: str, prefix: str) -> str:
+    """
+    시장이 상승도 하락도 아닌 애매한 상태일 때 쓰는 문구를, 매번 같은 단어
+    ("혼조세")로 고정하지 않고 날짜 기반으로 여러 동의 표현 중 하나를
+    골라 사용합니다 (포스팅마다 표현이 반복되는 것을 완화).
+    """
+    idx = sum(ord(c) for c in korean_date) % len(_MIXED_MARKET_SYNONYMS)
+    return f"{prefix} {_MIXED_MARKET_SYNONYMS[idx]}"
+
+
 def _build_morning_prompt(
     korean_date: str,
     us_market_date: str,
@@ -306,7 +331,7 @@ def _build_morning_prompt(
     hint = (
         "전일 미국 시장은 전반적으로 상승 마감했습니다." if up_count > down_count else
         "전일 미국 시장은 전반적으로 하락 마감했습니다." if down_count > up_count else
-        "전일 미국 시장은 혼조세로 마감했습니다."
+        _pick_mixed_market_phrase(korean_date, "전일 미국 시장은")
     )
 
     fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
@@ -368,7 +393,7 @@ def _build_evening_prompt(
     premarket_hint = (
         "프리마켓은 전반적으로 강세 흐름입니다." if up_count > down_count else
         "프리마켓은 전반적으로 약세 흐름입니다." if down_count > up_count else
-        "프리마켓은 혼조세를 보이고 있습니다."
+        _pick_mixed_market_phrase(korean_date, "프리마켓은")
     )
 
     fact_block_text = f"\n{fact_reference_block}\n" if fact_reference_block else ""
