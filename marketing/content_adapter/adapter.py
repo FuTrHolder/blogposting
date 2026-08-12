@@ -245,9 +245,15 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
         logger.info(f"ContentAdapter: Gemini API 호출 중 (모드: {mode})...")
         result = self._call_gemini(prompt)
 
-        # 필수 필드 보정 (Gemini가 누락할 경우 대비)
-        result.setdefault("blog_title", title)
-        result.setdefault("blog_url", url)
+        # blog_title/blog_url은 Gemini에게 생성을 맡기지 않고 항상 원본 크롤링
+        # 값으로 강제 지정합니다. 한글이 포함된 퍼센트 인코딩 URL을 LLM이
+        # 텍스트로 재출력하는 과정에서 인코딩 바이트가 미묘하게 손상되는
+        # 사례가 있었습니다(예: "앞두고" %EB%91%90 → "앞둠고" %EB%91%A0로
+        # 변형되어 실제 게시물과 다른, 존재하지 않는 링크가 만들어짐).
+        # setdefault는 Gemini가 이미 값을 채운 경우 그 값을 그대로 쓰기
+        # 때문에 이 손상을 막지 못하므로, 항상 덮어써서 원본을 보장합니다.
+        result["blog_title"] = title
+        result["blog_url"] = url
         result.setdefault("mode", mode)
 
         # youtube_script가 없으면 tiktok_script로 대체
