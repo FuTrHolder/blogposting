@@ -206,7 +206,14 @@ NARRATION_SYSTEM_TIKTOK = """당신은 틱톡 금융 시황 채널의 바이럴 
 
 [마지막 세그먼트]
 - 오늘의 핵심을 한 문장으로 강렬하게 정리 + 팔로우/저장 유도
-- "더 궁금하면 팔로우 하세요", "매일 새벽 이 시간에 업데이트됩니다" 같은 재방문 유도 문구 포함
+- 재방문 유도 문구에는 실제 발행 시각을 반영하세요: morning 모드는 "매일 아침
+  9시", evening 모드는 "매일 저녁 9시"(또는 "밤 9시")를 사용하고, "매일 새벽"
+  같은 실제와 다른 시간 표현은 쓰지 마세요
+- 아래처럼 표현을 매번 다르게 바꿔가며 사용하세요 (매 세그먼트 동일 문구 반복 금지)
+  · "더 궁금하면 팔로우 하세요, 매일 아침 9시에 찾아옵니다"
+  · "매일 저녁 9시, 이 계정만 팔로우하면 놓치지 않아요"
+  · "저장해두고 매일 아침 9시에 다시 확인하세요"
+  · "팔로우하면 매일 저녁 9시 시황을 가장 먼저 받아보실 수 있어요"
 
 [해시태그]
 - 검색 유입을 높일 수 있는 한국어 해시태그 4~6개를 hashtags 배열에 제공
@@ -326,9 +333,10 @@ def generate_narration_script_tiktok(
         return _fallback_script_tiktok(title, mode), _fallback_hashtags_tiktok(mode)
 
     mode_label = "전일 마감 리뷰" if mode == "morning" else "프리마켓 & 이슈"
+    post_time_label = "매일 아침 9시" if mode == "morning" else "매일 저녁 9시"
     prompt = (
         f"블로그 제목: {title}\n"
-        f"포스팅 모드: {mode_label}\n\n"
+        f"포스팅 모드: {mode_label} (실제 발행 시각: {post_time_label})\n\n"
         f"블로그 본문 전문:\n{blog_content[:5000]}\n\n"
         "위 내용을 바탕으로 틱톡용 나래이션 스크립트를 JSON으로 작성해주세요.\n"
         "세그먼트는 6~7개, 전체 길이는 65초~80초여야 합니다 (실제 음성 재생은 "
@@ -418,16 +426,20 @@ def _fallback_hashtags_tiktok(mode: str) -> list[str]:
 # 못 미치면, 내용을 새로 만들지 않고 이 풀에서 순서대로 골라 이어 붙입니다.
 # 매번 같은 문구가 반복되지 않도록 여러 버전을 준비해 두고 필요한 만큼만
 # 사용합니다 (append_engagement_cta_segments 참고).
-_ENGAGEMENT_CTA_POOL = [
-    {"narration": "이 영상이 도움이 되셨다면 좋아요 눌러주세요. 다음 소식도 놓치지 않게 팔로우까지 부탁드려요.",
-     "keyword": "좋아요 부탁", "description": "매일 업데이트되는 시황 브리핑"},
-    {"narration": "주변에 투자 정보가 필요한 분이 있다면 이 영상 공유해주세요. 함께 보면 더 좋아요.",
-     "keyword": "공유하기", "description": "투자 정보가 필요한 분께 공유"},
-    {"narration": "다음 브리핑도 궁금하시다면 리포스트로 저장해두세요. 놓치지 않고 바로 확인하실 수 있어요.",
-     "keyword": "리포스트", "description": "다음 브리핑 놓치지 않기"},
-    {"narration": "매일 새벽 업데이트되는 시황, 팔로우 한 번이면 계속 받아보실 수 있습니다.",
-     "keyword": "팔로우 필수", "description": "매일 업데이트되는 시황 브리핑"},
-]
+def _engagement_cta_pool(mode: str) -> list[dict]:
+    """실제 발행 시각(morning=매일 아침 9시, evening=매일 저녁 9시)에 맞춘
+    참여 유도 문구 풀을 반환합니다."""
+    time_label = "매일 아침 9시" if mode == "morning" else "매일 저녁 9시"
+    return [
+        {"narration": "이 영상이 도움이 되셨다면 좋아요 눌러주세요. 다음 소식도 놓치지 않게 팔로우까지 부탁드려요.",
+         "keyword": "좋아요 부탁", "description": f"{time_label}에 업데이트되는 시황 브리핑"},
+        {"narration": "주변에 투자 정보가 필요한 분이 있다면 이 영상 공유해주세요. 함께 보면 더 좋아요.",
+         "keyword": "공유하기", "description": "투자 정보가 필요한 분께 공유"},
+        {"narration": "다음 브리핑도 궁금하시다면 리포스트로 저장해두세요. 놓치지 않고 바로 확인하실 수 있어요.",
+         "keyword": "리포스트", "description": "다음 브리핑 놓치지 않기"},
+        {"narration": f"{time_label}, 이 계정만 팔로우하면 시황을 가장 먼저 받아보실 수 있습니다.",
+         "keyword": "팔로우 필수", "description": f"{time_label}에 업데이트되는 시황 브리핑"},
+    ]
 
 
 def append_engagement_cta_segments(
@@ -440,10 +452,11 @@ def append_engagement_cta_segments(
     if count <= 0:
         return segments
 
+    pool = _engagement_cta_pool(mode)
     extended = list(segments)
-    pool_len = len(_ENGAGEMENT_CTA_POOL)
+    pool_len = len(pool)
     for i in range(count):
-        cta = dict(_ENGAGEMENT_CTA_POOL[i % pool_len])
+        cta = dict(pool[i % pool_len])
         extended.append(cta)
     return extended
 
@@ -490,8 +503,8 @@ def _fallback_script_tiktok(title: str, mode: str) -> list[dict]:
              "keyword": "투자 심리", "description": "공포·탐욕지수 및 시장 심리"},
             {"narration": "내일 시장에서 반드시 체크해야 할 포인트, 미리 정리해드립니다.",
              "keyword": "내일 체크", "description": "다음 거래일 핵심 이벤트"},
-            {"narration": "오늘 핵심은 이것 하나입니다. 더 자세한 분석 궁금하면 팔로우 해주세요.",
-             "keyword": "팔로우", "description": "매일 업데이트되는 시황 브리핑"},
+            {"narration": "오늘 핵심은 이것 하나입니다. 매일 아침 9시에 찾아오니 팔로우 해주세요.",
+             "keyword": "팔로우", "description": "매일 아침 9시 시황 브리핑"},
         ]
     else:
         return [
@@ -505,8 +518,8 @@ def _fallback_script_tiktok(title: str, mode: str) -> list[dict]:
              "keyword": "지표 발표", "description": "오늘 밤 예정된 경제 데이터"},
             {"narration": "연준 인사 발언과 지정학적 리스크까지, 오늘 밤 변수들을 종합했습니다.",
              "keyword": "시장 변수", "description": "오늘 밤 주요 리스크 요인"},
-            {"narration": "오늘 밤 강세일까 약세일까, 핵심만 정리했습니다. 팔로우하면 매일 받아보실 수 있어요.",
-             "keyword": "팔로우", "description": "매일 업데이트되는 시황 브리핑"},
+            {"narration": "오늘 밤 강세일까 약세일까, 핵심만 정리했습니다. 매일 저녁 9시, 팔로우하면 가장 먼저 받아보실 수 있어요.",
+             "keyword": "팔로우", "description": "매일 저녁 9시 시황 브리핑"},
         ]
 
 
