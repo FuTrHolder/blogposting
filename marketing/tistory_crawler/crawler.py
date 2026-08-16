@@ -22,6 +22,7 @@ import json
 import logging
 import hashlib
 import os
+import html as _html_module
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
@@ -37,6 +38,24 @@ KST = timezone(timedelta(hours=9))
 # 오전/저녁 포스팅을 가르는 기준 시각 (KST). 실제 발행은 9시/21시 근처이므로
 # 정오~오후 중 아무 지점이나 기준으로 잡아도 안전하게 갈립니다.
 _MODE_SPLIT_HOUR_KST = 15
+
+
+def _decode_html_entities(text: str) -> str:
+    """
+    RSS 제목/태그 등에 남아있는 HTML 엔티티(&amp; &lt; &#39; 등)를 실제 문자로
+    변환합니다. feedparser가 일반적으로 엔티티를 디코딩하지만, 티스토리 RSS가
+    이중 이스케이프(&amp;amp;)로 내보내는 경우가 있어 완전히 풀릴 때까지
+    반복 적용합니다 (예: "S&amp;P 500" → "S&P 500").
+    이 값이 title/tags에 남아있으면 YouTube 업로드 제목 등 하위 소비처
+    전체에 "&amp;" 같은 깨진 텍스트가 그대로 노출됩니다.
+    """
+    if not text:
+        return text
+    prev = None
+    while prev != text:
+        prev = text
+        text = _html_module.unescape(text)
+    return text
 
 
 @dataclass
@@ -150,10 +169,10 @@ class TistoryCrawler:
 
     def _parse_post(self, entry, post_id: str) -> BlogPost | None:
         """RSS 항목 + 실제 페이지 크롤링으로 BlogPost 생성."""
-        title = entry.get("title", "").strip()
+        title = _decode_html_entities(entry.get("title", "").strip())
         url = entry.get("link", "")
         published = entry.get("published", "")
-        tags = [t.term for t in entry.get("tags", [])]
+        tags = [_decode_html_entities(t.term) for t in entry.get("tags", [])]
 
         if not url:
             return None
