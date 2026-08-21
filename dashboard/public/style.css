@@ -392,9 +392,12 @@ textarea:focus { border-color: var(--amber); }
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  overflow: hidden;
-  padding: 4px;
-  min-height: 558px;
+  overflow: auto;
+  padding: 0;
+  min-height: 280px;
+  height: 550px;
+  max-height: 90vh;
+  resize: vertical;
 }
 .calendar-embed .tradingview-widget-copyright {
   font-size: 11px;
@@ -402,6 +405,152 @@ textarea:focus { border-color: var(--amber); }
   color: var(--text-faint);
 }
 .calendar-embed .tradingview-widget-copyright a { color: var(--text-dim); }
+
+.cal-toolbar,
+.cal-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.cal-filters { margin: -6px 0 10px; }
+.cal-range-btn.active,
+.cal-imp-btn.active {
+  border-color: var(--amber);
+  background: var(--amber-dim);
+  color: var(--amber-strong);
+}
+.cal-imp-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.cal-imp-btn:hover { border-color: var(--border-strong); color: var(--text); }
+.cal-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.calendar-list { padding: 4px 0 8px; }
+.cal-empty {
+  margin: 0;
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.cal-day { padding: 4px 0 10px; }
+.cal-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px 6px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+  border-bottom: 1px solid var(--border);
+}
+.cal-day-date {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.cal-day-wd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+}
+.cal-row {
+  display: grid;
+  grid-template-columns: 58px 42px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cal-row:hover { background: var(--surface-hover); }
+.cal-time {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--amber-strong);
+  padding-top: 2px;
+}
+.cal-imp {
+  display: flex;
+  gap: 3px;
+  padding-top: 6px;
+}
+.cal-imp i {
+  width: 6px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--border-strong);
+  display: block;
+}
+.cal-imp-1 i:nth-child(1) { background: var(--text-faint); }
+.cal-imp-2 i:nth-child(-n+2) { background: var(--morning); }
+.cal-imp-3 i { background: var(--loss); }
+.cal-event { min-width: 0; }
+.cal-event strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+.cal-ccy {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+.cal-nums {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin: 0;
+}
+.cal-nums div {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.cal-nums dt {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+.cal-nums dd {
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.cal-nums dd.is-up { color: var(--gain); }
+.cal-nums dd.is-down { color: var(--loss); }
+
+@media (min-width: 720px) {
+  .cal-row {
+    grid-template-columns: 58px 42px minmax(0, 1.4fr) minmax(160px, 1fr);
+  }
+  .cal-nums { grid-column: auto; }
+}
 
 /* ── 기업 실적 발표 바로가기 ─────────────────────────────────────────────── */
 .cta-link {

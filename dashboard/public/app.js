@@ -432,3 +432,158 @@ updateClock();
 setInterval(updateClock, 1000);
 
 loadTabs();
+initEconomicCalendar();
+
+// ── 미국 경제지표 캘린더 (TradingView 위젯 대체) ────────────────────────────
+
+function initEconomicCalendar() {
+  const list = document.getElementById("cal-list");
+  if (!list) return;
+
+  let days = 7;
+  let imp = "all";
+  let allEvents = [];
+  let source = "";
+
+  document.querySelectorAll(".cal-range-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      days = Number(btn.dataset.days);
+      document.querySelectorAll(".cal-range-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadCalendar();
+    });
+  });
+  const seven = document.querySelector('.cal-range-btn[data-days="7"]');
+  document.querySelectorAll(".cal-range-btn").forEach((b) => b.classList.remove("active"));
+  if (seven) seven.classList.add("active");
+
+  document.querySelectorAll(".cal-imp-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      imp = btn.dataset.imp;
+      document.querySelectorAll(".cal-imp-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      renderCalendar();
+    });
+  });
+
+  async function loadCalendar() {
+    const status = document.getElementById("cal-status");
+    status.textContent = "지표 불러오는 중…";
+    list.innerHTML = '<p class="cal-empty">불러오는 중…</p>';
+    try {
+      const res = await fetch("/api/calendar?days=" + days);
+      const data = await res.json();
+      allEvents = data.events || [];
+      source = data.source || "";
+      document.getElementById("cal-meta").textContent =
+        (data.count || 0) + "건 · " + sourceLabel(source);
+      renderCalendar();
+    } catch (err) {
+      status.textContent = "불러오기 실패: " + err;
+      list.innerHTML = '<p class="cal-empty">캘린더를 불러오지 못했습니다.</p>';
+    }
+  }
+
+  function renderCalendar() {
+    const min = imp === "all" ? 0 : Number(imp);
+    const events = allEvents.filter((e) => (e.importance || 0) >= min);
+    const status = document.getElementById("cal-status");
+    status.textContent =
+      events.length + "개 일정 · 시각은 KST · 패널 하단을 드래그해 높이 조절";
+
+    if (!events.length) {
+      list.innerHTML = '<p class="cal-empty">해당 기간에 미국 지표가 없습니다.</p>';
+      return;
+    }
+
+    const groups = [];
+    const map = new Map();
+    events.forEach((ev) => {
+      const date = ev.date_kst || "미정";
+      if (!map.has(date)) {
+        const g = { date, weekday: ev.weekday_kst || "", items: [] };
+        map.set(date, g);
+        groups.push(g);
+      }
+      map.get(date).items.push(ev);
+    });
+
+    list.innerHTML = groups
+      .map((g) => {
+        const head =
+          '<div class="cal-day-head"><span class="cal-day-date">' +
+          formatKoDate(g.date) +
+          '</span><span class="cal-day-wd">' +
+          (g.weekday ? g.weekday + "요일" : "") +
+          "</span></div>";
+        const rows = g.items.map(eventRowHtml).join("");
+        return '<div class="cal-day">' + head + rows + "</div>";
+      })
+      .join("");
+  }
+
+  function eventRowHtml(ev) {
+    const up = valueClass(ev.actual, ev.forecast);
+    return (
+      '<article class="cal-row imp-' +
+      ev.importance +
+      '">' +
+      '<time class="cal-time">' +
+      esc(ev.time_kst || "—") +
+      "</time>" +
+      '<span class="cal-imp cal-imp-' +
+      ev.importance +
+      '"><i></i><i></i><i></i></span>' +
+      '<div class="cal-event"><strong>' +
+      esc(ev.event) +
+      '</strong><span class="cal-ccy">' +
+      esc(ev.currency || "USD") +
+      "</span></div>" +
+      '<dl class="cal-nums">' +
+      "<div><dt>실제</dt><dd class=\"" +
+      up +
+      '">' +
+      esc(ev.actual || "—") +
+      "</dd></div>" +
+      "<div><dt>예상</dt><dd>" +
+      esc(ev.forecast || "—") +
+      "</dd></div>" +
+      "<div><dt>이전</dt><dd>" +
+      esc(ev.previous || "—") +
+      "</dd></div>" +
+      "</dl></article>"
+    );
+  }
+
+  function formatKoDate(ymd) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+    const p = ymd.split("-");
+    return Number(p[1]) + "월 " + Number(p[2]) + "일";
+  }
+
+  function sourceLabel(src) {
+    if (src.indexOf("investing") !== -1) return "Investing.com KR";
+    if (src.indexOf("forex") !== -1) return "Forex Factory";
+    return "주간 스케줄";
+  }
+
+  function valueClass(actual, forecast) {
+    if (!actual || !forecast) return "";
+    const a = parseFloat(String(actual).replace(/[^0-9.\-]/g, ""));
+    const f = parseFloat(String(forecast).replace(/[^0-9.\-]/g, ""));
+    if (isNaN(a) || isNaN(f)) return "";
+    if (a > f) return "is-up";
+    if (a < f) return "is-down";
+    return "";
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&")
+      .replace(/</g, "<")
+      .replace(/>/g, ">")
+      .replace(/"/g, """);
+  }
+
+  loadCalendar();
+}
