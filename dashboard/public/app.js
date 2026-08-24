@@ -68,7 +68,9 @@ async function loadTabs() {
     posts = await res.json();
 
     if (!Array.isArray(posts)) {
-      throw new Error("포스트 API가 배열 형식의 데이터를 반환하지 않았습니다.");
+      throw new Error(
+        "포스트 API가 배열 형식의 데이터를 반환하지 않았습니다."
+      );
     }
   } catch (err) {
     console.error("포스트 목록 로딩 실패:", err);
@@ -142,7 +144,6 @@ function selectTab(postDate, mode, btn) {
 
   resetPostView();
 
-  // 본문과 마케팅은 독립적으로 로딩
   void loadContent(postDate, mode);
   void loadMarketing(postDate, mode);
 }
@@ -294,12 +295,10 @@ async function loadContent(postDate, mode) {
     postTitle.textContent = title || "제목 없음";
   }
 
-  // 제목을 텍스트 그대로 복사 가능
   if (titleText) {
     titleText.value = title;
   }
 
-  // 본문 HTML 소스 그대로 표시
   if (contentText) {
     contentText.value = content;
   }
@@ -568,7 +567,7 @@ const PLATFORM_LABELS = {
   instagram_reels: "📸 Instagram Reels",
   threads: "🧵 Threads",
   threads_reels: "🧵 Threads Reels",
-  tiktok: "🎵 TikTok",
+  tiktok: "🎵 TikTok"
 };
 
 // ── 마케팅 결과 로딩 ────────────────────────────────────────────────────────
@@ -593,6 +592,7 @@ async function loadMarketing(postDate, mode) {
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
+
       throw new Error(
         body.error || `HTTP ${res.status}`
       );
@@ -1153,7 +1153,7 @@ function updateClock() {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 미국 경제지표 캘린더
-// /api/calendar → Investing.com KR 기반 데이터
+// /api/calendar → Investing.com KR
 // ═════════════════════════════════════════════════════════════════════════════
 
 function initEconomicCalendar() {
@@ -1162,7 +1162,7 @@ function initEconomicCalendar() {
 
   if (!list) {
     console.warn(
-      "경제 캘린더 컨테이너 #cal-list를 찾을 수 없습니다."
+      "[EconomicCalendar] #cal-list를 찾을 수 없습니다."
     );
     return;
   }
@@ -1177,6 +1177,27 @@ function initEconomicCalendar() {
 
   const importanceButtons =
     document.querySelectorAll(".cal-imp-btn");
+
+  // ── 공통 로딩 상태 ───────────────────────────────────────────────────────
+
+  function setLoading(message = "지표 불러오는 중…") {
+    const status =
+      document.getElementById("cal-status");
+
+    const meta =
+      document.getElementById("cal-meta");
+
+    if (status) {
+      status.textContent = message;
+    }
+
+    if (meta) {
+      meta.textContent = "";
+    }
+
+    list.innerHTML =
+      `<p class="cal-empty">${escapeHtml(message)}</p>`;
+  }
 
   // ── 기간 버튼 ─────────────────────────────────────────────────────────────
 
@@ -1236,7 +1257,6 @@ function initEconomicCalendar() {
     });
   });
 
-  // 기본값: 전체
   importanceButtons.forEach((b) =>
     b.classList.remove("active")
   );
@@ -1253,32 +1273,30 @@ function initEconomicCalendar() {
   // ── API 호출 ─────────────────────────────────────────────────────────────
 
   async function loadCalendar() {
-    const status =
-      document.getElementById("cal-status");
-
-    const meta =
-      document.getElementById("cal-meta");
-
-    if (status) {
-      status.textContent =
-        "지표 불러오는 중…";
-    }
-
-    if (meta) {
-      meta.textContent = "";
-    }
-
-    list.innerHTML =
-      '<p class="cal-empty">불러오는 중…</p>';
+    setLoading("지표 불러오는 중…");
 
     try {
+      const url =
+        `/api/calendar?days=${encodeURIComponent(days)}`;
+
+      console.log(
+        "[EconomicCalendar] fetching:",
+        url
+      );
+
       const res =
-        await fetch(
-          `/api/calendar?days=${encodeURIComponent(days)}`,
-          {
-            cache: "no-store"
-          }
-        );
+        await fetch(url, {
+          method: "GET",
+          headers: {
+            Accept: "application/json"
+          },
+          cache: "no-store"
+        });
+
+      console.log(
+        "[EconomicCalendar] HTTP:",
+        res.status
+      );
 
       if (!res.ok) {
         const body =
@@ -1293,23 +1311,48 @@ function initEconomicCalendar() {
       const data =
         await res.json();
 
+      console.log(
+        "[EconomicCalendar] response:",
+        data
+      );
+
+      if (
+        !data ||
+        typeof data !== "object"
+      ) {
+        throw new Error(
+          "경제 캘린더 API 응답이 객체가 아닙니다."
+        );
+      }
+
+      if (
+        !Array.isArray(data.events)
+      ) {
+        throw new Error(
+          "경제 캘린더 API의 events 배열을 찾을 수 없습니다."
+        );
+      }
+
       allEvents =
-        Array.isArray(data.events)
-          ? data.events
-          : [];
+        data.events
+          .filter(Boolean)
+          .filter((event) => {
+            return (
+              !event.currency ||
+              String(event.currency).toUpperCase() === "USD"
+            );
+          });
 
       source =
         data.source || "";
 
-      /*
-       * 백엔드에서 이미 주요 지표 필터와
-       * importance 파싱을 수행하지만,
-       * 프론트에서도 한 번 더 정리하여
-       * 중복 표시를 방지한다.
-       */
-      allEvents = dedupeCalendarEvents(
-        allEvents
-      );
+      allEvents =
+        dedupeCalendarEvents(
+          allEvents
+        );
+
+      const meta =
+        document.getElementById("cal-meta");
 
       if (meta) {
         meta.textContent =
@@ -1317,11 +1360,15 @@ function initEconomicCalendar() {
       }
 
       renderCalendar();
+
     } catch (err) {
       console.error(
-        "경제 캘린더 로딩 실패:",
+        "[EconomicCalendar] 로딩 실패:",
         err
       );
+
+      const status =
+        document.getElementById("cal-status");
 
       if (status) {
         status.textContent =
@@ -1329,33 +1376,58 @@ function initEconomicCalendar() {
       }
 
       list.innerHTML =
-        `<p class="cal-empty">` +
-        `캘린더를 불러오지 못했습니다: ` +
+        `<div class="cal-empty">` +
+        `<strong>경제지표를 불러오지 못했습니다.</strong><br>` +
         `${escapeHtml(String(err.message || err))}` +
-        `</p>`;
+        `<br><br>` +
+        `<button type="button" class="cal-retry-btn">` +
+        `다시 불러오기` +
+        `</button>` +
+        `</div>`;
+
+      const retryButton =
+        list.querySelector(".cal-retry-btn");
+
+      if (retryButton) {
+        retryButton.addEventListener(
+          "click",
+          () => {
+            void loadCalendar();
+          }
+        );
+      }
     }
   }
 
-  // ── 캘린더 중복 제거 ─────────────────────────────────────────────────────
+  // ── 중복 제거 ─────────────────────────────────────────────────────────────
 
   function dedupeCalendarEvents(events) {
     const seen = new Set();
     const result = [];
 
     for (const ev of events) {
-      if (!ev || typeof ev !== "object") {
+      if (
+        !ev ||
+        typeof ev !== "object"
+      ) {
         continue;
       }
 
+      /*
+       * 같은 일정이 Investing.com 데이터에
+       * 중복으로 들어오는 경우 제거한다.
+       *
+       * 실제/예상/이전 값이 업데이트되더라도
+       * 같은 이벤트라면 하나로 처리한다.
+       */
       const key = [
         ev.datetime_utc || "",
         ev.date_kst || "",
         ev.time_kst || "",
         ev.currency || "",
-        ev.event || "",
-        ev.actual || "",
-        ev.forecast || "",
-        ev.previous || ""
+        String(ev.event || "")
+          .trim()
+          .toLowerCase()
       ].join("|");
 
       if (seen.has(key)) {
@@ -1493,29 +1565,64 @@ function initEconomicCalendar() {
   // ── 중요도 정규화 ─────────────────────────────────────────────────────────
 
   function normalizeImportance(value) {
-    /*
-     * Investing / API에서 숫자 또는 문자열로
-     * 전달될 수 있으므로 반드시 숫자로 변환한다.
-     *
-     * 1 = 낮음
-     * 2 = 중간
-     * 3 = 높음
-     */
-
-    const n =
-      Number.parseInt(
-        String(value),
-        10
-      );
-
-    if (!Number.isFinite(n)) {
+    if (
+      value === null ||
+      value === undefined ||
+      value === ""
+    ) {
       return 0;
     }
 
-    if (n < 1) return 0;
-    if (n > 3) return 3;
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value)
+    ) {
+      return Math.max(
+        0,
+        Math.min(3, Math.round(value))
+      );
+    }
 
-    return n;
+    const text =
+      String(value)
+        .trim()
+        .toLowerCase();
+
+    if (
+      text === "high" ||
+      text === "높음" ||
+      text === "3"
+    ) {
+      return 3;
+    }
+
+    if (
+      text === "medium" ||
+      text === "중간" ||
+      text === "2"
+    ) {
+      return 2;
+    }
+
+    if (
+      text === "low" ||
+      text === "낮음" ||
+      text === "1"
+    ) {
+      return 1;
+    }
+
+    const parsed =
+      Number.parseInt(text, 10);
+
+    if (!Number.isFinite(parsed)) {
+      return 0;
+    }
+
+    return Math.max(
+      0,
+      Math.min(3, parsed)
+    );
   }
 
   // ── 일정 행 ───────────────────────────────────────────────────────────────
@@ -1545,6 +1652,8 @@ function initEconomicCalendar() {
 
       '<span class="cal-imp cal-imp-' +
       importance +
+      '" aria-label="중요도 ' +
+      importance +
       '">' +
       "<i></i><i></i><i></i>" +
       "</span>" +
@@ -1570,7 +1679,7 @@ function initEconomicCalendar() {
       up +
       '">' +
       escapeHtml(
-        ev.actual || "—"
+        ev.actual ?? "—"
       ) +
       "</dd>" +
       "</div>" +
@@ -1579,7 +1688,7 @@ function initEconomicCalendar() {
       "<dt>예상</dt>" +
       "<dd>" +
       escapeHtml(
-        ev.forecast || "—"
+        ev.forecast ?? "—"
       ) +
       "</dd>" +
       "</div>" +
@@ -1588,7 +1697,7 @@ function initEconomicCalendar() {
       "<dt>이전</dt>" +
       "<dd>" +
       escapeHtml(
-        ev.previous || "—"
+        ev.previous ?? "—"
       ) +
       "</dd>" +
       "</div>" +
@@ -1631,13 +1740,7 @@ function initEconomicCalendar() {
       return "Investing.com KR";
     }
 
-    if (
-      value.indexOf("forex") !== -1
-    ) {
-      return "Forex Factory";
-    }
-
-    return "주간 스케줄";
+    return "Investing.com KR";
   }
 
   // ── 실제/예상 비교 ────────────────────────────────────────────────────────
@@ -1646,7 +1749,14 @@ function initEconomicCalendar() {
     actual,
     forecast
   ) {
-    if (!actual || !forecast) {
+    if (
+      actual === null ||
+      actual === undefined ||
+      actual === "" ||
+      forecast === null ||
+      forecast === undefined ||
+      forecast === ""
+    ) {
       return "";
     }
 
@@ -1691,22 +1801,77 @@ function initEconomicCalendar() {
 // ── 초기화 ──────────────────────────────────────────────────────────────────
 
 function initDashboard() {
-  updateClock();
+  try {
+    updateClock();
 
-  setInterval(
-    updateClock,
-    1000
-  );
+    setInterval(
+      updateClock,
+      1000
+    );
+  } catch (err) {
+    console.error(
+      "시계 초기화 실패:",
+      err
+    );
+  }
 
-  initThumbnailCopyButton();
-  initKakaoButtons();
-  initMarketingTrigger();
-  initTextCopyButtons();
+  try {
+    initThumbnailCopyButton();
+  } catch (err) {
+    console.error(
+      "썸네일 버튼 초기화 실패:",
+      err
+    );
+  }
+
+  try {
+    initKakaoButtons();
+  } catch (err) {
+    console.error(
+      "카카오 버튼 초기화 실패:",
+      err
+    );
+  }
+
+  try {
+    initMarketingTrigger();
+  } catch (err) {
+    console.error(
+      "마케팅 버튼 초기화 실패:",
+      err
+    );
+  }
+
+  try {
+    initTextCopyButtons();
+  } catch (err) {
+    console.error(
+      "텍스트 복사 버튼 초기화 실패:",
+      err
+    );
+  }
 
   void loadTabs();
 
-  // 경제 캘린더는 포스트 로딩과 독립적으로 실행
-  initEconomicCalendar();
+  try {
+    initEconomicCalendar();
+  } catch (err) {
+    console.error(
+      "경제 캘린더 초기화 실패:",
+      err
+    );
+
+    const list =
+      document.getElementById("cal-list");
+
+    if (list) {
+      list.innerHTML =
+        `<p class="cal-empty">` +
+        `경제 캘린더 초기화 오류: ` +
+        `${escapeHtml(String(err.message || err))}` +
+        `</p>`;
+    }
+  }
 }
 
 if (
