@@ -28,22 +28,26 @@ async function copyImageToClipboard(url) {
     canvas.toBlob(resolve, "image/png")
   );
 
+  if (!pngBlob) {
+    throw new Error("이미지 변환에 실패했습니다.");
+  }
+
   await navigator.clipboard.write([
     new ClipboardItem({ "image/png": pngBlob })
   ]);
 }
 
-// ── HTML Escape ────────────────────────────────────────────────────────────
+// ── HTML Escape ─────────────────────────────────────────────────────────────
 
 function escapeHtml(s) {
-  return String(s)
+  return String(s ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-// ── 탭 로딩 ────────────────────────────────────────────────────────────────
+// ── 탭 로딩 ─────────────────────────────────────────────────────────────────
 
 async function loadTabs() {
   const nav = document.getElementById("tabs");
@@ -52,7 +56,9 @@ async function loadTabs() {
   let posts;
 
   try {
-    const res = await fetch("/api/posts");
+    const res = await fetch("/api/posts", {
+      cache: "no-store"
+    });
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -60,6 +66,10 @@ async function loadTabs() {
     }
 
     posts = await res.json();
+
+    if (!Array.isArray(posts)) {
+      throw new Error("포스트 API가 배열 형식의 데이터를 반환하지 않았습니다.");
+    }
   } catch (err) {
     console.error("포스트 목록 로딩 실패:", err);
 
@@ -76,6 +86,8 @@ async function loadTabs() {
   const tabs = [];
 
   for (const p of posts) {
+    if (!p || !p.post_date || !p.mode) continue;
+
     const key = `${p.post_date}|${p.mode}`;
 
     if (seen.has(key)) continue;
@@ -112,7 +124,7 @@ async function loadTabs() {
   );
 }
 
-// ── 포스트 탭 선택 ─────────────────────────────────────────────────────────
+// ── 포스트 탭 선택 ──────────────────────────────────────────────────────────
 
 function selectTab(postDate, mode, btn) {
   currentDate = postDate;
@@ -135,7 +147,7 @@ function selectTab(postDate, mode, btn) {
   void loadMarketing(postDate, mode);
 }
 
-// ── 탭 전환 시 기존 화면 초기화 ────────────────────────────────────────────
+// ── 탭 전환 시 기존 화면 초기화 ─────────────────────────────────────────────
 
 function resetPostView() {
   const postTitle = document.getElementById("post-title");
@@ -204,7 +216,7 @@ function resetPostView() {
   }
 }
 
-// ── 콘텐츠 로딩 ────────────────────────────────────────────────────────────
+// ── 콘텐츠 로딩 ─────────────────────────────────────────────────────────────
 
 async function loadContent(postDate, mode) {
   const requestId = ++contentRequestId;
@@ -213,7 +225,10 @@ async function loadContent(postDate, mode) {
 
   try {
     const res = await fetch(
-      `/api/posts?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`
+      `/api/posts?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`,
+      {
+        cache: "no-store"
+      }
     );
 
     if (!res.ok) {
@@ -289,16 +304,24 @@ async function loadContent(postDate, mode) {
     contentText.value = content;
   }
 
-  // ── 태그 ────────────────────────────────────────────────────────────────
+  // ── 태그 ─────────────────────────────────────────────────────────────────
 
   let tags = [];
 
   try {
-    tags = JSON.parse(post?.tags || "[]");
+    if (Array.isArray(post?.tags)) {
+      tags = post.tags;
+    } else {
+      tags = JSON.parse(post?.tags || "[]");
+    }
 
     if (!Array.isArray(tags)) {
       tags = [];
     }
+
+    tags = tags
+      .map((tag) => String(tag).trim())
+      .filter(Boolean);
   } catch (e) {
     console.warn("태그 JSON 파싱 실패:", e);
     tags = [];
@@ -353,9 +376,7 @@ async function loadContent(postDate, mode) {
   if (tagsCopyAllBtn) {
     tagsCopyAllBtn.onclick = async () => {
       try {
-        await navigator.clipboard.writeText(
-          tags.join(" ")
-        );
+        await navigator.clipboard.writeText(tags.join(" "));
 
         const original = tagsCopyAllBtn.textContent;
         tagsCopyAllBtn.textContent = "복사됨!";
@@ -369,7 +390,7 @@ async function loadContent(postDate, mode) {
     };
   }
 
-  // ── 썸네일 ──────────────────────────────────────────────────────────────
+  // ── 썸네일 ───────────────────────────────────────────────────────────────
 
   const img = document.getElementById("thumb-img");
   const empty = document.getElementById("thumb-empty");
@@ -425,7 +446,7 @@ async function loadContent(postDate, mode) {
   updateKakaoBlogUrl(currentBlogUrl);
 }
 
-// ── 대표 썸네일 복사 ───────────────────────────────────────────────────────
+// ── 대표 썸네일 복사 ────────────────────────────────────────────────────────
 
 function initThumbnailCopyButton() {
   const thumbCopyButton =
@@ -454,7 +475,7 @@ function initThumbnailCopyButton() {
   });
 }
 
-// ── 카카오스토리채널 ───────────────────────────────────────────────────────
+// ── 카카오스토리채널 ────────────────────────────────────────────────────────
 
 function updateKakaoBlogUrl(blogUrl) {
   const urlInput =
@@ -537,7 +558,7 @@ function initKakaoButtons() {
   }
 }
 
-// ── 마케팅 플랫폼 표시 이름 ───────────────────────────────────────────────
+// ── 마케팅 플랫폼 표시 이름 ─────────────────────────────────────────────────
 
 const PLATFORM_LABELS = {
   youtube: "▶ YouTube",
@@ -550,7 +571,7 @@ const PLATFORM_LABELS = {
   tiktok: "🎵 TikTok",
 };
 
-// ── 마케팅 결과 로딩 ───────────────────────────────────────────────────────
+// ── 마케팅 결과 로딩 ────────────────────────────────────────────────────────
 
 async function loadMarketing(postDate, mode) {
   const grid =
@@ -564,7 +585,10 @@ async function loadMarketing(postDate, mode) {
 
   try {
     const res = await fetch(
-      `/api/marketing?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`
+      `/api/marketing?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`,
+      {
+        cache: "no-store"
+      }
     );
 
     if (!res.ok) {
@@ -882,7 +906,7 @@ async function loadMarketing(postDate, mode) {
   });
 }
 
-// ── 마케팅 워크플로우 ──────────────────────────────────────────────────────
+// ── 마케팅 워크플로우 ───────────────────────────────────────────────────────
 
 const MARKETING_POLL_INTERVAL_MS = 18000;
 const MARKETING_POLL_MAX_TRIES = 20;
@@ -911,7 +935,10 @@ async function pollForMarketingCompletion(
 
     try {
       const res = await fetch(
-        `/api/marketing?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`
+        `/api/marketing?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`,
+        {
+          cache: "no-store"
+        }
       );
 
       results = await res.json();
@@ -953,7 +980,7 @@ async function pollForMarketingCompletion(
   }
 }
 
-// ── 마케팅 실행 버튼 ───────────────────────────────────────────────────────
+// ── 마케팅 실행 버튼 ─────────────────────────────────────────────────────────
 
 function initMarketingTrigger() {
   const triggerButton =
@@ -979,7 +1006,10 @@ function initMarketingTrigger() {
       try {
         const beforeRes =
           await fetch(
-            `/api/marketing?date=${encodeURIComponent(currentDate)}&mode=${encodeURIComponent(currentMode)}`
+            `/api/marketing?date=${encodeURIComponent(currentDate)}&mode=${encodeURIComponent(currentMode)}`,
+            {
+              cache: "no-store"
+            }
           );
 
         const beforeResults =
@@ -1044,7 +1074,7 @@ function initMarketingTrigger() {
   );
 }
 
-// ── 텍스트 복사 버튼 ───────────────────────────────────────────────────────
+// ── 텍스트 복사 버튼 ────────────────────────────────────────────────────────
 
 function initTextCopyButtons() {
   document
@@ -1084,7 +1114,7 @@ function initTextCopyButtons() {
     });
 }
 
-// ── 상단 시계 ──────────────────────────────────────────────────────────────
+// ── 상단 시계 ───────────────────────────────────────────────────────────────
 
 function updateClock() {
   const now = new Date();
@@ -1121,10 +1151,10 @@ function updateClock() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
 // 미국 경제지표 캘린더
 // /api/calendar → Investing.com KR 기반 데이터
-// ═══════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
 
 function initEconomicCalendar() {
   const list =
@@ -1148,13 +1178,17 @@ function initEconomicCalendar() {
   const importanceButtons =
     document.querySelectorAll(".cal-imp-btn");
 
-  // ── 기간 버튼 ────────────────────────────────────────────────────────────
+  // ── 기간 버튼 ─────────────────────────────────────────────────────────────
 
   rangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      const value = Number(btn.dataset.days);
+      const value =
+        Number(btn.dataset.days);
 
-      if (!Number.isFinite(value) || value <= 0) {
+      if (
+        !Number.isFinite(value) ||
+        value <= 0
+      ) {
         return;
       }
 
@@ -1183,7 +1217,7 @@ function initEconomicCalendar() {
     seven.classList.add("active");
   }
 
-  // ── 중요도 버튼 ─────────────────────────────────────────────────────────
+  // ── 중요도 버튼 ───────────────────────────────────────────────────────────
 
   importanceButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1216,7 +1250,7 @@ function initEconomicCalendar() {
     allImportance.classList.add("active");
   }
 
-  // ── API 호출 ────────────────────────────────────────────────────────────
+  // ── API 호출 ─────────────────────────────────────────────────────────────
 
   async function loadCalendar() {
     const status =
@@ -1267,9 +1301,19 @@ function initEconomicCalendar() {
       source =
         data.source || "";
 
+      /*
+       * 백엔드에서 이미 주요 지표 필터와
+       * importance 파싱을 수행하지만,
+       * 프론트에서도 한 번 더 정리하여
+       * 중복 표시를 방지한다.
+       */
+      allEvents = dedupeCalendarEvents(
+        allEvents
+      );
+
       if (meta) {
         meta.textContent =
-          `${data.count || allEvents.length}건 · ${sourceLabel(source)}`;
+          `${allEvents.length}건 · ${sourceLabel(source)}`;
       }
 
       renderCalendar();
@@ -1292,13 +1336,46 @@ function initEconomicCalendar() {
     }
   }
 
-  // ── 캘린더 렌더링 ────────────────────────────────────────────────────────
+  // ── 캘린더 중복 제거 ─────────────────────────────────────────────────────
+
+  function dedupeCalendarEvents(events) {
+    const seen = new Set();
+    const result = [];
+
+    for (const ev of events) {
+      if (!ev || typeof ev !== "object") {
+        continue;
+      }
+
+      const key = [
+        ev.datetime_utc || "",
+        ev.date_kst || "",
+        ev.time_kst || "",
+        ev.currency || "",
+        ev.event || "",
+        ev.actual || "",
+        ev.forecast || "",
+        ev.previous || ""
+      ].join("|");
+
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      result.push(ev);
+    }
+
+    return result;
+  }
+
+  // ── 캘린더 렌더링 ─────────────────────────────────────────────────────────
 
   function renderCalendar() {
     const min =
       imp === "all"
         ? 0
-        : Number(imp);
+        : normalizeImportance(imp);
 
     const events =
       allEvents
@@ -1328,10 +1405,21 @@ function initEconomicCalendar() {
             return da - db;
           }
 
+          const dateCompare =
+            String(
+              a.date_kst || ""
+            ).localeCompare(
+              String(b.date_kst || "")
+            );
+
+          if (dateCompare !== 0) {
+            return dateCompare;
+          }
+
           return String(
-            a.date_kst || ""
+            a.time_kst || ""
           ).localeCompare(
-            String(b.date_kst || "")
+            String(b.time_kst || "")
           );
         });
 
@@ -1402,9 +1490,18 @@ function initEconomicCalendar() {
         .join("");
   }
 
-  // ── 중요도 정규화 ───────────────────────────────────────────────────────
+  // ── 중요도 정규화 ─────────────────────────────────────────────────────────
 
   function normalizeImportance(value) {
+    /*
+     * Investing / API에서 숫자 또는 문자열로
+     * 전달될 수 있으므로 반드시 숫자로 변환한다.
+     *
+     * 1 = 낮음
+     * 2 = 중간
+     * 3 = 높음
+     */
+
     const n =
       Number.parseInt(
         String(value),
@@ -1421,7 +1518,7 @@ function initEconomicCalendar() {
     return n;
   }
 
-  // ── 일정 행 ─────────────────────────────────────────────────────────────
+  // ── 일정 행 ───────────────────────────────────────────────────────────────
 
   function eventRowHtml(ev) {
     const importance =
@@ -1502,7 +1599,7 @@ function initEconomicCalendar() {
     );
   }
 
-  // ── 날짜 ─────────────────────────────────────────────────────────────────
+  // ── 날짜 ──────────────────────────────────────────────────────────────────
 
   function formatKoDate(ymd) {
     if (
@@ -1522,7 +1619,7 @@ function initEconomicCalendar() {
     );
   }
 
-  // ── 출처 ─────────────────────────────────────────────────────────────────
+  // ── 출처 ──────────────────────────────────────────────────────────────────
 
   function sourceLabel(src) {
     const value =
@@ -1543,7 +1640,7 @@ function initEconomicCalendar() {
     return "주간 스케줄";
   }
 
-  // ── 실제/예상 비교 ──────────────────────────────────────────────────────
+  // ── 실제/예상 비교 ────────────────────────────────────────────────────────
 
   function valueClass(
     actual,
@@ -1591,7 +1688,7 @@ function initEconomicCalendar() {
   void loadCalendar();
 }
 
-// ── 초기화 ─────────────────────────────────────────────────────────────────
+// ── 초기화 ──────────────────────────────────────────────────────────────────
 
 function initDashboard() {
   updateClock();
