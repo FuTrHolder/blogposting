@@ -6,6 +6,7 @@ let contentRequestId = 0;
 let marketingRequestId = 0;
 
 // ── 이미지를 실제로 클립보드에 복사 ──────────────────────────────────────────
+
 async function copyImageToClipboard(url) {
   const proxied = `/proxy-image?url=${encodeURIComponent(url)}`;
   const resp = await fetch(proxied);
@@ -30,6 +31,16 @@ async function copyImageToClipboard(url) {
   await navigator.clipboard.write([
     new ClipboardItem({ "image/png": pngBlob })
   ]);
+}
+
+// ── HTML Escape ────────────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // ── 탭 로딩 ────────────────────────────────────────────────────────────────
@@ -101,7 +112,7 @@ async function loadTabs() {
   );
 }
 
-// ── 포스트 탭 선택 → 본문/썸네일/마케팅 동시 로딩 ────────────────────────────
+// ── 포스트 탭 선택 ─────────────────────────────────────────────────────────
 
 function selectTab(postDate, mode, btn) {
   currentDate = postDate;
@@ -119,13 +130,12 @@ function selectTab(postDate, mode, btn) {
 
   resetPostView();
 
-  // 본문과 마케팅은 독립적으로 로딩한다.
-  // 한쪽 API 실패가 다른 쪽 화면을 막지 않도록 한다.
+  // 본문과 마케팅은 독립적으로 로딩
   void loadContent(postDate, mode);
   void loadMarketing(postDate, mode);
 }
 
-// ── 탭 전환 시 기존 화면 초기화 ─────────────────────────────────────────────
+// ── 탭 전환 시 기존 화면 초기화 ────────────────────────────────────────────
 
 function resetPostView() {
   const postTitle = document.getElementById("post-title");
@@ -194,17 +204,7 @@ function resetPostView() {
   }
 }
 
-// ── HTML Escape ────────────────────────────────────────────────────────────
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// ── 콘텐츠(제목 + 본문 + 썸네일 + 태그) 로딩 ─────────────────────────────────
+// ── 콘텐츠 로딩 ────────────────────────────────────────────────────────────
 
 async function loadContent(postDate, mode) {
   const requestId = ++contentRequestId;
@@ -262,11 +262,8 @@ async function loadContent(postDate, mode) {
     return;
   }
 
-  // 빠르게 다른 탭을 클릭했을 때 이전 요청의 늦은 응답이
-  // 현재 선택된 포스트를 덮어쓰지 않도록 방지한다.
   if (requestId !== contentRequestId) return;
 
-  // posts.js의 상세 조회는 SELECT *이므로 blog_url을 그대로 받을 수 있다.
   currentBlogUrl = post?.blog_url || "";
 
   // ── 제목 + 본문 HTML ─────────────────────────────────────────────────────
@@ -278,27 +275,21 @@ async function loadContent(postDate, mode) {
   const title = post?.title || "";
   const content = post?.content || "";
 
-  // 상단 제목 표시
   if (postTitle) {
     postTitle.textContent = title || "제목 없음";
   }
 
-  // 제목 복사용 textarea
+  // 제목을 텍스트 그대로 복사 가능
   if (titleText) {
     titleText.value = title;
   }
 
-  // 본문 HTML 코드 복사용 textarea
-  //
-  // 중요:
-  // innerHTML이 아니라 value를 사용하기 때문에
-  // <h2>, <p>, <strong> 등의 HTML이 실제 HTML로 렌더링되지 않고
-  // HTML 소스 코드 그대로 표시된다.
+  // 본문 HTML 소스 그대로 표시
   if (contentText) {
     contentText.value = content;
   }
 
-  // ── 태그 칩 렌더링 ─────────────────────────────────────────────────────
+  // ── 태그 ────────────────────────────────────────────────────────────────
 
   let tags = [];
 
@@ -431,19 +422,19 @@ async function loadContent(postDate, mode) {
     }
   }
 
-  // ── 카카오스토리채널 박스 갱신 ───────────────────────────────────────────
-
   updateKakaoBlogUrl(currentBlogUrl);
 }
 
 // ── 대표 썸네일 복사 ───────────────────────────────────────────────────────
 
-const thumbCopyButton =
-  document.getElementById("thumb-copy-btn");
+function initThumbnailCopyButton() {
+  const thumbCopyButton =
+    document.getElementById("thumb-copy-btn");
 
-if (thumbCopyButton) {
+  if (!thumbCopyButton) return;
+
   thumbCopyButton.addEventListener("click", async (e) => {
-    const btn = e.target;
+    const btn = e.currentTarget;
 
     if (!currentThumbnailUrl) return;
 
@@ -463,7 +454,7 @@ if (thumbCopyButton) {
   });
 }
 
-// ── 카카오스토리채널 박스 ─────────────────────────────────────────────────
+// ── 카카오스토리채널 ───────────────────────────────────────────────────────
 
 function updateKakaoBlogUrl(blogUrl) {
   const urlInput =
@@ -486,62 +477,64 @@ function updateKakaoText(kakaoText) {
   }
 }
 
-const kakaoCopyButton =
-  document.getElementById("kakao-copy-btn");
+function initKakaoButtons() {
+  const kakaoCopyButton =
+    document.getElementById("kakao-copy-btn");
 
-if (kakaoCopyButton) {
-  kakaoCopyButton.addEventListener("click", async (e) => {
-    const btn = e.target;
+  if (kakaoCopyButton) {
+    kakaoCopyButton.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
 
-    const textarea =
-      document.getElementById("kakao-text");
+      const textarea =
+        document.getElementById("kakao-text");
 
-    const text = textarea?.value || "";
+      const text = textarea?.value || "";
 
-    if (!text) return;
+      if (!text) return;
 
-    try {
-      await navigator.clipboard.writeText(text);
+      try {
+        await navigator.clipboard.writeText(text);
 
-      const original = btn.textContent;
-      btn.textContent = "복사됨!";
+        const original = btn.textContent;
+        btn.textContent = "복사됨!";
 
-      setTimeout(() => {
-        btn.textContent = original;
-      }, 1200);
-    } catch (err) {
-      console.error("카카오 본문 복사 실패:", err);
-    }
-  });
-}
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 1200);
+      } catch (err) {
+        console.error("카카오 본문 복사 실패:", err);
+      }
+    });
+  }
 
-const kakaoUrlCopyButton =
-  document.getElementById("kakao-url-copy-btn");
+  const kakaoUrlCopyButton =
+    document.getElementById("kakao-url-copy-btn");
 
-if (kakaoUrlCopyButton) {
-  kakaoUrlCopyButton.addEventListener("click", async (e) => {
-    const btn = e.target;
+  if (kakaoUrlCopyButton) {
+    kakaoUrlCopyButton.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
 
-    const input =
-      document.getElementById("kakao-blog-url");
+      const input =
+        document.getElementById("kakao-blog-url");
 
-    const url = input?.value || "";
+      const url = input?.value || "";
 
-    if (!url) return;
+      if (!url) return;
 
-    try {
-      await navigator.clipboard.writeText(url);
+      try {
+        await navigator.clipboard.writeText(url);
 
-      const original = btn.textContent;
-      btn.textContent = "복사됨!";
+        const original = btn.textContent;
+        btn.textContent = "복사됨!";
 
-      setTimeout(() => {
-        btn.textContent = original;
-      }, 1200);
-    } catch (err) {
-      console.error("카카오 URL 복사 실패:", err);
-    }
-  });
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 1200);
+      } catch (err) {
+        console.error("카카오 URL 복사 실패:", err);
+      }
+    });
+  }
 }
 
 // ── 마케팅 플랫폼 표시 이름 ───────────────────────────────────────────────
@@ -609,8 +602,6 @@ async function loadMarketing(postDate, mode) {
 
   grid.innerHTML = "";
 
-  // ── 카카오 결과 ─────────────────────────────────────────────────────────
-
   const kakaoResult =
     results.find((r) => r.platform === "kakao");
 
@@ -629,8 +620,6 @@ async function loadMarketing(postDate, mode) {
 
     return;
   }
-
-  // ── 플랫폼별 카드 ───────────────────────────────────────────────────────
 
   results.forEach((r) => {
     if (r.platform === "kakao") return;
@@ -656,8 +645,6 @@ async function loadMarketing(postDate, mode) {
       PLATFORM_LABELS[r.platform] ||
       r.platform;
 
-    // GitHub Release URL은 직접 로드 시
-    // 리다이렉트/CORS 문제가 발생할 수 있으므로 이미지에 한해 proxy 사용
     const proxyUrl = (url) =>
       url
         ? `/proxy-image?url=${encodeURIComponent(url)}`
@@ -668,7 +655,7 @@ async function loadMarketing(postDate, mode) {
     if (r.video_url) {
       mediaHtml = `
         <video
-          src="${r.video_url}"
+          src="${escapeHtml(r.video_url)}"
           controls
           playsinline
         ></video>
@@ -676,7 +663,7 @@ async function loadMarketing(postDate, mode) {
         <div class="btn-row">
           <a
             class="copy-btn"
-            href="${r.video_url}"
+            href="${escapeHtml(r.video_url)}"
             download
           >
             ⬇ 영상 다운로드
@@ -708,14 +695,14 @@ async function loadMarketing(postDate, mode) {
         <div class="btn-row">
           <button
             class="copy-btn"
-            data-copy-img="${r.thumbnail_url}"
+            data-copy-img="${escapeHtml(r.thumbnail_url)}"
           >
             이미지 복사
           </button>
 
           <a
             class="copy-btn"
-            href="${r.thumbnail_url}"
+            href="${escapeHtml(r.thumbnail_url)}"
             download
           >
             다운로드
@@ -723,8 +710,6 @@ async function loadMarketing(postDate, mode) {
         </div>
       `;
     }
-
-    // ── TikTok 안내 ────────────────────────────────────────────────────────
 
     const tiktokGuideHtml =
       isTiktok
@@ -765,7 +750,7 @@ async function loadMarketing(postDate, mode) {
         : "";
 
     card.innerHTML = `
-      <h3>${platformLabel}</h3>
+      <h3>${escapeHtml(platformLabel)}</h3>
 
       <span class="status-badge ${statusClass}">
         ${escapeHtml(r.status || "-")}
@@ -783,7 +768,7 @@ async function loadMarketing(postDate, mode) {
         !isTiktok && r.url
           ? `
             <a
-              href="${r.url}"
+              href="${escapeHtml(r.url)}"
               target="_blank"
               rel="noopener"
             >
@@ -813,13 +798,20 @@ async function loadMarketing(postDate, mode) {
             <textarea
               rows="4"
               readonly
-            >${escapeHtml(r.content_text)}</textarea>
+            ></textarea>
           `
           : ""
       }
     `;
 
-    // ── 캡션 복사 ─────────────────────────────────────────────────────────
+    if (r.content_text) {
+      const textarea =
+        card.querySelector("textarea");
+
+      if (textarea) {
+        textarea.value = r.content_text;
+      }
+    }
 
     const textBtn =
       card.querySelector("[data-copy-text]");
@@ -857,8 +849,6 @@ async function loadMarketing(postDate, mode) {
       );
     }
 
-    // ── 썸네일 이미지 복사 ─────────────────────────────────────────────────
-
     const imgBtn =
       card.querySelector("[data-copy-img]");
 
@@ -892,7 +882,7 @@ async function loadMarketing(postDate, mode) {
   });
 }
 
-// ── 마케팅 워크플로우 트리거 + 완료 후 자동 새로고침 ─────────────────────────
+// ── 마케팅 워크플로우 ──────────────────────────────────────────────────────
 
 const MARKETING_POLL_INTERVAL_MS = 18000;
 const MARKETING_POLL_MAX_TRIES = 20;
@@ -965,10 +955,12 @@ async function pollForMarketingCompletion(
 
 // ── 마케팅 실행 버튼 ───────────────────────────────────────────────────────
 
-const triggerButton =
-  document.getElementById("trigger-btn");
+function initMarketingTrigger() {
+  const triggerButton =
+    document.getElementById("trigger-btn");
 
-if (triggerButton) {
+  if (!triggerButton) return;
+
   triggerButton.addEventListener(
     "click",
     async () => {
@@ -982,7 +974,6 @@ if (triggerButton) {
           "마케팅 워크플로우 실행 요청 중...";
       }
 
-      // 트리거 직전 성공 건수
       let previousCount = 0;
 
       try {
@@ -1029,7 +1020,7 @@ if (triggerButton) {
               "(완료되면 자동으로 새로고침됩니다)";
           }
 
-          pollForMarketingCompletion(
+          void pollForMarketingCompletion(
             currentDate,
             currentMode,
             previousCount
@@ -1053,45 +1044,47 @@ if (triggerButton) {
   );
 }
 
-// ── 텍스트 복사 버튼 (제목/본문) ─────────────────────────────────────────────
+// ── 텍스트 복사 버튼 ───────────────────────────────────────────────────────
 
-document
-  .querySelectorAll(".copy-btn[data-target]")
-  .forEach((btn) => {
-    btn.addEventListener(
-      "click",
-      async () => {
-        const target =
-          document.getElementById(
-            btn.dataset.target
-          );
+function initTextCopyButtons() {
+  document
+    .querySelectorAll(".copy-btn[data-target]")
+    .forEach((btn) => {
+      btn.addEventListener(
+        "click",
+        async () => {
+          const target =
+            document.getElementById(
+              btn.dataset.target
+            );
 
-        if (!target) return;
+          if (!target) return;
 
-        try {
-          await navigator.clipboard.writeText(
-            target.value
-          );
+          try {
+            await navigator.clipboard.writeText(
+              target.value
+            );
 
-          const original =
-            btn.textContent;
+            const original =
+              btn.textContent;
 
-          btn.textContent = "복사됨!";
+            btn.textContent = "복사됨!";
 
-          setTimeout(() => {
-            btn.textContent = original;
-          }, 1200);
-        } catch (err) {
-          console.error(
-            "텍스트 복사 실패:",
-            err
-          );
+            setTimeout(() => {
+              btn.textContent = original;
+            }, 1200);
+          } catch (err) {
+            console.error(
+              "텍스트 복사 실패:",
+              err
+            );
+          }
         }
-      }
-    );
-  });
+      );
+    });
+}
 
-// ── 상단 시계 (KST / ET) ────────────────────────────────────────────────────
+// ── 상단 시계 ──────────────────────────────────────────────────────────────
 
 function updateClock() {
   const now = new Date();
@@ -1128,100 +1121,117 @@ function updateClock() {
   }
 }
 
-updateClock();
-setInterval(updateClock, 1000);
-
-loadTabs();
-initEconomicCalendar();
-
-// ── 미국 경제지표 캘린더 ───────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 미국 경제지표 캘린더
+// /api/calendar → Investing.com KR 기반 데이터
+// ═══════════════════════════════════════════════════════════════════════════
 
 function initEconomicCalendar() {
   const list =
     document.getElementById("cal-list");
 
-  if (!list) return;
+  if (!list) {
+    console.warn(
+      "경제 캘린더 컨테이너 #cal-list를 찾을 수 없습니다."
+    );
+    return;
+  }
 
   let days = 7;
   let imp = "all";
   let allEvents = [];
   let source = "";
 
-  document
-    .querySelectorAll(".cal-range-btn")
-    .forEach((btn) => {
-      btn.addEventListener(
-        "click",
-        () => {
-          days =
-            Number(btn.dataset.days);
+  const rangeButtons =
+    document.querySelectorAll(".cal-range-btn");
 
-          document
-            .querySelectorAll(
-              ".cal-range-btn"
-            )
-            .forEach((b) =>
-              b.classList.remove(
-                "active"
-              )
-            );
+  const importanceButtons =
+    document.querySelectorAll(".cal-imp-btn");
 
-          btn.classList.add("active");
+  // ── 기간 버튼 ────────────────────────────────────────────────────────────
 
-          loadCalendar();
-        }
+  rangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const value = Number(btn.dataset.days);
+
+      if (!Number.isFinite(value) || value <= 0) {
+        return;
+      }
+
+      days = value;
+
+      rangeButtons.forEach((b) =>
+        b.classList.remove("active")
       );
+
+      btn.classList.add("active");
+
+      void loadCalendar();
     });
+  });
 
   const seven =
     document.querySelector(
       '.cal-range-btn[data-days="7"]'
     );
 
-  document
-    .querySelectorAll(".cal-range-btn")
-    .forEach((b) =>
-      b.classList.remove("active")
-    );
+  rangeButtons.forEach((b) =>
+    b.classList.remove("active")
+  );
 
   if (seven) {
     seven.classList.add("active");
   }
 
-  document
-    .querySelectorAll(".cal-imp-btn")
-    .forEach((btn) => {
-      btn.addEventListener(
-        "click",
-        () => {
-          imp = btn.dataset.imp;
+  // ── 중요도 버튼 ─────────────────────────────────────────────────────────
 
-          document
-            .querySelectorAll(
-              ".cal-imp-btn"
-            )
-            .forEach((b) =>
-              b.classList.remove(
-                "active"
-              )
-            );
+  importanceButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const value =
+        btn.dataset.imp || "all";
 
-          btn.classList.add("active");
+      imp = value;
 
-          renderCalendar();
-        }
+      importanceButtons.forEach((b) =>
+        b.classList.remove("active")
       );
+
+      btn.classList.add("active");
+
+      renderCalendar();
     });
+  });
+
+  // 기본값: 전체
+  importanceButtons.forEach((b) =>
+    b.classList.remove("active")
+  );
+
+  const allImportance =
+    document.querySelector(
+      '.cal-imp-btn[data-imp="all"]'
+    );
+
+  if (allImportance) {
+    allImportance.classList.add("active");
+  }
+
+  // ── API 호출 ────────────────────────────────────────────────────────────
 
   async function loadCalendar() {
     const status =
-      document.getElementById(
-        "cal-status"
-      );
+      document.getElementById("cal-status");
+
+    const meta =
+      document.getElementById("cal-meta");
 
     if (status) {
       status.textContent =
         "지표 불러오는 중…";
+    }
+
+    if (meta) {
+      meta.textContent = "";
     }
 
     list.innerHTML =
@@ -1230,42 +1240,59 @@ function initEconomicCalendar() {
     try {
       const res =
         await fetch(
-          "/api/calendar?days=" +
-          days
+          `/api/calendar?days=${encodeURIComponent(days)}`,
+          {
+            cache: "no-store"
+          }
         );
+
+      if (!res.ok) {
+        const body =
+          await res.json().catch(() => ({}));
+
+        throw new Error(
+          body.error ||
+          `HTTP ${res.status}`
+        );
+      }
 
       const data =
         await res.json();
 
       allEvents =
-        data.events || [];
+        Array.isArray(data.events)
+          ? data.events
+          : [];
 
       source =
         data.source || "";
 
-      const meta =
-        document.getElementById(
-          "cal-meta"
-        );
-
       if (meta) {
         meta.textContent =
-          (data.count || 0) +
-          "건 · " +
-          sourceLabel(source);
+          `${data.count || allEvents.length}건 · ${sourceLabel(source)}`;
       }
 
       renderCalendar();
     } catch (err) {
+      console.error(
+        "경제 캘린더 로딩 실패:",
+        err
+      );
+
       if (status) {
         status.textContent =
-          "불러오기 실패: " + err;
+          "불러오기 실패";
       }
 
       list.innerHTML =
-        '<p class="cal-empty">캘린더를 불러오지 못했습니다.</p>';
+        `<p class="cal-empty">` +
+        `캘린더를 불러오지 못했습니다: ` +
+        `${escapeHtml(String(err.message || err))}` +
+        `</p>`;
     }
   }
+
+  // ── 캘린더 렌더링 ────────────────────────────────────────────────────────
 
   function renderCalendar() {
     const min =
@@ -1274,25 +1301,51 @@ function initEconomicCalendar() {
         : Number(imp);
 
     const events =
-      allEvents.filter(
-        (e) =>
-          (e.importance || 0) >= min
-      );
+      allEvents
+        .filter((e) => {
+          const importance =
+            normalizeImportance(
+              e.importance
+            );
+
+          return importance >= min;
+        })
+        .sort((a, b) => {
+          const da =
+            Date.parse(
+              a.datetime_utc || ""
+            );
+
+          const db =
+            Date.parse(
+              b.datetime_utc || ""
+            );
+
+          if (
+            Number.isFinite(da) &&
+            Number.isFinite(db)
+          ) {
+            return da - db;
+          }
+
+          return String(
+            a.date_kst || ""
+          ).localeCompare(
+            String(b.date_kst || "")
+          );
+        });
 
     const status =
-      document.getElementById(
-        "cal-status"
-      );
+      document.getElementById("cal-status");
 
     if (status) {
       status.textContent =
-        events.length +
-        "개 일정 · 시각은 KST · 패널 하단을 드래그해 높이 조절";
+        `${events.length}개 일정 · 시각은 KST`;
     }
 
     if (!events.length) {
       list.innerHTML =
-        '<p class="cal-empty">해당 기간에 미국 지표가 없습니다.</p>';
+        '<p class="cal-empty">해당 기간에 미국 주요 지표가 없습니다.</p>';
 
       return;
     }
@@ -1349,7 +1402,33 @@ function initEconomicCalendar() {
         .join("");
   }
 
+  // ── 중요도 정규화 ───────────────────────────────────────────────────────
+
+  function normalizeImportance(value) {
+    const n =
+      Number.parseInt(
+        String(value),
+        10
+      );
+
+    if (!Number.isFinite(n)) {
+      return 0;
+    }
+
+    if (n < 1) return 0;
+    if (n > 3) return 3;
+
+    return n;
+  }
+
+  // ── 일정 행 ─────────────────────────────────────────────────────────────
+
   function eventRowHtml(ev) {
+    const importance =
+      normalizeImportance(
+        ev.importance
+      );
+
     const up =
       valueClass(
         ev.actual,
@@ -1358,7 +1437,7 @@ function initEconomicCalendar() {
 
     return (
       '<article class="cal-row imp-' +
-      ev.importance +
+      importance +
       '">' +
 
       '<time class="cal-time">' +
@@ -1368,7 +1447,7 @@ function initEconomicCalendar() {
       "</time>" +
 
       '<span class="cal-imp cal-imp-' +
-      ev.importance +
+      importance +
       '">' +
       "<i></i><i></i><i></i>" +
       "</span>" +
@@ -1376,7 +1455,7 @@ function initEconomicCalendar() {
       '<div class="cal-event">' +
       "<strong>" +
       escapeHtml(
-        ev.event
+        ev.event || "미정"
       ) +
       "</strong>" +
       '<span class="cal-ccy">' +
@@ -1423,6 +1502,8 @@ function initEconomicCalendar() {
     );
   }
 
+  // ── 날짜 ─────────────────────────────────────────────────────────────────
+
   function formatKoDate(ymd) {
     if (
       !/^\d{4}-\d{2}-\d{2}$/.test(ymd)
@@ -1441,21 +1522,28 @@ function initEconomicCalendar() {
     );
   }
 
+  // ── 출처 ─────────────────────────────────────────────────────────────────
+
   function sourceLabel(src) {
+    const value =
+      String(src || "").toLowerCase();
+
     if (
-      src.indexOf("investing") !== -1
+      value.indexOf("investing") !== -1
     ) {
       return "Investing.com KR";
     }
 
     if (
-      src.indexOf("forex") !== -1
+      value.indexOf("forex") !== -1
     ) {
       return "Forex Factory";
     }
 
     return "주간 스케줄";
   }
+
+  // ── 실제/예상 비교 ──────────────────────────────────────────────────────
 
   function valueClass(
     actual,
@@ -1482,8 +1570,8 @@ function initEconomicCalendar() {
       );
 
     if (
-      isNaN(a) ||
-      isNaN(f)
+      Number.isNaN(a) ||
+      Number.isNaN(f)
     ) {
       return "";
     }
@@ -1499,5 +1587,39 @@ function initEconomicCalendar() {
     return "";
   }
 
-  loadCalendar();
+  // 최초 로딩
+  void loadCalendar();
+}
+
+// ── 초기화 ─────────────────────────────────────────────────────────────────
+
+function initDashboard() {
+  updateClock();
+
+  setInterval(
+    updateClock,
+    1000
+  );
+
+  initThumbnailCopyButton();
+  initKakaoButtons();
+  initMarketingTrigger();
+  initTextCopyButtons();
+
+  void loadTabs();
+
+  // 경제 캘린더는 포스트 로딩과 독립적으로 실행
+  initEconomicCalendar();
+}
+
+if (
+  document.readyState === "loading"
+) {
+  document.addEventListener(
+    "DOMContentLoaded",
+    initDashboard,
+    { once: true }
+  );
+} else {
+  initDashboard();
 }
