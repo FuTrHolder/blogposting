@@ -546,38 +546,38 @@ function initEconomicCalendar() {
       .join("");
   }
 
-  function eventRowHtml(ev) {
-    const up = valueClass(ev.actual, ev.forecast);
-    return (
-      '<article class="cal-row imp-' +
-      ev.importance +
-      '">' +
-      '<time class="cal-time">' +
-      esc(ev.time_kst || "—") +
-      "</time>" +
-      '<span class="cal-imp cal-imp-' +
-      ev.importance +
-      '"><i></i><i></i><i></i></span>' +
-      '<div class="cal-event"><strong>' +
-      esc(ev.event) +
-      '</strong><span class="cal-ccy">' +
-      esc(ev.currency || "USD") +
-      "</span></div>" +
-      '<dl class="cal-nums">' +
-      "<div><dt>실제</dt><dd class=\"" +
-      up +
-      '">' +
-      esc(ev.actual || "—") +
-      "</dd></div>" +
-      "<div><dt>예상</dt><dd>" +
-      esc(ev.forecast || "—") +
-      "</dd></div>" +
-      "<div><dt>이전</dt><dd>" +
-      esc(ev.previous || "—") +
-      "</dd></div>" +
-      "</dl></article>"
-    );
-  }
+function eventRowHtml(ev) {
+  const up = valueClass(ev.actual, ev.forecast);
+  return (
+    '<article class="cal-row imp-' +
+    ev.importance +
+    '">' +
+    '<time class="cal-time">' +
+    escapeHtml(ev.time_kst || "—") +
+    "</time>" +
+    '<span class="cal-imp cal-imp-' +
+    ev.importance +
+    '"><i></i><i></i><i></i></span>' +
+    '<div class="cal-event"><strong>' +
+    escapeHtml(ev.event) +
+    '</strong><span class="cal-ccy">' +
+    escapeHtml(ev.currency || "USD") +
+    "</span></div>" +
+    '<dl class="cal-nums">' +
+    "<div><dt>실제</dt><dd class=\"" +
+    up +
+    '">' +
+    escapeHtml(ev.actual || "—") +
+    "</dd></div>" +
+    "<div><dt>예상</dt><dd>" +
+    escapeHtml(ev.forecast || "—") +
+    "</dd></div>" +
+    "<div><dt>이전</dt><dd>" +
+    escapeHtml(ev.previous || "—") +
+    "</dd></div>" +
+    "</dl></article>"
+  );
+}
 
   function formatKoDate(ymd) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
@@ -601,13 +601,7 @@ function initEconomicCalendar() {
     return "";
   }
 
-  function esc(s) {
-    return String(s)
-      .replace(/&/g, "&")
-      .replace(/</g, "<")
-      .replace(/>/g, ">")
-      .replace(/"/g, """);
-  }
+
 
   loadCalendar();
 }
