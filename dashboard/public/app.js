@@ -20,11 +20,24 @@ async function copyImageToClipboard(url) {
 }
 
 // ── 탭 로딩 ────────────────────────────────────────────────────────────────
-
+ 
 async function loadTabs() {
-  const res = await fetch("/api/posts");
-  const posts = await res.json();
-
+  const nav = document.getElementById("tabs");
+ 
+  let posts;
+  try {
+    const res = await fetch("/api/posts");
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    posts = await res.json();
+  } catch (err) {
+    console.error("포스트 목록 로딩 실패:", err);
+    nav.innerHTML = `<span class="muted" style="padding:8px 16px;">포스트 목록을 불러오지 못했습니다: ${escapeHtml(String(err.message || err))} (콘솔 로그 확인)</span>`;
+    return;
+  }
+ 
   const seen = new Set();
   const tabs = [];
   for (const p of posts) {
@@ -33,15 +46,14 @@ async function loadTabs() {
     seen.add(key);
     tabs.push(p);
   }
-
-  const nav = document.getElementById("tabs");
+ 
   nav.innerHTML = "";
-
+ 
   if (tabs.length === 0) {
     nav.innerHTML = '<span class="muted" style="padding:8px 16px;">아직 등록된 포스트가 없습니다.</span>';
     return;
   }
-
+ 
   tabs.forEach((t, i) => {
     const btn = document.createElement("button");
     btn.className = "tab-btn" + (i === 0 ? " active" : "");
@@ -49,35 +61,38 @@ async function loadTabs() {
     btn.onclick = () => selectTab(t.post_date, t.mode, btn);
     nav.appendChild(btn);
   });
-
+ 
   selectTab(tabs[0].post_date, tabs[0].mode, nav.querySelector(".tab-btn"));
 }
-
-function selectTab(postDate, mode, btnEl) {
-  currentDate = postDate;
-  currentMode = mode;
-
-  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-  if (btnEl) btnEl.classList.add("active");
-
-  loadContent(postDate, mode);
-  loadMarketing(postDate, mode);
+ 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // ── 콘텐츠(본문 + 썸네일 + 태그) 로딩 ─────────────────────────────────────────
-
-let currentBlogUrl = "";
-
+ 
 async function loadContent(postDate, mode) {
-  const res = await fetch(`/api/posts?date=${postDate}&mode=${mode}`);
-  const post = await res.json();
-
-  document.getElementById("post-title").textContent = post
-    ? `${postDate} ${mode}`
-    : "콘텐츠 없음";
-  document.getElementById("title-text").value = post?.title || "";
-  document.getElementById("content-text").value = post?.content || "";
-  currentBlogUrl = post?.blog_url || "";
+  let post;
+  try {
+    const res = await fetch(`/api/posts?date=${postDate}&mode=${mode}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    post = await res.json();
+  } catch (err) {
+    console.error("포스트 본문 로딩 실패:", err);
+    document.getElementById("post-title").textContent = "불러오기 실패";
+    document.getElementById("title-text").value = "";
+    document.getElementById("content-text").value = `에러: ${err.message || err}`;
+    document.getElementById("tags-chips").innerHTML = "";
+    document.getElementById("tags-empty").hidden = false;
+    return;
+  }
 
   // ── 태그 칩 렌더링 ─────────────────────────────────────────────────────
   let tags = [];
@@ -114,17 +129,15 @@ async function loadContent(postDate, mode) {
     setTimeout(() => (btn.textContent = original), 1200);
   };
 
-  // ── 썸네일 ────────────────────────────────────────────────────────────
+// ── 썸네일 ────────────────────────────────────────────────────────────
   const img = document.getElementById("thumb-img");
   const empty = document.getElementById("thumb-empty");
   const downloadLink = document.getElementById("thumb-download-link");
   const copyBtn = document.getElementById("thumb-copy-btn");
-
+ 
   currentThumbnailUrl = post?.thumbnail_url || "";
-
+ 
   if (currentThumbnailUrl) {
-    // GitHub Release 자산은 리다이렉트+CORS 문제로 <img>에서 직접 로드 불가.
-    // /proxy-image 를 통해 same-origin으로 우회해서 표시.
     img.src = `/proxy-image?url=${encodeURIComponent(currentThumbnailUrl)}`;
     img.hidden = false;
     empty.hidden = true;
@@ -210,21 +223,32 @@ const PLATFORM_LABELS = {
   tiktok:           "🎵 TikTok",
 };
 
+// ── 마케팅 결과 로딩 ─────────────────────────────────────────────────────────
+ 
 async function loadMarketing(postDate, mode) {
-  const res = await fetch(`/api/marketing?date=${postDate}&mode=${mode}`);
-  const results = await res.json();
-
   const grid = document.getElementById("marketing-grid");
+ 
+  let results;
+  try {
+    const res = await fetch(`/api/marketing?date=${postDate}&mode=${mode}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    results = await res.json();
+  } catch (err) {
+    console.error("마케팅 결과 로딩 실패:", err);
+    grid.innerHTML = `<p class="muted">마케팅 결과를 불러오지 못했습니다: ${escapeHtml(String(err.message || err))}</p>`;
+    return;
+  }
+ 
   grid.innerHTML = "";
-
-  // ── 카카오 박스: main_marketing.py가 kakao_post 캡션을 platform="kakao",
-  //    status="skip"으로 marketing_results에 명시적으로 저장해둡니다
-  //    (실제 발행 API는 없지만 대시보드 상단 박스에서 수동 복사용으로 표시).
+ 
   const kakaoResult = results.find((r) => r.platform === "kakao");
   if (kakaoResult && kakaoResult.content_text) {
     updateKakaoText(kakaoResult.content_text);
   }
-
+ 
   if (!results || results.length === 0) {
     grid.innerHTML = '<p class="muted">아직 마케팅 결과가 없습니다.</p>';
     return;

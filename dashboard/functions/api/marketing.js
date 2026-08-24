@@ -10,13 +10,24 @@ export async function onRequestGet(context) {
     return json({ error: "date, mode는 필수입니다." }, 400);
   }
 
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM marketing_results WHERE post_date = ?1 AND mode = ?2 ORDER BY platform ASC`
-  )
-    .bind(postDate, mode)
-    .all();
+  try {
+    if (!env.DB) {
+      return json(
+        { error: "D1 바인딩(DB)이 설정되지 않았습니다. Cloudflare Pages > Settings > Functions > D1 database bindings를 확인하세요." },
+        500
+      );
+    }
 
-  return json(results);
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM marketing_results WHERE post_date = ?1 AND mode = ?2 ORDER BY platform ASC`
+    )
+      .bind(postDate, mode)
+      .all();
+
+    return json(results);
+  } catch (err) {
+    return json({ error: String(err) }, 500);
+  }
 }
 
 function json(body, status = 200) {
