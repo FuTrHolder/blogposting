@@ -16,7 +16,6 @@ jobs:
   morning-post:
     name: "📊 오전 포스팅 (전일 마감 리뷰)"
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'morning')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -55,7 +54,6 @@ jobs:
   evening-post:
     name: "🌙 저녁 포스팅 (프리마켓 & 당일 이슈)"
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.post_mode == 'evening')
     runs-on: ubuntu-latest
     timeout-minutes: 15
