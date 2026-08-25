@@ -1158,11 +1158,11 @@ function updateClock() {
 
 function initEconomicCalendar() {
   const list =
-    document.getElementById("cal-list");
+    document.getElementById("economic-calendar-list");
 
   if (!list) {
     console.warn(
-      "[EconomicCalendar] #cal-list를 찾을 수 없습니다."
+      "[EconomicCalendar] #economic-calendar-list를 찾을 수 없습니다."
     );
     return;
   }
@@ -1178,28 +1178,38 @@ function initEconomicCalendar() {
   const importanceButtons =
     document.querySelectorAll(".cal-imp-btn");
 
-  // ── 공통 로딩 상태 ───────────────────────────────────────────────────────
+  const rangeLabel =
+    document.getElementById("calendar-range-label");
 
-  function setLoading(message = "지표 불러오는 중…") {
-    const status =
-      document.getElementById("cal-status");
+  const countLabel =
+    document.getElementById("calendar-count");
 
-    const meta =
-      document.getElementById("cal-meta");
+  const updatedLabel =
+    document.getElementById("calendar-updated");
 
-    if (status) {
-      status.textContent = message;
+  // ── 로딩 상태 ────────────────────────────────────────────────────────────
+
+  function setLoading(message = "경제지표를 불러오는 중…") {
+    if (rangeLabel) {
+      rangeLabel.textContent = message;
     }
 
-    if (meta) {
-      meta.textContent = "";
+    if (countLabel) {
+      countLabel.textContent = "-";
+    }
+
+    if (updatedLabel) {
+      updatedLabel.textContent = "업데이트 대기";
     }
 
     list.innerHTML =
-      `<p class="cal-empty">${escapeHtml(message)}</p>`;
+      `<div class="calendar-loading">` +
+      `<span class="calendar-spinner"></span>` +
+      `${escapeHtml(message)}` +
+      `</div>`;
   }
 
-  // ── 기간 버튼 ─────────────────────────────────────────────────────────────
+  // ── 기간 버튼 ────────────────────────────────────────────────────────────
 
   rangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1215,9 +1225,9 @@ function initEconomicCalendar() {
 
       days = value;
 
-      rangeButtons.forEach((b) =>
-        b.classList.remove("active")
-      );
+      rangeButtons.forEach((b) => {
+        b.classList.remove("active");
+      });
 
       btn.classList.add("active");
 
@@ -1225,31 +1235,32 @@ function initEconomicCalendar() {
     });
   });
 
-  const seven =
+  // 기본 7일 선택
+  rangeButtons.forEach((b) => {
+    b.classList.remove("active");
+  });
+
+  const sevenButton =
     document.querySelector(
       '.cal-range-btn[data-days="7"]'
     );
 
-  rangeButtons.forEach((b) =>
-    b.classList.remove("active")
-  );
-
-  if (seven) {
-    seven.classList.add("active");
+  if (sevenButton) {
+    sevenButton.classList.add("active");
   }
 
-  // ── 중요도 버튼 ───────────────────────────────────────────────────────────
+  // ── 중요도 버튼 ──────────────────────────────────────────────────────────
 
   importanceButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       const value =
-        btn.dataset.imp || "all";
+        btn.dataset.importance || "all";
 
       imp = value;
 
-      importanceButtons.forEach((b) =>
-        b.classList.remove("active")
-      );
+      importanceButtons.forEach((b) => {
+        b.classList.remove("active");
+      });
 
       btn.classList.add("active");
 
@@ -1257,13 +1268,13 @@ function initEconomicCalendar() {
     });
   });
 
-  importanceButtons.forEach((b) =>
-    b.classList.remove("active")
-  );
+  importanceButtons.forEach((b) => {
+    b.classList.remove("active");
+  });
 
   const allImportance =
     document.querySelector(
-      '.cal-imp-btn[data-imp="all"]'
+      '.cal-imp-btn[data-importance="all"]'
     );
 
   if (allImportance) {
@@ -1273,7 +1284,7 @@ function initEconomicCalendar() {
   // ── API 호출 ─────────────────────────────────────────────────────────────
 
   async function loadCalendar() {
-    setLoading("지표 불러오는 중…");
+    setLoading("경제지표를 불러오는 중…");
 
     try {
       const url =
@@ -1325,14 +1336,13 @@ function initEconomicCalendar() {
         );
       }
 
-      if (
-        !Array.isArray(data.events)
-      ) {
+      if (!Array.isArray(data.events)) {
         throw new Error(
           "경제 캘린더 API의 events 배열을 찾을 수 없습니다."
         );
       }
 
+      // USD만 표시
       allEvents =
         data.events
           .filter(Boolean)
@@ -1346,17 +1356,48 @@ function initEconomicCalendar() {
       source =
         data.source || "";
 
+      // 중복 제거
       allEvents =
-        dedupeCalendarEvents(
-          allEvents
-        );
+        dedupeCalendarEvents(allEvents);
 
-      const meta =
-        document.getElementById("cal-meta");
+      // 상단 표시
+      if (rangeLabel) {
+        if (data.from && data.to) {
+          rangeLabel.textContent =
+            `${data.from} ~ ${data.to}`;
+        } else {
+          rangeLabel.textContent =
+            `${days}일`;
+        }
+      }
 
-      if (meta) {
-        meta.textContent =
-          `${allEvents.length}건 · ${sourceLabel(source)}`;
+      if (countLabel) {
+        countLabel.textContent =
+          `${allEvents.length}건`;
+      }
+
+      if (updatedLabel) {
+        const fetchedAt =
+          data.fetched_at
+            ? new Date(data.fetched_at)
+            : null;
+
+        if (
+          fetchedAt &&
+          !Number.isNaN(fetchedAt.getTime())
+        ) {
+          updatedLabel.textContent =
+            `업데이트 ${fetchedAt.toLocaleTimeString(
+              "ko-KR",
+              {
+                hour: "2-digit",
+                minute: "2-digit"
+              }
+            )}`;
+        } else {
+          updatedLabel.textContent =
+            "업데이트 완료";
+        }
       }
 
       renderCalendar();
@@ -1367,18 +1408,28 @@ function initEconomicCalendar() {
         err
       );
 
-      const status =
-        document.getElementById("cal-status");
-
-      if (status) {
-        status.textContent =
+      if (rangeLabel) {
+        rangeLabel.textContent =
           "불러오기 실패";
+      }
+
+      if (countLabel) {
+        countLabel.textContent =
+          "-";
+      }
+
+      if (updatedLabel) {
+        updatedLabel.textContent =
+          "업데이트 실패";
       }
 
       list.innerHTML =
         `<div class="cal-empty">` +
-        `<strong>경제지표를 불러오지 못했습니다.</strong><br>` +
-        `${escapeHtml(String(err.message || err))}` +
+        `<strong>경제지표를 불러오지 못했습니다.</strong>` +
+        `<br>` +
+        `${escapeHtml(
+          String(err.message || err)
+        )}` +
         `<br><br>` +
         `<button type="button" class="cal-retry-btn">` +
         `다시 불러오기` +
@@ -1413,13 +1464,6 @@ function initEconomicCalendar() {
         continue;
       }
 
-      /*
-       * 같은 일정이 Investing.com 데이터에
-       * 중복으로 들어오는 경우 제거한다.
-       *
-       * 실제/예상/이전 값이 업데이트되더라도
-       * 같은 이벤트라면 하나로 처리한다.
-       */
       const key = [
         ev.datetime_utc || "",
         ev.date_kst || "",
@@ -1495,12 +1539,14 @@ function initEconomicCalendar() {
           );
         });
 
-    const status =
-      document.getElementById("cal-status");
+    if (rangeLabel) {
+      rangeLabel.textContent =
+        `${days}일`;
+    }
 
-    if (status) {
-      status.textContent =
-        `${events.length}개 일정 · 시각은 KST`;
+    if (countLabel) {
+      countLabel.textContent =
+        `${events.length}건`;
     }
 
     if (!events.length) {
@@ -1518,15 +1564,15 @@ function initEconomicCalendar() {
         ev.date_kst || "미정";
 
       if (!map.has(date)) {
-        const g = {
+        const group = {
           date,
           weekday:
             ev.weekday_kst || "",
           items: []
         };
 
-        map.set(date, g);
-        groups.push(g);
+        map.set(date, group);
+        groups.push(group);
       }
 
       map.get(date).items.push(ev);
@@ -1534,29 +1580,31 @@ function initEconomicCalendar() {
 
     list.innerHTML =
       groups
-        .map((g) => {
+        .map((group) => {
           const head =
-            '<div class="cal-day-head">' +
-            '<span class="cal-day-date">' +
-            formatKoDate(g.date) +
-            "</span>" +
-            '<span class="cal-day-wd">' +
-            (g.weekday
-              ? g.weekday + "요일"
-              : "") +
-            "</span>" +
-            "</div>";
+            `<div class="cal-day-head">` +
+            `<span class="cal-day-date">` +
+            `${formatKoDate(group.date)}` +
+            `</span>` +
+            `<span class="cal-day-wd">` +
+            `${
+              group.weekday
+                ? `${escapeHtml(group.weekday)}요일`
+                : ""
+            }` +
+            `</span>` +
+            `</div>`;
 
           const rows =
-            g.items
+            group.items
               .map(eventRowHtml)
               .join("");
 
           return (
-            '<div class="cal-day">' +
+            `<div class="cal-day">` +
             head +
             rows +
-            "</div>"
+            `</div>`
           );
         })
         .join("");
@@ -1640,71 +1688,52 @@ function initEconomicCalendar() {
       );
 
     return (
-      '<article class="cal-row imp-' +
-      importance +
-      '">' +
+      `<article class="cal-row imp-${importance}">` +
 
-      '<time class="cal-time">' +
-      escapeHtml(
-        ev.time_kst || "—"
-      ) +
-      "</time>" +
+      `<time class="cal-time">` +
+      `${escapeHtml(ev.time_kst || "—")}` +
+      `</time>` +
 
-      '<span class="cal-imp cal-imp-' +
-      importance +
-      '" aria-label="중요도 ' +
-      importance +
-      '">' +
-      "<i></i><i></i><i></i>" +
-      "</span>" +
+      `<span class="cal-imp cal-imp-${importance}" ` +
+      `aria-label="중요도 ${importance}">` +
+      `<i></i><i></i><i></i>` +
+      `</span>` +
 
-      '<div class="cal-event">' +
-      "<strong>" +
-      escapeHtml(
-        ev.event || "미정"
-      ) +
-      "</strong>" +
-      '<span class="cal-ccy">' +
-      escapeHtml(
-        ev.currency || "USD"
-      ) +
-      "</span>" +
-      "</div>" +
+      `<div class="cal-event">` +
+      `<strong>` +
+      `${escapeHtml(ev.event || "미정")}` +
+      `</strong>` +
+      `<span class="cal-ccy">` +
+      `${escapeHtml(ev.currency || "USD")}` +
+      `</span>` +
+      `</div>` +
 
-      '<dl class="cal-nums">' +
+      `<dl class="cal-nums">` +
 
-      "<div>" +
-      "<dt>실제</dt>" +
-      '<dd class="' +
-      up +
-      '">' +
-      escapeHtml(
-        ev.actual ?? "—"
-      ) +
-      "</dd>" +
-      "</div>" +
+      `<div>` +
+      `<dt>실제</dt>` +
+      `<dd class="${up}">` +
+      `${escapeHtml(ev.actual ?? "—")}` +
+      `</dd>` +
+      `</div>` +
 
-      "<div>" +
-      "<dt>예상</dt>" +
-      "<dd>" +
-      escapeHtml(
-        ev.forecast ?? "—"
-      ) +
-      "</dd>" +
-      "</div>" +
+      `<div>` +
+      `<dt>예상</dt>` +
+      `<dd>` +
+      `${escapeHtml(ev.forecast ?? "—")}` +
+      `</dd>` +
+      `</div>` +
 
-      "<div>" +
-      "<dt>이전</dt>" +
-      "<dd>" +
-      escapeHtml(
-        ev.previous ?? "—"
-      ) +
-      "</dd>" +
-      "</div>" +
+      `<div>` +
+      `<dt>이전</dt>` +
+      `<dd>` +
+      `${escapeHtml(ev.previous ?? "—")}` +
+      `</dd>` +
+      `</div>` +
 
-      "</dl>" +
+      `</dl>` +
 
-      "</article>"
+      `</article>`
     );
   }
 
@@ -1714,41 +1743,21 @@ function initEconomicCalendar() {
     if (
       !/^\d{4}-\d{2}-\d{2}$/.test(ymd)
     ) {
-      return ymd;
+      return escapeHtml(ymd);
     }
 
-    const p =
+    const parts =
       ymd.split("-");
 
     return (
-      Number(p[1]) +
-      "월 " +
-      Number(p[2]) +
-      "일"
+      `${Number(parts[1])}월 ` +
+      `${Number(parts[2])}일`
     );
   }
 
-  // ── 출처 ──────────────────────────────────────────────────────────────────
+  // ── 실제 / 예상 비교 ──────────────────────────────────────────────────────
 
-  function sourceLabel(src) {
-    const value =
-      String(src || "").toLowerCase();
-
-    if (
-      value.indexOf("investing") !== -1
-    ) {
-      return "Investing.com KR";
-    }
-
-    return "Investing.com KR";
-  }
-
-  // ── 실제/예상 비교 ────────────────────────────────────────────────────────
-
-  function valueClass(
-    actual,
-    forecast
-  ) {
+  function valueClass(actual, forecast) {
     if (
       actual === null ||
       actual === undefined ||
@@ -1862,7 +1871,7 @@ function initDashboard() {
     );
 
     const list =
-      document.getElementById("cal-list");
+      document.getElementById("economic-calendar-list");
 
     if (list) {
       list.innerHTML =
