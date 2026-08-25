@@ -14,6 +14,16 @@
     오전/저녁 여부를 판별하는 방식으로 교체했습니다 (오전 9시 vs 저녁 9시 발행이라
     시각 기준이 제목 키워드보다 훨씬 신뢰도가 높습니다). 시각 파싱이 실패할 때만
     기존 제목 키워드 방식을 폴백으로 사용합니다.
+
+목차(TOC) 마크업 제거 (신규):
+  본문 최상단에 항상 삽입되는 목차 플레이스홀더
+  (<div class="index_toc"><p>목차</p><ul id="toc">...</ul></div>)는 티스토리
+  스킨의 TOC 스크립트가 처리하는 순수 UI 요소일 뿐, 실제 콘텐츠가 아닙니다.
+  이걸 제거하지 않고 그대로 get_text()하면 full_text/summary 맨 앞에 "목차"라는
+  글자가 섞여 들어가서, 이 값을 그대로 프롬프트에 넣는
+  content_adapter.py(SNS 문구 생성)와 video_generator/generator.py(영상
+  나레이션 생성) 양쪽에 불필요한 노이즈가 전달됩니다. 그래서 텍스트를 뽑기
+  전에 이 요소를 먼저 제거합니다.
 """
 
 import feedparser
@@ -56,6 +66,21 @@ def _decode_html_entities(text: str) -> str:
         prev = text
         text = _html_module.unescape(text)
     return text
+
+
+def _strip_toc_markup(content_area: BeautifulSoup) -> None:
+    """
+    본문 최상단에 항상 삽입되는 목차(TOC) 플레이스홀더를 텍스트 추출 전에
+    제거합니다 (in-place). class="index_toc" 요소를 통째로 제거하면 그
+    안의 <p>목차</p>와 <ul id="toc">도 함께 사라집니다.
+
+    혹시 class가 없는 옛 글이나 수동 편집으로 구조가 달라진 경우를 대비해
+    id="toc"인 <ul>만 남아있는 경우도 별도로 한 번 더 제거합니다.
+    """
+    for el in content_area.select(".index_toc"):
+        el.decompose()
+    for el in content_area.select("#toc"):
+        el.decompose()
 
 
 @dataclass
@@ -194,11 +219,16 @@ class TistoryCrawler:
             or soup.find("div", class_="entry-content")
         )
         if content_area:
+            # 목차(TOC) 플레이스홀더는 실제 콘텐츠가 아니므로 텍스트 추출
+            # 전에 제거합니다 (그대로 두면 full_text/summary 맨 앞에 "목차"
+            # 라는 글자가 섞여 들어가 SNS 문구·영상 나레이션 생성 프롬프트에
+            # 불필요한 노이즈로 전달됩니다).
+            _strip_toc_markup(content_area)
             full_text = content_area.get_text(separator="\n", strip=True)
         else:
-            full_text = BeautifulSoup(
-                entry.get("summary", ""), "html.parser"
-            ).get_text(separator="\n", strip=True)
+            summary_soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
+            _strip_toc_markup(summary_soup)
+            full_text = summary_soup.get_text(separator="\n", strip=True)
 
         # 요약: 첫 300자
         lines = [l.strip() for l in full_text.split("\n") if l.strip()]
