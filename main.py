@@ -1,6 +1,6 @@
 """
 미국 증시 블로그 자동화 메인 스크립트 (Cloudflare 대시보드 업로드 전용)
-실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(Pexels/Pixabay)
+실행 흐름: 뉴스 수집 → 글 생성(Gemini) → 이미지 생성(Cloudflare Workers AI/Pexels/Pixabay)
           → Cloudflare 대시보드 업로드 (GitHub Releases 썸네일 포함)
 
 포스팅 모드:
@@ -189,8 +189,11 @@ def main():
         filename=f"thumbnail_{mode}_{timestamp}.png",
         content=post["content"],
         mode=mode,
+        # 썸네일 중앙에 제목을 오버레이해, 썸네일만 보고도 원고 내용에 대한
+        # 기대감이 들도록 함 (AI 생성/Pexels/Pixabay 배경 모두 동일 적용).
+        title=post["title"],
     )
-    logger.info(f"  → 이미지: {image_path}")
+    logger.info(f"  → 이미지: {image_path} (소스: {img_gen.last_image_source or 'gradient fallback'})")
 
     # 3-1. 썸네일 저작자 표시는 로그로만 남기고 본문에는 추가하지 않음
     #      (블로그 포스팅 본문은 순수 콘텐츠에만 집중 — 사진 출처 표기가
