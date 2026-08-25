@@ -32,6 +32,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: 🔤 한글 폰트 설치 (썸네일 제목 오버레이용)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-noto-cjk
+
       - name: 📦 패키지 설치
         run: pip install -r requirements.txt
 
@@ -43,6 +48,10 @@ jobs:
           POST_MODE: morning
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          # ── 썸네일 AI 이미지 생성 (1순위: Cloudflare Workers AI, 완전 무료) ──
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # 2순위: HuggingFace (유료 크레딧을 넣어둔 계정이 있을 때만 의미 있음)
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
@@ -70,6 +79,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: 🔤 한글 폰트 설치 (썸네일 제목 오버레이용)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-noto-cjk
+
       - name: 📦 패키지 설치
         run: pip install -r requirements.txt
 
@@ -81,6 +95,10 @@ jobs:
           POST_MODE: evening
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          # ── 썸네일 AI 이미지 생성 (1순위: Cloudflare Workers AI, 완전 무료) ──
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # 2순위: HuggingFace (유료 크레딧을 넣어둔 계정이 있을 때만 의미 있음)
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
