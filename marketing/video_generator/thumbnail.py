@@ -1,22 +1,36 @@
 """
-SNS 썸네일 생성기 v6 — FLUX.1-schnell 기반
+SNS 썸네일 생성기 v7 — Cloudflare Workers AI 기반
 =====================================
-우선순위 (v5 → v6 변경):
-  1순위: HuggingFace FLUX.1-schnell (AI 생성 — 콘텐츠 맞춤형)
-  2순위: Pexels API (스톡사진 + 텍스트 오버레이)
-  3순위: Pixabay API (스톡사진 + 텍스트 오버레이)
-  4순위: gradient fallback + 텍스트 오버레이
+우선순위 (v6 → v7 변경):
+  1순위: Cloudflare Workers AI · FLUX.1-schnell (AI 생성 — 완전 무료, 신용카드 불필요)
+  2순위: HuggingFace Inference Providers · FLUX.1-schnell (유료 크레딧 남은 계정 대비 보존)
+  3순위: Pexels API (스톡사진 + 텍스트 오버레이)
+  4순위: Pixabay API (스톡사진 + 텍스트 오버레이)
+  5순위: gradient fallback + 텍스트 오버레이
 
-v5 → v6 변경 이유:
-  - Gemini Imagen(gemini-2.0-flash-exp-image-generation): 2025년 6월 discontinued
-    → 항상 실패, 제거
-  - Unsplash Source: 2024년 서비스 완전 종료(503 반환), 제거
-  - FLUX.1-schnell을 1순위로 배치:
-    image_prompt(Gemini 생성)를 그대로 사용 → 콘텐츠와 연계된 이미지
+v6 → v7 변경 이유 (본문용 image_generator.py와 동일한 원인/해결):
+  - Hugging Face Inference Providers(fal-ai/together/replicate)는 무료 계정
+    기준 월 $0.10 상당의 크레딧만 제공합니다. 이 모듈은 발행 1회당 채널
+    스타일 그룹 3개(facebook/kakao, instagram/instagram_portrait, threads)를
+    생성하므로, main.py의 본문 썸네일 1회분까지 합치면 하루 여러 번 FLUX를
+    호출하게 되어 월초 며칠 안에 그 $0.10 크레딧이 소진됩니다. 이후 요청은
+    전부 결제 필요(402)로 실패하고, hf-inference provider는 2026-07경
+    FLUX.1-schnell 무료 서빙 자체를 중단(410)했습니다 — 즉 무료 HF 토큰만
+    으로는 크레딧 소진 이후 계속 Pexels/Pixabay로만 폴백되는 것이 정상적인
+    현상이었습니다.
+  - Cloudflare Workers AI는 하루 10,000 뉴런이 매일 자정(UTC) 초기화되어
+    제공되고, FLUX.1-schnell 1장에 약 40~60 뉴런 수준이라 신용카드 등록
+    없이 하루 수백 장을 생성할 수 있습니다. 이 프로젝트는 이미 Cloudflare
+    Pages/D1을 대시보드로 쓰고 있어 추가 가입도 필요 없습니다.
+  - CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN이 설정되어 있지 않으면
+    조용히 건너뛰고 기존 HF → Pexels → Pixabay → gradient 경로 그대로
+    동작하므로, 시크릿을 아직 추가하지 않아도 기존 동작을 깨뜨리지 않습니다.
+  - image_prompt(Gemini 생성)를 그대로 사용 → 콘텐츠와 연계된 이미지
     모든 플랫폼이 동일한 AI 생성 배경을 공유하되,
     텍스트 오버레이(제목/날짜/URL/배지)는 Pillow로 각 플랫폼 규격에 맞게 적용
 """
 
+import base64
 import logging
 import os
 import re
@@ -33,11 +47,17 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = "images"
 
-# ── HuggingFace FLUX.1-schnell (Inference Providers 경유) ──────────────────
+# ── Cloudflare Workers AI (신규 1순위 — 완전 무료) ──────────────────────────
+CF_FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+
+# ── HuggingFace FLUX.1-schnell (Inference Providers 경유, 2순위) ────────────
 # raw REST(router.huggingface.co/hf-inference/...)는 hf-inference provider에서
 # FLUX.1-schnell 서빙이 중단(410)된 이후 다른 provider에서도 모델-provider
 # 매핑을 못 찾아 400을 반환합니다. huggingface_hub 라이브러리를 쓰면 이
 # 매핑을 자동으로 처리해주므로 이 방식으로 교체합니다 (image_generator.py와 동일).
+# 다만 무료 계정은 월 $0.10 크레딧만 제공되어 금방 소진되므로, Cloudflare
+# Workers AI가 성공하면 이 경로는 시도하지 않습니다 (크레딧 절약).
 HF_FLUX_PROVIDERS = ["fal-ai", "together", "replicate", "hf-inference"]
 HF_FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
 
@@ -348,11 +368,98 @@ class SNSThumbnailGenerator:
     def __init__(self, hf_token: str = "", output_dir: str = OUTPUT_DIR):
         self.output_dir  = output_dir
         self.hf_token    = hf_token
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        self.cf_api_token  = os.environ.get("CLOUDFLARE_API_TOKEN", "")
         self.pexels_key  = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
 
-    # ── FLUX.1-schnell 배경 이미지 생성 (huggingface_hub 경유, 채널별 스타일) ──
+    # ── Cloudflare Workers AI 배경 이미지 생성 (신규 1순위, 완전 무료) ────────
+    def _generate_cf_bg(
+        self, prompt: str, mode: str, W: int, H: int, platform: str = "",
+    ) -> Image.Image | None:
+        if not self.cf_account_id or not self.cf_api_token:
+            logger.info(
+                "CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN 미설정 — "
+                "Cloudflare Workers AI 건너뜀"
+            )
+            return None
+
+        mode_suffix     = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
+        platform_suffix = PLATFORM_STYLE_SUFFIX.get(platform, "")
+        full_prompt = f"{prompt}{mode_suffix}{platform_suffix}"
+
+        seed = int(hashlib.md5(
+            f"{datetime.now().strftime('%Y%m%d')}{mode}{platform}".encode()
+        ).hexdigest()[:8], 16) % (2 ** 32)
+
+        # 주의: flux-1-schnell의 공식 입력 스키마는 prompt(필수)와
+        # steps(기본 4, 최대 8)만 받습니다 — width/height는 지원하지 않고
+        # 파라미터 이름도 "num_steps"가 아니라 "steps"입니다. 문서:
+        # https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/schema-input.json
+        # W/H 파라미터는 받은 이미지를 이후 _build_thumbnail()의 _crop_fit()
+        # 단계에서 각 플랫폼 규격으로 다시 크롭할 때 쓰이므로 여기서
+        # API에 그대로 전달하지 않아도 문제 없습니다.
+        url = f"{CF_API_BASE}/{self.cf_account_id}/ai/run/{CF_FLUX_MODEL}"
+        payload = {
+            "prompt": full_prompt,
+            "steps": 8,
+            "seed": seed,
+        }
+
+        logger.info(
+            f"Cloudflare Workers AI SNS 배경 생성 중 (모드: {mode}, "
+            f"채널: {platform or '공용'}, 시드: {seed})..."
+        )
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.cf_api_token}",
+                    "Accept": "application/json",
+                },
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"[{platform or '공용'}] Cloudflare Workers AI 실패 "
+                    f"({resp.status_code}): {resp.text[:200]}"
+                )
+                return None
+
+            # 응답이 JSON(+base64)이 아니라 raw 이미지 바이너리로 올 가능성도
+            # 방어적으로 함께 처리합니다.
+            content_type = resp.headers.get("Content-Type", "")
+            if content_type.startswith("image/"):
+                image = Image.open(BytesIO(resp.content)).convert("RGB")
+            else:
+                data = resp.json()
+                if not data.get("success", True):
+                    logger.warning(
+                        f"[{platform or '공용'}] Cloudflare Workers AI 실패: {data.get('errors')}"
+                    )
+                    return None
+                b64_img = (data.get("result") or {}).get("image", "")
+                if not b64_img:
+                    logger.warning(f"[{platform or '공용'}] Cloudflare 응답에 image 데이터 없음")
+                    return None
+                image = Image.open(BytesIO(base64.b64decode(b64_img))).convert("RGB")
+
+            # 이 함수가 받은 W, H는 최종 크롭 목표로만 사용 — flux-1-schnell은
+            # 요청 해상도를 받지 않으므로, 반환된 이미지를 바로 여기서
+            # 표준 정사각형(1024x1024)에 맞게 크롭해 이후 그룹 캐시/재사용
+            # 로직(group_bg)이 기존과 동일하게 동작하도록 합니다.
+            image = _crop_fit(image, W, H)
+
+            logger.info(f"[{platform or '공용'}] Cloudflare Workers AI 배경 생성 성공: {image.size}")
+            return image
+
+        except Exception as e:
+            logger.warning(f"[{platform or '공용'}] Cloudflare Workers AI 오류: {e}")
+            return None
+
+    # ── FLUX.1-schnell 배경 이미지 생성 (huggingface_hub 경유, 2순위) ──────────
     def _generate_flux_bg(
         self, prompt: str, mode: str, W: int, H: int,
         platform: str = "", max_retries: int = 2,
@@ -402,6 +509,13 @@ class SNSThumbnailGenerator:
                 except HfHubHTTPError as e:
                     status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
                     msg = str(e)[:150]
+
+                    if status == 402:
+                        logger.warning(
+                            f"[{provider}] 결제 필요(402) — 무료 크레딧 소진 가능성. "
+                            f"Cloudflare Workers AI 설정을 권장합니다."
+                        )
+                        break
 
                     if status == 503 or "loading" in msg.lower():
                         wait = 20
@@ -502,21 +616,26 @@ class SNSThumbnailGenerator:
         image_prompt: str = "",
         platform: str = "",
     ) -> Image.Image | None:
-        # 0순위: FLUX.1-schnell (image_prompt 또는 title 기반, 채널별 스타일 적용)
+        # 0순위: Cloudflare Workers AI (완전 무료)
         flux_prompt = image_prompt or title
+        img = self._generate_cf_bg(flux_prompt, mode, W, H, platform=platform)
+        if img:
+            return img
+
+        # 1순위: FLUX.1-schnell via HuggingFace (유료 크레딧 남은 계정 대비)
         img = self._generate_flux_bg(flux_prompt, mode, W, H, platform=platform)
         if img:
             return img
 
-        logger.info("FLUX 실패 → Pexels/Pixabay로 대체...")
+        logger.info("AI 이미지 생성 실패 → Pexels/Pixabay로 대체...")
 
-        # 1순위: Pexels
+        # 2순위: Pexels
         query = self._extract_query(title, mode, content)
         img = self._fetch_pexels_bg(query, W, H)
         if img:
             return img
 
-        # 2순위: Pixabay
+        # 3순위: Pixabay
         img = self._fetch_pixabay_bg(query, W, H)
         if img:
             return img
@@ -590,9 +709,11 @@ class SNSThumbnailGenerator:
 
         for group_key in style_groups:
             flux_prompt = image_prompt or title
-            bg = self._generate_flux_bg(
-                flux_prompt, mode, W=1024, H=1024, platform=group_key
-            )
+            # 1순위: Cloudflare Workers AI (완전 무료)
+            bg = self._generate_cf_bg(flux_prompt, mode, W=1024, H=1024, platform=group_key)
+            # 2순위: HuggingFace FLUX (유료 크레딧 남은 계정 대비)
+            if not bg:
+                bg = self._generate_flux_bg(flux_prompt, mode, W=1024, H=1024, platform=group_key)
             if not bg:
                 query = self._extract_query(title, mode, content)
                 bg = self._fetch_pexels_bg(query, 1024, 1024)
@@ -601,7 +722,7 @@ class SNSThumbnailGenerator:
             group_bg[group_key] = bg
             logger.info(
                 f"[{group_key} 그룹] 배경 확보: "
-                f"{'FLUX/스톡 성공' if bg else '실패 → gradient 예정'}"
+                f"{'AI/스톡 성공' if bg else '실패 → gradient 예정'}"
             )
 
         def _group_for(platform: str) -> str:
