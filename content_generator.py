@@ -35,6 +35,20 @@ FALLBACK_IMAGE_PROMPT = {
                "dynamic energetic mood, city skyline with stock market data overlay",
 }
 
+# ── 목차(TOC) 플레이스홀더 (항상 본문 최상단에 삽입) ─────────────────────────
+# 티스토리 에디터(카카오 에디터) 스킨의 TOC 스크립트가 이 마크업을 인식해
+# <h2>/<h3> 제목들로 목차를 자동 채웁니다. Gemini 프롬프트로 지시하지 않고
+# 코드 레벨에서 항상 강제로 붙이는 이유는 _strip_image_tags/
+# _ensure_required_fields와 동일합니다 — AI 출력에 의존하면 누락되거나
+# 형식이 미묘하게 달라질 수 있는 "항상 보장돼야 하는 고정 마크업"이기
+# 때문입니다.
+TOC_HTML_SNIPPET = (
+    '<div class="index_toc">\n'
+    '<p data-ke-size="size16">목차</p>\n'
+    '<ul id="toc" style="list-style-type: disc;" data-ke-list-type="disc"></ul>\n'
+    '</div>'
+)
+
 
 def _gemini_url(model: str) -> str:
     return (
@@ -91,6 +105,9 @@ HTML 편집기에 그대로 붙여넣을 수 있는 완전한 HTML 조각이어�
 ⑩ 태그는 서로 줄바꿈 없이 정확한 개폐 구조(예: <p>...</p>)로 작성하고,
    허용된 태그(<h2> <h3> <p> <ul> <li> <strong> <blockquote>) 외의
    임의 class/style/속성은 추가하지 않습니다.
+
+⑪ 본문 최상단에 목차 마크업이 자동으로 삽입되므로(코드에서 처리), 직접
+   "목차"라는 제목이나 <ul id="toc">를 본문에 작성하지 마세요 — 중복됩니다.
 ────────────────────────────────────────
 """
 
@@ -575,6 +592,7 @@ class ContentGenerator:
                 logger.info(f"생성된 글자 수: {len(post.get('content', ''))}자")
                 logger.info(f"생성된 제목: {post.get('title', '')}")
                 post = self._fact_check_and_correct(post, system, prompt, fact_lookup, mode)
+                post = self._prepend_toc(post)
                 return post
             except json.JSONDecodeError as e:
                 last_error = e
@@ -652,6 +670,22 @@ class ContentGenerator:
             post2 = fact_checker.neutralize_unresolved(post2, remaining2)
 
         return post2
+
+    @staticmethod
+    def _prepend_toc(post: dict) -> dict:
+        """
+        본문(content) 최상단에 티스토리 목차(TOC) 플레이스홀더를 항상
+        삽입합니다. 이미 포함되어 있으면(중복 호출 방지) 다시 붙이지 않습니다.
+        _fact_check_and_correct 이후, generate_post()가 반환하기 직전에
+        딱 한 번만 호출되어야 합니다 — 팩트체크 재생성 루프 중간에 붙이면
+        content 문자열 비교/치환 로직에 불필요하게 섞여 들어갈 수 있습니다.
+        """
+        post = dict(post)
+        content = post.get("content", "") or ""
+        if 'id="toc"' in content:
+            return post
+        post["content"] = f"{TOC_HTML_SNIPPET}\n{content}"
+        return post
 
     @staticmethod
     def _ensure_required_fields(post: dict, mode: str) -> dict:
