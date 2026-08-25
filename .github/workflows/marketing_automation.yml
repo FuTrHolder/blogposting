@@ -66,6 +66,11 @@ jobs:
 
           # ── AI 콘텐츠 생성 ───────────────────────────────────────────
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+          # ── SNS 썸네일 AI 이미지 생성 (1순위: Cloudflare Workers AI, 완전 무료.
+          #    HF_API_TOKEN은 2순위 — 유료 크레딧을 넣어둔 계정이 있을 때만 의미 있음) ──
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
 
           # ── 이미지 소스 (무료 API) ────────────────────────────────────
