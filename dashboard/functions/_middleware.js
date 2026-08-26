@@ -7,7 +7,10 @@ export async function onRequest(context) {
   const url = new URL(request.url);
 
   // GitHub Actions가 호출하는 수집/트리거 API는 별도의 시크릿 헤더로 보호되므로 여기서는 통과.
-  if (url.pathname.startsWith("/api/ingest/")) {
+  if (
+    url.pathname.startsWith("/api/ingest/") ||
+    url.pathname === "/api/calendar"
+  ) {
     return next();
   }
 
