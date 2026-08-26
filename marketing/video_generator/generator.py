@@ -1,8 +1,22 @@
 """
-숏폼 & 틱톡 영상 생성기 v8
+숏폼 & 틱톡 영상 생성기 v9
 ==============================================
-변경사항 (v8 — 틱톡 1분+ 영상 추가):
-  - generate_tiktok(): 틱톡 수익화 조건(1분 이상) 충족 전용 생성 메서드 추가
+변경사항 (v9 — 영상 배경에 블로그 썸네일 재사용 중단):
+  - [버그 수정] 배경에 블로그 제목 글자가 겹쳐 보이는 문제 해결
+      image_generator.py가 블로그 대표 썸네일 중앙에 제목 텍스트를 굽는(overlay)
+      기능이 추가된 이후, 이 영상 생성기가 그 썸네일을 영상 배경 1순위로
+      재사용하면서 슬라이드 자체의 키워드 박스·자막 뒤로 블로그 제목 글자가
+      흐릿하게 겹쳐 보이는 문제가 발생했습니다 (블러가 약해서 배경이 잘
+      보이도록 일부러 설계된 것이 오히려 역효과).
+      → generate()/generate_tiktok() 양쪽 모두 thumbnail_url을 배경으로
+        더 이상 사용하지 않습니다. 대신 Cloudflare Workers AI(FLUX.1-schnell,
+        완전 무료·신용카드 불필요)로 텍스트가 전혀 없는 새 배경을 1순위로
+        생성하고, 실패 시 기존 Pexels → picsum 순서로 폴백합니다.
+      - thumbnail_url 매개변수 자체는 호출부 호환을 위해 시그니처에 남겨
+        두었으나, 배경 생성에는 더 이상 쓰이지 않습니다.
+
+v8 유지:
+  - generate_tiktok(): 틱톡 수익화 조건(1분 이상) 충족 전용 생성 메서드
       · 시간 제한 없음 (MAX_VIDEO_SEC 미적용)
       · 고정 속도 +28% (속도 자동 조정 없이 자연스러운 속도 유지)
       · 모든 세그먼트의 TTS가 끝난 뒤 영상 종료 (음성 잘림 없음)
@@ -25,6 +39,7 @@ TTS: edge-tts ko-KR-InJoonNeural (젊은 남성)
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -102,6 +117,29 @@ PEXELS_KEYWORDS = {
 PEXELS_KEYWORDS_TIKTOK = {
     "morning": ["stock trading screens closeup", "financial data dashboard dynamic", "trading floor energy"],
     "evening": ["stock market chart neon", "trading screens night dynamic", "financial data glow"],
+}
+
+# ── Cloudflare Workers AI (영상 배경 전용 — 완전 무료, 텍스트 없는 배경 생성) ──
+# main.py의 블로그 대표 썸네일(image_generator.py)은 이제 제목 텍스트를 중앙에
+# 굽기 때문에, 그 이미지를 영상 배경으로 재사용하면 슬라이드 자체 텍스트와
+# 겹쳐 보입니다. 그래서 영상 배경은 블로그 썸네일을 아예 참조하지 않고, 항상
+# 텍스트가 없는 새 이미지를 이 모델로 직접 생성합니다. 하루 10,000 뉴런이
+# 매일 자정(UTC) 무료로 초기화되어, 영상 1편당 1회 호출(약 40~60 뉴런)로도
+# 하루 수백 회 여유가 있습니다.
+CF_FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+
+FLUX_SUFFIX_VIDEO = {
+    "morning": (
+        ", Wall Street financial district at dawn, calm after market close, "
+        "professional financial photography, cinematic lighting, 8K resolution, "
+        "no text, no watermark, no logo, no people"
+    ),
+    "evening": (
+        ", pre-market trading floor at night, dynamic stock exchange screens, "
+        "professional financial photography, dramatic lighting, 8K resolution, "
+        "no text, no watermark, no logo, no people"
+    ),
 }
 
 # ── 이모지 제거 (한글 보존) ──────────────────────────────────────────────────
@@ -957,8 +995,81 @@ def _make_slide(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 배경 이미지 다운로드
+# 배경 이미지 확보 (Cloudflare Workers AI / Pexels / picsum)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _download_bg_cloudflare(
+    keywords: list[str], mode: str, dest: Path,
+    cf_account_id: str, cf_api_token: str,
+) -> bool:
+    """
+    Cloudflare Workers AI(FLUX.1-schnell)로 영상 배경을 새로 생성합니다.
+    무료 한도(하루 10,000 뉴런, 매일 자정 UTC 초기화) 안에서 신용카드 등록
+    없이 사용 가능합니다.
+
+    블로그 대표 썸네일(image_generator.py)은 중앙에 제목 텍스트를 굽기 때문에,
+    그 이미지를 영상 배경으로 재사용하면 슬라이드 자체의 키워드 박스·자막과
+    겹쳐 보이는 문제가 있었습니다 (v9에서 제거). 그래서 영상 배경은 항상
+    텍스트가 전혀 없는 이 함수의 결과물을 우선 사용합니다.
+
+    CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN이 없으면 조용히 실패(False)
+    반환 — 호출부가 Pexels → picsum 순으로 자동 폴백합니다.
+    """
+    if not cf_account_id or not cf_api_token:
+        return False
+
+    prompt = " ".join(keywords) if keywords else "stock market finance"
+    suffix = FLUX_SUFFIX_VIDEO.get(mode, FLUX_SUFFIX_VIDEO["morning"])
+    full_prompt = f"{prompt}{suffix}"
+
+    # 주의: flux-1-schnell의 공식 입력 스키마는 prompt(필수)와 steps(기본 4,
+    # 최대 8)만 받습니다 — width/height는 지원하지 않으므로 요청하지 않고,
+    # _prepare_bg()가 어떤 원본 비율이 와도 1080x1920으로 알아서 크롭합니다.
+    url = f"{CF_API_BASE}/{cf_account_id}/ai/run/{CF_FLUX_MODEL}"
+    payload = {"prompt": full_prompt, "steps": 8}
+
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {cf_api_token}",
+                "Accept": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                f"Cloudflare Workers AI 영상 배경 생성 실패 "
+                f"({resp.status_code}): {resp.text[:200]}"
+            )
+            return False
+
+        # 응답이 JSON(+base64)이 아니라 raw 이미지 바이너리로 올 가능성도
+        # 방어적으로 함께 처리합니다.
+        content_type = resp.headers.get("Content-Type", "")
+        if content_type.startswith("image/"):
+            img_bytes = resp.content
+        else:
+            data = resp.json()
+            if not data.get("success", True):
+                logger.warning(f"Cloudflare Workers AI 실패: {data.get('errors')}")
+                return False
+            b64_img = (data.get("result") or {}).get("image", "")
+            if not b64_img:
+                logger.warning("Cloudflare Workers AI 응답에 image 데이터가 없음")
+                return False
+            img_bytes = base64.b64decode(b64_img)
+
+        dest.write_bytes(img_bytes)
+        Image.open(dest).verify()
+        logger.info("Cloudflare Workers AI 영상 배경 생성 성공 (텍스트 없는 새 이미지)")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Cloudflare Workers AI 영상 배경 생성 오류: {e}")
+        return False
+
 
 def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> bool:
     if not pexels_key:
@@ -1095,6 +1206,10 @@ class VideoGenerator:
         self.output_dir = output_dir
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        # 영상 배경 전용 Cloudflare Workers AI (블로그 썸네일과는 별개로
+        # 텍스트 없는 새 배경을 생성하는 데 사용 — v9)
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
         self.last_tiktok_hashtags: list[str] = []  # generate_tiktok() 호출 후 채워짐
         os.makedirs(output_dir, exist_ok=True)
 
@@ -1127,25 +1242,22 @@ class VideoGenerator:
 
         logger.info(f"나래이션 세그먼트: {len(narration_segments)}개")
 
-        with tempfile.TemporaryDirectory(prefix="shorts_v7_") as tmp_s:
+        with tempfile.TemporaryDirectory(prefix="shorts_v9_") as tmp_s:
             tmp = Path(tmp_s)
 
             # 2. 배경 이미지 확보
+            # 주의(v9): 티스토리 대표 썸네일(thumbnail_url)은 image_generator.py가
+            # 중앙에 블로그 제목 텍스트를 굽기 때문에, 그 이미지를 영상 배경으로
+            # 재사용하면 여기서 그리는 키워드 박스·자막과 겹쳐 부조화스럽게
+            # 보입니다 (실제 리포트된 버그). 그래서 더 이상 thumbnail_url을
+            # 배경으로 쓰지 않고, 항상 텍스트 없는 새 이미지를 생성/수집합니다:
+            #   1순위: Cloudflare Workers AI (완전 무료)
+            #   2순위: Pexels
+            #   3순위: picsum 그라디언트
             bg_path = tmp / "bg.jpg"
-            bg_ok   = False
-
-            if thumbnail_url:
-                try:
-                    r = requests.get(thumbnail_url, timeout=15,
-                                     headers={"User-Agent": "Mozilla/5.0"})
-                    r.raise_for_status()
-                    bg_path.write_bytes(r.content)
-                    Image.open(bg_path).verify()
-                    bg_ok = True
-                    logger.info("티스토리 썸네일 배경 로드 성공")
-                except Exception as e:
-                    logger.warning(f"썸네일 로드 실패: {e}")
-
+            bg_ok   = _download_bg_cloudflare(
+                kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
+            )
             if not bg_ok:
                 bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
             if not bg_ok:
@@ -1301,6 +1413,9 @@ class VideoGenerator:
             빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
             끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
             이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
+          - [v9] 배경도 generate()와 동일하게 thumbnail_url을 쓰지 않고
+            Pexels(1순위, 더 역동적인 톤) → Cloudflare Workers AI(2순위) →
+            picsum(3순위) 순서로 텍스트 없는 이미지만 사용합니다.
         """
         theme = THEMES.get(mode, THEMES["morning"])
         # bg_keywords가 명시적으로 전달되지 않았으면 틱톡 전용(더 역동적인) 키워드 사용
@@ -1340,24 +1455,18 @@ class VideoGenerator:
         with tempfile.TemporaryDirectory(prefix="tiktok_v9_") as tmp_s:
             tmp = Path(tmp_s)
 
-            # 2. 배경 이미지 확보 (쇼츠와 차별화 — 틱톡은 역동적인 Pexels 배경을
-            #    우선 시도하고, 실패 시에만 쇼츠와 동일한 티스토리 썸네일로 폴백.
-            #    쇼츠(generate())는 반대로 티스토리 썸네일을 최우선으로 씁니다 —
-            #    두 채널이 항상 같은 배경을 쓰지 않도록 우선순위를 분리했습니다.)
+            # 2. 배경 이미지 확보 (v9: thumbnail_url 재사용 제거)
+            # 쇼츠와 차별화 — 틱톡은 역동적인 Pexels 배경을 1순위로 시도하고,
+            # 실패 시 Cloudflare Workers AI(텍스트 없는 새 이미지)로 폴백,
+            # 그마저 실패하면 picsum 그라디언트를 씁니다. 블로그 대표 썸네일은
+            # 제목 텍스트가 박혀 있어 더 이상 후보에 넣지 않습니다.
             bg_path = tmp / "bg.jpg"
             bg_ok   = _download_bg_pexels(kws, bg_path, self.pexels_key)
 
-            if not bg_ok and thumbnail_url:
-                try:
-                    r = requests.get(thumbnail_url, timeout=15,
-                                     headers={"User-Agent": "Mozilla/5.0"})
-                    r.raise_for_status()
-                    bg_path.write_bytes(r.content)
-                    Image.open(bg_path).verify()
-                    bg_ok = True
-                    logger.info("틱톡 배경: 티스토리 썸네일로 폴백")
-                except Exception as e:
-                    logger.warning(f"썸네일 로드 실패: {e}")
+            if not bg_ok:
+                bg_ok = _download_bg_cloudflare(
+                    kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
+                )
 
             if not bg_ok:
                 import hashlib
