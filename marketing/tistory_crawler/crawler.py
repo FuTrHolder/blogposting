@@ -1,29 +1,19 @@
 """
 티스토리 블로그 크롤러
-- RSS 피드로 새 글 감지 (최근 업로드된 글)
-- BeautifulSoup으로 본문 파싱
-- 상태 파일로 중복 발행 방지
 
-모드 판별 방식 변경 (중요):
-  기존에는 제목에 "프리마켓", "오늘 밤" 같은 키워드가 있는지로 morning/evening을
-  추측했으나, 실제 생성된 제목이 그 키워드를 포함하지 않는 경우(예: "혼조세 마감,
-  S&P500 0.5% 하락 속 불안한 투자 심리")에 저녁 포스팅이 "morning"으로 잘못
-  판별되어, 같은 날짜의 마케팅 결과가 같은 ID(`${post_date}_morning_${platform}`)로
-  겹쳐 써지며 아침 결과가 사라지는 문제가 있었습니다.
-  → RSS의 실제 발행 시각(published_parsed, UTC)을 한국 시간(KST)으로 변환해
-    오전/저녁 여부를 판별하는 방식으로 교체했습니다 (오전 9시 vs 저녁 9시 발행이라
-    시각 기준이 제목 키워드보다 훨씬 신뢰도가 높습니다). 시각 파싱이 실패할 때만
-    기존 제목 키워드 방식을 폴백으로 사용합니다.
+기능:
+- RSS 피드로 새 글 감지
+- BeautifulSoup으로 실제 본문 파싱
+- 상태 파일로 마케팅 중복 발행 방지
+- 최근 포스트 목록 조회
+- 연관 포스트 후보 수집
+- TOC 및 연관 포스트 영역을 본문 텍스트에서 제거
+- 오전/저녁 모드 판별
 
-목차(TOC) 마크업 제거 (신규):
-  본문 최상단에 항상 삽입되는 목차 플레이스홀더
-  (<div class="index_toc"><p>목차</p><ul id="toc">...</ul></div>)는 티스토리
-  스킨의 TOC 스크립트가 처리하는 순수 UI 요소일 뿐, 실제 콘텐츠가 아닙니다.
-  이걸 제거하지 않고 그대로 get_text()하면 full_text/summary 맨 앞에 "목차"라는
-  글자가 섞여 들어가서, 이 값을 그대로 프롬프트에 넣는
-  content_adapter.py(SNS 문구 생성)와 video_generator/generator.py(영상
-  나레이션 생성) 양쪽에 불필요한 노이즈가 전달됩니다. 그래서 텍스트를 뽑기
-  전에 이 요소를 먼저 제거합니다.
+중요:
+- get_latest_post()는 기존 마케팅 중복 방지용으로 상태 파일을 변경합니다.
+- get_recent_posts()는 연관 포스트 검색용 읽기 전용 메서드입니다.
+  상태 파일을 절대 변경하지 않습니다.
 """
 
 import feedparser
@@ -45,98 +35,206 @@ STATE_FILE = "last_post_state.json"
 
 KST = timezone(timedelta(hours=9))
 
-# 오전/저녁 포스팅을 가르는 기준 시각 (KST). 실제 발행은 9시/21시 근처이므로
-# 정오~오후 중 아무 지점이나 기준으로 잡아도 안전하게 갈립니다.
+# 오전/저녁 포스팅 판별 기준
 _MODE_SPLIT_HOUR_KST = 15
+
+# 연관 포스트 후보 기본 수
+DEFAULT_RECENT_POST_LIMIT = 20
 
 
 def _decode_html_entities(text: str) -> str:
     """
-    RSS 제목/태그 등에 남아있는 HTML 엔티티(&amp; &lt; &#39; 등)를 실제 문자로
-    변환합니다. feedparser가 일반적으로 엔티티를 디코딩하지만, 티스토리 RSS가
-    이중 이스케이프(&amp;amp;)로 내보내는 경우가 있어 완전히 풀릴 때까지
-    반복 적용합니다 (예: "S&amp;P 500" → "S&P 500").
-    이 값이 title/tags에 남아있으면 YouTube 업로드 제목 등 하위 소비처
-    전체에 "&amp;" 같은 깨진 텍스트가 그대로 노출됩니다.
+    RSS 제목/태그 등에 남아있는 HTML 엔티티를 반복해서 디코딩합니다.
     """
     if not text:
         return text
+
     prev = None
+
     while prev != text:
         prev = text
         text = _html_module.unescape(text)
+
     return text
 
 
 def _strip_toc_markup(content_area: BeautifulSoup) -> None:
     """
-    본문 최상단에 항상 삽입되는 목차(TOC) 플레이스홀더를 텍스트 추출 전에
-    제거합니다 (in-place). class="index_toc" 요소를 통째로 제거하면 그
-    안의 <p>목차</p>와 <ul id="toc">도 함께 사라집니다.
-
-    혹시 class가 없는 옛 글이나 수동 편집으로 구조가 달라진 경우를 대비해
-    id="toc"인 <ul>만 남아있는 경우도 별도로 한 번 더 제거합니다.
+    TOC UI 영역을 제거합니다.
     """
     for el in content_area.select(".index_toc"):
         el.decompose()
+
     for el in content_area.select("#toc"):
         el.decompose()
+
+
+def _strip_related_posts_markup(content_area: BeautifulSoup) -> None:
+    """
+    본문 하단에 코드로 삽입한 '관련 포스트' 영역을 제거합니다.
+
+    연관 포스트 자체는 실제 블로그 HTML에는 필요하지만,
+    main_marketing.py에서 SNS/영상용 본문을 만들 때까지 가져가면
+    불필요한 링크와 제목이 영상/캡션 생성에 섞일 수 있습니다.
+
+    HTML 구조:
+        <h2>관련 포스트</h2>
+        <ul>
+            <li><a href="...">...</a></li>
+            ...
+        </ul>
+
+    또는:
+        <h2>함께 보면 좋은 글</h2>
+        <ul>...</ul>
+    """
+
+    target_headings = {
+        "관련 포스트",
+        "관련포스트",
+        "함께 보면 좋은 글",
+        "함께보면 좋은 글",
+        "추천 포스트",
+        "추천포스트",
+    }
+
+    headings = content_area.find_all(["h2", "h3"])
+
+    for heading in headings:
+        heading_text = heading.get_text(" ", strip=True)
+        normalized = " ".join(heading_text.split())
+
+        if normalized not in target_headings:
+            continue
+
+        # 제목 제거
+        current = heading
+
+        # 제목 다음에 이어지는 요소 중
+        # 관련 포스트 목록을 찾아 제거합니다.
+        next_element = current.find_next_sibling()
+
+        heading.decompose()
+
+        if next_element:
+            tag_name = getattr(next_element, "name", None)
+
+            if tag_name == "ul":
+                next_element.decompose()
+
+            elif tag_name == "ol":
+                next_element.decompose()
+
+            else:
+                # 혹시 p 뒤에 ul이 오는 변형 구조라면
+                # 다음 몇 개 sibling까지 검사합니다.
+                for sibling in list(content_area.find_all(["ul", "ol"])):
+                    if sibling.find_previous(["h2", "h3"]) is None:
+                        continue
+
+                    previous_heading = sibling.find_previous(["h2", "h3"])
+
+                    if previous_heading is not None:
+                        previous_text = previous_heading.get_text(
+                            " ", strip=True
+                        )
+                        previous_text = " ".join(previous_text.split())
+
+                        if previous_text in target_headings:
+                            sibling.decompose()
 
 
 @dataclass
 class BlogPost:
     title: str
     url: str
-    summary: str          # 첫 2~3문단 요약
-    full_text: str        # 전체 본문 (마크다운 제거된 텍스트)
-    thumbnail_url: str    # 대표 이미지 URL
+    summary: str
+    full_text: str
+    thumbnail_url: str
     tags: list[str]
     published: str
-    post_id: str          # URL 해시 (중복 방지용)
-    mode: str             # morning / evening (발행 시각 기준 판별)
+    post_id: str
+    mode: str
 
 
 def _detect_mode(title: str, published_parsed=None) -> str:
     """
-    포스팅 모드를 판별합니다.
-    1순위: RSS의 published_parsed(UTC struct_time)를 KST로 변환해 시각으로 판별
-           (09:00 KST 발행 → morning, 21:00 KST 발행 → evening)
-    2순위(폴백): 시각 정보가 없거나 파싱 실패 시에만 제목 키워드로 판별
+    RSS 발행 시각을 기준으로 morning/evening을 판별합니다.
+
+    1순위:
+        published_parsed → UTC → KST
+
+    2순위:
+        제목 키워드
     """
+
     if published_parsed:
         try:
-            published_utc = datetime(*published_parsed[:6], tzinfo=timezone.utc)
-            published_kst = published_utc.astimezone(KST)
-            mode = "morning" if published_kst.hour < _MODE_SPLIT_HOUR_KST else "evening"
-            logger.info(
-                f"발행 시각 기준 모드 판별: {published_kst.strftime('%Y-%m-%d %H:%M KST')} → {mode}"
+            published_utc = datetime(
+                *published_parsed[:6],
+                tzinfo=timezone.utc,
             )
-            return mode
-        except Exception as e:
-            logger.warning(f"발행 시각 파싱 실패, 제목 키워드로 대체 판별: {e}")
 
-    evening_keywords = ["프리마켓", "이슈", "저녁", "오늘 밤", "개장 전"]
+            published_kst = published_utc.astimezone(KST)
+
+            mode = (
+                "morning"
+                if published_kst.hour < _MODE_SPLIT_HOUR_KST
+                else "evening"
+            )
+
+            logger.info(
+                "발행 시각 기준 모드 판별: "
+                f"{published_kst.strftime('%Y-%m-%d %H:%M KST')} → {mode}"
+            )
+
+            return mode
+
+        except Exception as e:
+            logger.warning(
+                f"발행 시각 파싱 실패, 제목 키워드로 대체 판별: {e}"
+            )
+
+    evening_keywords = [
+        "프리마켓",
+        "이슈",
+        "저녁",
+        "오늘 밤",
+        "개장 전",
+    ]
+
     for kw in evening_keywords:
         if kw in title:
             return "evening"
+
     return "morning"
 
 
-def _extract_thumbnail(soup: BeautifulSoup, entry_summary: str) -> str:
-    """본문에서 첫 번째 이미지 URL을 추출합니다."""
-    # og:image 태그 우선
+def _extract_thumbnail(
+    soup: BeautifulSoup,
+    entry_summary: str,
+) -> str:
+    """
+    본문에서 대표 이미지 URL을 추출합니다.
+    """
+
     og = soup.find("meta", property="og:image")
+
     if og and og.get("content"):
         return og["content"]
 
-    # 본문 첫 번째 img 태그
     img = soup.find("img")
+
     if img and img.get("src"):
         return img["src"]
 
-    # RSS 요약의 img 태그
-    summary_soup = BeautifulSoup(entry_summary, "html.parser")
+    summary_soup = BeautifulSoup(
+        entry_summary,
+        "html.parser",
+    )
+
     img = summary_soup.find("img")
+
     if img and img.get("src"):
         return img["src"]
 
@@ -144,104 +242,434 @@ def _extract_thumbnail(soup: BeautifulSoup, entry_summary: str) -> str:
 
 
 def _load_state() -> dict:
+    """
+    기존 마케팅 중복 방지 상태를 읽습니다.
+    """
+
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(
+                STATE_FILE,
+                "r",
+                encoding="utf-8",
+            ) as f:
+                state = json.load(f)
+
+            if not isinstance(state, dict):
+                return {"last_post_ids": []}
+
+            if not isinstance(
+                state.get("last_post_ids"),
+                list,
+            ):
+                state["last_post_ids"] = []
+
+            return state
+
+        except Exception as e:
+            logger.warning(
+                f"상태 파일 읽기 실패 — 초기 상태 사용: {e}"
+            )
+
     return {"last_post_ids": []}
 
 
 def _save_state(state: dict):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    """
+    기존 마케팅 중복 방지 상태를 저장합니다.
+    """
+
+    with open(
+        STATE_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            state,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
 
 class TistoryCrawler:
-    def __init__(self, blog_url: str = BLOG_URL):
+
+    def __init__(
+        self,
+        blog_url: str = BLOG_URL,
+    ):
         self.blog_url = blog_url
         self.rss_url = f"{blog_url}/rss"
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; BlogBot/1.0)"
-        })
 
-    def get_latest_post(self, force: bool = False) -> BlogPost | None:
+        self.session = requests.Session()
+
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(compatible; BlogBot/1.0)"
+                )
+            }
+        )
+
+    def _load_feed(self):
         """
-        RSS에서 최신 글을 가져옵니다.
-        force=True: 상태 파일 무시하고 무조건 최신 글 반환
-        force=False: 이미 처리된 글이면 None 반환
+        RSS를 읽습니다.
         """
-        feed = feedparser.parse(self.rss_url)
-        if not feed.entries:
-            logger.warning("RSS 피드에 항목이 없습니다.")
+
+        try:
+            feed = feedparser.parse(self.rss_url)
+
+            if getattr(feed, "bozo", False):
+                logger.warning(
+                    f"RSS 파싱 경고: {getattr(feed, 'bozo_exception', '')}"
+                )
+
+            if not feed.entries:
+                logger.warning(
+                    "RSS 피드에 항목이 없습니다."
+                )
+                return None
+
+            return feed
+
+        except Exception as e:
+            logger.error(
+                f"RSS 조회 실패: {e}"
+            )
+            return None
+
+    @staticmethod
+    def _make_post_id(url: str) -> str:
+        """
+        URL 기반 안정적인 post_id를 생성합니다.
+        """
+
+        return hashlib.md5(
+            url.encode("utf-8")
+        ).hexdigest()[:12]
+
+    def get_latest_post(
+        self,
+        force: bool = False,
+    ) -> BlogPost | None:
+        """
+        RSS에서 최신 글 하나를 가져옵니다.
+
+        force=True:
+            상태 파일을 무시합니다.
+
+        force=False:
+            이미 처리된 글이면 None을 반환합니다.
+
+        주의:
+            기존 마케팅 중복 방지 기능 때문에
+            성공적으로 파싱한 글은 상태 파일에 기록합니다.
+        """
+
+        feed = self._load_feed()
+
+        if not feed:
             return None
 
         entry = feed.entries[0]
-        post_id = hashlib.md5(entry.get("link", "").encode()).hexdigest()[:12]
+
+        url = entry.get("link", "").strip()
+
+        if not url:
+            logger.warning(
+                "RSS 최신 항목에 URL이 없습니다."
+            )
+            return None
+
+        post_id = self._make_post_id(url)
 
         if not force:
             state = _load_state()
+
             if post_id in state["last_post_ids"]:
-                logger.info(f"이미 처리된 글: {entry.get('title', '')}")
+                logger.info(
+                    f"이미 처리된 글: "
+                    f"{entry.get('title', '')}"
+                )
                 return None
 
-        post = self._parse_post(entry, post_id)
+        post = self._parse_post(
+            entry,
+            post_id,
+        )
+
         if post:
             state = _load_state()
-            state["last_post_ids"] = ([post_id] + state["last_post_ids"])[:20]
+
+            previous_ids = state.get(
+                "last_post_ids",
+                [],
+            )
+
+            state["last_post_ids"] = (
+                [post_id] + previous_ids
+            )[:20]
+
             _save_state(state)
 
         return post
 
-    def _parse_post(self, entry, post_id: str) -> BlogPost | None:
-        """RSS 항목 + 실제 페이지 크롤링으로 BlogPost 생성."""
-        title = _decode_html_entities(entry.get("title", "").strip())
-        url = entry.get("link", "")
-        published = entry.get("published", "")
-        tags = [_decode_html_entities(t.term) for t in entry.get("tags", [])]
+    def get_recent_posts(
+        self,
+        limit: int = DEFAULT_RECENT_POST_LIMIT,
+        exclude_post_id: str | None = None,
+        exclude_url: str | None = None,
+    ) -> list[BlogPost]:
+        """
+        최근 포스트를 읽기 전용으로 가져옵니다.
+
+        중요:
+        - 상태 파일을 읽거나 변경하지 않습니다.
+        - 마케팅 중복 실행 방지와 완전히 분리됩니다.
+        - 연관 포스트 후보 수집용입니다.
+
+        Args:
+            limit:
+                최대 후보 수.
+
+            exclude_post_id:
+                현재 포스트 ID.
+
+            exclude_url:
+                현재 포스트 URL.
+
+        Returns:
+            최신순 BlogPost 리스트
+        """
+
+        if limit <= 0:
+            return []
+
+        feed = self._load_feed()
+
+        if not feed:
+            return []
+
+        posts: list[BlogPost] = []
+
+        normalized_exclude_url = (
+            (exclude_url or "").rstrip("/")
+        )
+
+        for entry in feed.entries[:limit + 10]:
+
+            url = entry.get(
+                "link",
+                "",
+            ).strip()
+
+            if not url:
+                continue
+
+            normalized_url = url.rstrip("/")
+
+            post_id = self._make_post_id(url)
+
+            if exclude_post_id and post_id == exclude_post_id:
+                continue
+
+            if (
+                normalized_exclude_url
+                and normalized_url == normalized_exclude_url
+            ):
+                continue
+
+            try:
+                post = self._parse_post(
+                    entry,
+                    post_id,
+                )
+
+                if post:
+                    posts.append(post)
+
+            except Exception as e:
+                logger.warning(
+                    f"최근 포스트 파싱 실패 "
+                    f"(url={url}): {e}"
+                )
+
+            if len(posts) >= limit:
+                break
+
+        logger.info(
+            f"연관 포스트 후보 {len(posts)}개 수집 완료"
+        )
+
+        return posts
+
+    def _parse_post(
+        self,
+        entry,
+        post_id: str,
+    ) -> BlogPost | None:
+        """
+        RSS 항목 + 실제 페이지 크롤링으로 BlogPost를 생성합니다.
+        """
+
+        title = _decode_html_entities(
+            entry.get(
+                "title",
+                "",
+            ).strip()
+        )
+
+        url = entry.get(
+            "link",
+            "",
+        ).strip()
+
+        published = entry.get(
+            "published",
+            "",
+        )
+
+        raw_tags = entry.get(
+            "tags",
+            [],
+        )
+
+        tags = []
+
+        for tag in raw_tags:
+            term = getattr(
+                tag,
+                "term",
+                "",
+            )
+
+            if term:
+                tags.append(
+                    _decode_html_entities(
+                        str(term)
+                    )
+                )
 
         if not url:
             return None
 
-        logger.info(f"글 크롤링 중: {url}")
-        try:
-            resp = self.session.get(url, timeout=15)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-        except Exception as e:
-            logger.warning(f"페이지 크롤링 실패: {e}")
-            soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-
-        # 본문 텍스트 추출 (티스토리 본문 선택자)
-        content_area = (
-            soup.find("div", class_="tt_article_useless_p_margin")
-            or soup.find("div", {"id": "content"})
-            or soup.find("article")
-            or soup.find("div", class_="entry-content")
+        logger.info(
+            f"글 크롤링 중: {url}"
         )
+
+        soup = None
+
+        try:
+            resp = self.session.get(
+                url,
+                timeout=15,
+            )
+
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(
+                resp.text,
+                "html.parser",
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"페이지 크롤링 실패: {e}"
+            )
+
+            soup = BeautifulSoup(
+                entry.get(
+                    "summary",
+                    "",
+                ),
+                "html.parser",
+            )
+
+        content_area = (
+            soup.find(
+                "div",
+                class_="tt_article_useless_p_margin",
+            )
+            or soup.find(
+                "div",
+                {"id": "content"},
+            )
+            or soup.find("article")
+            or soup.find(
+                "div",
+                class_="entry-content",
+            )
+        )
+
         if content_area:
-            # 목차(TOC) 플레이스홀더는 실제 콘텐츠가 아니므로 텍스트 추출
-            # 전에 제거합니다 (그대로 두면 full_text/summary 맨 앞에 "목차"
-            # 라는 글자가 섞여 들어가 SNS 문구·영상 나레이션 생성 프롬프트에
-            # 불필요한 노이즈로 전달됩니다).
-            _strip_toc_markup(content_area)
-            full_text = content_area.get_text(separator="\n", strip=True)
+
+            _strip_toc_markup(
+                content_area
+            )
+
+            _strip_related_posts_markup(
+                content_area
+            )
+
+            full_text = content_area.get_text(
+                separator="\n",
+                strip=True,
+            )
+
         else:
-            summary_soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-            _strip_toc_markup(summary_soup)
-            full_text = summary_soup.get_text(separator="\n", strip=True)
 
-        # 요약: 첫 300자
-        lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-        summary = " ".join(lines[:5])[:300]
+            summary_soup = BeautifulSoup(
+                entry.get(
+                    "summary",
+                    "",
+                ),
+                "html.parser",
+            )
 
-        thumbnail_url = _extract_thumbnail(soup, entry.get("summary", ""))
-        mode = _detect_mode(title, entry.get("published_parsed"))
+            _strip_toc_markup(
+                summary_soup
+            )
+
+            _strip_related_posts_markup(
+                summary_soup
+            )
+
+            full_text = summary_soup.get_text(
+                separator="\n",
+                strip=True,
+            )
+
+        lines = [
+            line.strip()
+            for line in full_text.split("\n")
+            if line.strip()
+        ]
+
+        summary = " ".join(
+            lines[:5]
+        )[:300]
+
+        thumbnail_url = _extract_thumbnail(
+            soup,
+            entry.get(
+                "summary",
+                "",
+            ),
+        )
+
+        mode = _detect_mode(
+            title,
+            entry.get(
+                "published_parsed"
+            ),
+        )
 
         return BlogPost(
             title=title,
             url=url,
             summary=summary,
-            full_text=full_text[:4000],  # 토큰 절약
+            full_text=full_text[:4000],
             thumbnail_url=thumbnail_url,
             tags=tags,
             published=published,
@@ -249,6 +677,34 @@ class TistoryCrawler:
             mode=mode,
         )
 
-    def get_post_as_dict(self, force: bool = False) -> dict | None:
-        post = self.get_latest_post(force=force)
+    def get_post_as_dict(
+        self,
+        force: bool = False,
+    ) -> dict | None:
+
+        post = self.get_latest_post(
+            force=force
+        )
+
         return asdict(post) if post else None
+
+    def get_recent_posts_as_dict(
+        self,
+        limit: int = DEFAULT_RECENT_POST_LIMIT,
+        exclude_post_id: str | None = None,
+        exclude_url: str | None = None,
+    ) -> list[dict]:
+        """
+        연관 포스트 검색용 최근 글 목록을 dict로 반환합니다.
+        """
+
+        posts = self.get_recent_posts(
+            limit=limit,
+            exclude_post_id=exclude_post_id,
+            exclude_url=exclude_url,
+        )
+
+        return [
+            asdict(post)
+            for post in posts
+        ]
