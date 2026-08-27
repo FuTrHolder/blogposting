@@ -1,7 +1,23 @@
 """
-숏폼 & 틱톡 영상 생성기 v9
+숏폼 & 틱톡 영상 생성기 v10
 ==============================================
-변경사항 (v9 — 영상 배경에 블로그 썸네일 재사용 중단):
+변경사항 (v10 — 영상 배경이 콘텐츠와 무관하게 나오는 문제 해결):
+  - [버그 수정] picsum.photos(완전 무작위 사진 서비스) 제거
+      v9에서 블로그 썸네일 재사용을 중단한 뒤, Cloudflare/Pexels가 모두
+      실패하면 최종 폴백으로 picsum.photos를 썼습니다. 그런데 picsum은
+      검색·키워드 필터링이 아예 불가능한 "무작위" 사진 서비스라서, 나스닥
+      실적 발표 나레이션에 식물 사진이 배경으로 나오는 등 콘텐츠·채널
+      주제와 전혀 무관한 배경이 노출되는 문제가 실사용 중 확인됐습니다.
+      → picsum 호출을 완전히 제거하고, Cloudflare Workers AI와 Pexels가
+        모두 실패하는 경우 _prepare_bg()가 자동 적용하는 브랜드 그라디언트
+        (모드별 파란색/보라색 톤, _make_gradient_bg)로 대체합니다. 최소한
+        "주제와 무관한 이미지"가 나오는 일은 구조적으로 없어집니다.
+  - [개선] Pexels 배경 검색이 keywords 리스트의 첫 번째 키워드만 시도하던
+    것을, 리스트 전체를 순서대로 시도하도록 변경 — 첫 키워드로 검색 결과가
+    0건이어도 곧장 실패 처리하지 않고 다음 키워드로 재시도해, 관련성 있는
+    사진을 찾을 확률을 높였습니다.
+
+v9 유지:
   - [버그 수정] 배경에 블로그 제목 글자가 겹쳐 보이는 문제 해결
       image_generator.py가 블로그 대표 썸네일 중앙에 제목 텍스트를 굽는(overlay)
       기능이 추가된 이후, 이 영상 생성기가 그 썸네일을 영상 배경 1순위로
@@ -11,7 +27,7 @@
       → generate()/generate_tiktok() 양쪽 모두 thumbnail_url을 배경으로
         더 이상 사용하지 않습니다. 대신 Cloudflare Workers AI(FLUX.1-schnell,
         완전 무료·신용카드 불필요)로 텍스트가 전혀 없는 새 배경을 1순위로
-        생성하고, 실패 시 기존 Pexels → picsum 순서로 폴백합니다.
+        생성하고, 실패 시 기존 Pexels 순서로 폴백합니다.
       - thumbnail_url 매개변수 자체는 호출부 호환을 위해 시그니처에 남겨
         두었으나, 배경 생성에는 더 이상 쓰이지 않습니다.
 
@@ -995,7 +1011,8 @@ def _make_slide(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 배경 이미지 확보 (Cloudflare Workers AI / Pexels / picsum)
+# 배경 이미지 확보 (Cloudflare Workers AI / Pexels — 관련성 없는 무작위
+# 사진(picsum)은 v10에서 제거, 실패 시 브랜드 그라디언트로 대체)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _download_bg_cloudflare(
@@ -1013,7 +1030,8 @@ def _download_bg_cloudflare(
     텍스트가 전혀 없는 이 함수의 결과물을 우선 사용합니다.
 
     CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN이 없으면 조용히 실패(False)
-    반환 — 호출부가 Pexels → picsum 순으로 자동 폴백합니다.
+    반환 — 호출부가 Pexels로 자동 폴백하고, 그마저 실패하면 브랜드
+    그라디언트를 사용합니다 (v10 — 콘텐츠와 무관한 사진이 나오는 것을 방지).
     """
     if not cf_account_id or not cf_api_token:
         return False
@@ -1072,33 +1090,57 @@ def _download_bg_cloudflare(
 
 
 def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> bool:
+    """
+    Pexels에서 영상 배경 사진을 찾습니다. keywords 리스트를 순서대로 모두
+    시도합니다 — 첫 번째 키워드로 검색 결과가 없으면(0건) 그냥 실패 처리하지
+    않고 다음 키워드로 계속 시도해, 콘텐츠와 무관한 배경으로 빠지는 것을
+    최대한 막습니다.
+    """
     if not pexels_key:
         return False
-    query = keywords[0] if keywords else "finance"
-    try:
-        resp = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": pexels_key},
-            params={"query": query, "per_page": 10, "orientation": "portrait"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        photos = resp.json().get("photos", [])
-        if not photos:
-            return False
-        idx     = int(time.time() / 86400) % len(photos)
-        img_url = photos[idx]["src"]["large2x"]
-        ir      = requests.get(img_url, timeout=30)
-        ir.raise_for_status()
-        dest.write_bytes(ir.content)
-        Image.open(dest).verify()
-        return True
-    except Exception as e:
-        logger.warning(f"Pexels 실패: {e}")
-        return False
+
+    queries = keywords if keywords else ["finance"]
+    for query in queries:
+        try:
+            resp = requests.get(
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": pexels_key},
+                params={"query": query, "per_page": 10, "orientation": "portrait"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            photos = resp.json().get("photos", [])
+            if not photos:
+                logger.info(f"Pexels 검색 결과 없음({query}) — 다음 키워드로 재시도")
+                continue
+
+            idx     = int(time.time() / 86400) % len(photos)
+            img_url = photos[idx]["src"]["large2x"]
+            ir      = requests.get(img_url, timeout=30)
+            ir.raise_for_status()
+            dest.write_bytes(ir.content)
+            Image.open(dest).verify()
+            logger.info(f"Pexels 배경 확보 성공: '{query}'")
+            return True
+        except Exception as e:
+            logger.warning(f"Pexels 실패 (키워드: {query}): {e}")
+            continue
+
+    logger.warning(f"Pexels: 모든 키워드 시도 실패 {queries}")
+    return False
 
 
-def _download_bg_picsum(dest: Path, seed: int = 0) -> bool:
+def _download_bg_picsum_DEPRECATED_unused(dest: Path, seed: int = 0) -> bool:
+    """
+    [v10에서 사용 중단] picsum.photos는 검색/키워드 필터링이 전혀 불가능한
+    "완전 무작위" 스톡사진 서비스입니다 (seed 번호로 아무 사진이나 반환 —
+    나스닥 관련 영상에 식물·동물·풍경 사진이 나올 수 있음). 나레이션·채널
+    주제와 무관한 배경이 나온다는 실사용 리포트가 있어, 이 함수는 더 이상
+    generate()/generate_tiktok() 어디에서도 호출되지 않습니다. 대신 Cloudflare
+    Workers AI와 Pexels가 모두 실패하면 _prepare_bg()가 자동으로 적용하는
+    브랜드 그라디언트(_make_gradient_bg, 모드별 파란색/보라색 톤)로 대체됩니다
+    — 최소한 콘텐츠와 "무관한" 이미지가 나오는 일은 없습니다.
+    """
     try:
         url  = f"https://picsum.photos/seed/{seed}/1080/1920"
         resp = requests.get(url, timeout=20, allow_redirects=True)
@@ -1251,19 +1293,21 @@ class VideoGenerator:
             # 재사용하면 여기서 그리는 키워드 박스·자막과 겹쳐 부조화스럽게
             # 보입니다 (실제 리포트된 버그). 그래서 더 이상 thumbnail_url을
             # 배경으로 쓰지 않고, 항상 텍스트 없는 새 이미지를 생성/수집합니다:
-            #   1순위: Cloudflare Workers AI (완전 무료)
-            #   2순위: Pexels
-            #   3순위: picsum 그라디언트
+            #   1순위: Cloudflare Workers AI (완전 무료, bg_keywords 기반 생성)
+            #   2순위: Pexels (bg_keywords 전체를 순서대로 검색)
+            # [v10] 기존 3순위였던 picsum.photos는 제거했습니다 — picsum은
+            # 검색/키워드 필터링이 아예 불가능한 "완전 무작위" 사진 서비스라
+            # 나스닥 시황 나레이션에 식물·동물 사진이 나오는 등 콘텐츠와 전혀
+            # 무관한 배경이 나올 수 있다는 리포트가 있었습니다. 1·2순위가 모두
+            # 실패하면(예: 두 API 키 모두 미설정) 무관한 사진 대신 차라리
+            # _prepare_bg()의 브랜드 그라디언트(모드별 파란색/보라색 톤)를
+            # 그대로 쓰는 편이 콘텐츠 집중도를 해치지 않습니다.
             bg_path = tmp / "bg.jpg"
             bg_ok   = _download_bg_cloudflare(
                 kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
             )
             if not bg_ok:
                 bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
-            if not bg_ok:
-                import hashlib
-                seed  = int(hashlib.md5(f"{mode}{filename}".encode()).hexdigest()[:8], 16)
-                bg_ok = _download_bg_picsum(bg_path, seed % 1000)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
@@ -1413,9 +1457,10 @@ class VideoGenerator:
             빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
             끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
             이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
-          - [v9] 배경도 generate()와 동일하게 thumbnail_url을 쓰지 않고
-            Pexels(1순위, 더 역동적인 톤) → Cloudflare Workers AI(2순위) →
-            picsum(3순위) 순서로 텍스트 없는 이미지만 사용합니다.
+          - [v9→v10] 배경도 generate()와 동일하게 thumbnail_url을 쓰지 않고
+            Pexels(1순위, 더 역동적인 톤, 키워드 전체 순차 시도) → Cloudflare
+            Workers AI(2순위) 순서로 텍스트 없는 이미지만 사용합니다. 둘 다
+            실패하면(v10) 무관한 무작위 사진 대신 브랜드 그라디언트를 씁니다.
         """
         theme = THEMES.get(mode, THEMES["morning"])
         # bg_keywords가 명시적으로 전달되지 않았으면 틱톡 전용(더 역동적인) 키워드 사용
@@ -1457,9 +1502,13 @@ class VideoGenerator:
 
             # 2. 배경 이미지 확보 (v9: thumbnail_url 재사용 제거)
             # 쇼츠와 차별화 — 틱톡은 역동적인 Pexels 배경을 1순위로 시도하고,
-            # 실패 시 Cloudflare Workers AI(텍스트 없는 새 이미지)로 폴백,
-            # 그마저 실패하면 picsum 그라디언트를 씁니다. 블로그 대표 썸네일은
-            # 제목 텍스트가 박혀 있어 더 이상 후보에 넣지 않습니다.
+            # 실패 시 Cloudflare Workers AI(텍스트 없는 새 이미지)로 폴백합니다.
+            # 블로그 대표 썸네일은 제목 텍스트가 박혀 있어 더 이상 후보에
+            # 넣지 않습니다. [v10] 기존 최종 폴백이던 picsum.photos(완전
+            # 무작위 사진, 키워드 필터링 불가)도 제거했습니다 — 나스닥 시황
+            # 나레이션에 식물·동물 사진이 나오는 등 콘텐츠와 무관한 배경이
+            # 나올 수 있어, 두 소스가 모두 실패하면 차라리 _prepare_bg()의
+            # 브랜드 그라디언트를 그대로 씁니다.
             bg_path = tmp / "bg.jpg"
             bg_ok   = _download_bg_pexels(kws, bg_path, self.pexels_key)
 
@@ -1467,11 +1516,6 @@ class VideoGenerator:
                 bg_ok = _download_bg_cloudflare(
                     kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
                 )
-
-            if not bg_ok:
-                import hashlib
-                seed  = int(hashlib.md5(f"tiktok{mode}{filename}".encode()).hexdigest()[:8], 16)
-                bg_ok = _download_bg_picsum(bg_path, seed % 1000)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
