@@ -493,4 +493,1125 @@ def _build_evening_prompt(
 
     news_text = "\n[수집된 주요 뉴스 & 이슈]\n"
 
-    for
+    for i, news in enumerate(news_list, 1):
+
+        sentiment = news.get("sentiment", "")
+        suffix = f" [{sentiment}]" if sentiment else ""
+
+        news_text += (
+            f"{i}. {news.get('title', '')}{suffix}\n"
+        )
+
+        if news.get("summary"):
+            summary = (
+                news["summary"][:200]
+                .replace("\n", " ")
+            )
+
+            news_text += f"   → {summary}\n"
+
+    directions = [
+        v.get("direction", "")
+        for k, v in market_data.items()
+        if k != "fear_greed"
+        and v
+        and isinstance(v, dict)
+    ]
+
+    up_count = sum(
+        1 for d in directions
+        if "상승" in d
+    )
+
+    down_count = sum(
+        1 for d in directions
+        if "하락" in d
+    )
+
+    if up_count > down_count:
+        premarket_hint = (
+            "프리마켓은 전반적으로 강세 흐름입니다."
+        )
+    elif down_count > up_count:
+        premarket_hint = (
+            "프리마켓은 전반적으로 약세 흐름입니다."
+        )
+    else:
+        premarket_hint = _pick_mixed_market_phrase(
+            korean_date,
+            "프리마켓은",
+        )
+
+    fact_block_text = (
+        f"\n{fact_reference_block}\n"
+        if fact_reference_block
+        else ""
+    )
+
+    return (
+        f"{market_text}"
+        f"{news_text}\n"
+        f"[프리마켓 요약] {premarket_hint}\n"
+        f"{fact_block_text}\n"
+        "위 데이터를 바탕으로 저녁 9시 블로그 포스팅을 "
+        "작성하세요.\n\n"
+        "작성 흐름:\n"
+        "1) 전일 미국 정규장 마감 리뷰\n"
+        "2) 애프터마켓 이후 현재 프리장까지 주요 이슈\n"
+        "3) 오늘 밤 발표 예정 경제지표·기업실적\n"
+        "4) 현재 프리마켓/선물 동향\n"
+        "5) 오늘 밤 강세·약세 시나리오\n\n"
+        "D+0이 아닌 항목은 오늘 밤 발표 예정이라고 "
+        "표현하지 마세요.\n"
+        "지정된 JSON 형식으로만 응답하세요."
+    )
+
+
+class ContentGenerator:
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def _call_gemini(
+        self,
+        system: str,
+        prompt: str,
+        max_retries: int = 3,
+    ) -> str:
+
+        generation_config = {
+            "temperature": 0.85,
+            "maxOutputTokens": 16384,
+            "responseMimeType": "application/json",
+        }
+
+        payload = {
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": system
+                    }
+                ]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": generation_config,
+        }
+
+        data = json.dumps(
+            payload,
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        last_error = None
+
+        for model in GEMINI_MODELS:
+
+            url = (
+                f"{_gemini_url(model)}"
+                f"?key={self.api_key}"
+            )
+
+            logger.info(
+                f"Gemini 모델 시도: {model}"
+            )
+
+            for attempt in range(
+                1,
+                max_retries + 1,
+            ):
+
+                try:
+
+                    req = urllib.request.Request(
+                        url,
+                        data=data,
+                        headers={
+                            "Content-Type":
+                                "application/json"
+                        },
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(
+                        req,
+                        timeout=120,
+                    ) as resp:
+
+                        result = json.loads(
+                            resp.read().decode(
+                                "utf-8"
+                            )
+                        )
+
+                    candidates = result.get(
+                        "candidates",
+                        [],
+                    )
+
+                    if not candidates:
+                        raise RuntimeError(
+                            "Gemini 응답에 candidates가 없습니다."
+                        )
+
+                    candidate = candidates[0]
+
+                    finish_reason = candidate.get(
+                        "finishReason",
+                        "",
+                    )
+
+                    parts = (
+                        candidate
+                        .get("content", {})
+                        .get("parts", [])
+                    )
+
+                    raw = "".join(
+                        p.get("text", "")
+                        for p in parts
+                    ).strip()
+
+                    if finish_reason == "MAX_TOKENS":
+
+                        logger.warning(
+                            "Gemini 응답이 MAX_TOKENS로 잘림 "
+                            f"(모델: {model}, "
+                            f"시도 {attempt}/{max_retries})"
+                        )
+
+                        if attempt < max_retries:
+
+                            time.sleep(
+                                min(
+                                    5 * attempt,
+                                    15,
+                                )
+                            )
+
+                            continue
+
+                        break
+
+                    if not raw:
+
+                        logger.warning(
+                            "Gemini 빈 응답 "
+                            f"(모델: {model}, "
+                            f"finishReason: "
+                            f"{finish_reason}, "
+                            f"시도 {attempt}/{max_retries})"
+                        )
+
+                        if attempt < max_retries:
+
+                            time.sleep(
+                                min(
+                                    5 * attempt,
+                                    15,
+                                )
+                            )
+
+                            continue
+
+                        break
+
+                    logger.info(
+                        "Gemini 응답 성공 "
+                        f"(모델: {model}, "
+                        f"{len(raw)}자)"
+                    )
+
+                    return raw
+
+                except urllib.error.HTTPError as e:
+
+                    body = e.read().decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+
+                    last_error = e
+
+                    if e.code in _RETRYABLE_CODES:
+
+                        base_wait = (
+                            30
+                            if e.code == 429
+                            else 20
+                        )
+
+                        wait = min(
+                            base_wait * attempt,
+                            120,
+                        )
+
+                        logger.warning(
+                            f"Gemini {e.code} "
+                            f"(모델: {model}, "
+                            f"시도 {attempt}/{max_retries}). "
+                            f"{wait}초 대기 후 재시도..."
+                        )
+
+                        if attempt < max_retries:
+                            time.sleep(wait)
+
+                    elif e.code == 404:
+
+                        logger.error(
+                            f"Gemini 모델을 찾을 수 없음 "
+                            f"(모델: {model}): "
+                            f"{body[:500]}"
+                        )
+
+                        # 404는 해당 모델 자체가 사용할 수 없는 것이므로
+                        # 같은 모델을 반복 호출하지 않고 다음 모델로 이동
+                        break
+
+                    else:
+
+                        logger.error(
+                            f"Gemini API 오류 "
+                            f"{e.code} "
+                            f"(모델: {model}): "
+                            f"{body[:500]}"
+                        )
+
+                        raise
+
+                except urllib.error.URLError as e:
+
+                    last_error = e
+
+                    wait = min(
+                        15 * attempt,
+                        60,
+                    )
+
+                    logger.warning(
+                        "Gemini 네트워크 오류 "
+                        f"(모델: {model}, "
+                        f"시도 {attempt}/{max_retries}): "
+                        f"{e}. {wait}초 대기..."
+                    )
+
+                    if attempt < max_retries:
+                        time.sleep(wait)
+
+                except Exception as e:
+
+                    last_error = e
+
+                    logger.warning(
+                        "Gemini 호출 실패 "
+                        f"(모델: {model}, "
+                        f"시도 {attempt}/{max_retries}): "
+                        f"{e}"
+                    )
+
+                    if attempt < max_retries:
+                        time.sleep(
+                            min(
+                                10 * attempt,
+                                30,
+                            )
+                        )
+
+            logger.warning(
+                f"모델 {model} 모든 시도 실패 "
+                "→ 다음 모델로 폴백"
+            )
+
+        raise RuntimeError(
+            "모든 Gemini 모델 호출 실패. "
+            f"시도 모델: {', '.join(GEMINI_MODELS)}. "
+            f"마지막 오류: {last_error}"
+        )
+
+    def generate_post(
+        self,
+        date: str,
+        market_data: dict,
+        news_list: list[dict],
+        mode: str = "morning",
+        korean_date: str | None = None,
+        us_market_date: str | None = None,
+        korean_datetime_str: str | None = None,
+        ny_reference_str: str | None = None,
+        fact_reference_block: str = "",
+        fact_lookup: dict | None = None,
+    ) -> dict:
+
+        _korean_date = korean_date or date
+        _us_market_date = us_market_date or date
+        _korean_datetime_str = (
+            korean_datetime_str or ""
+        )
+        _ny_reference_str = (
+            ny_reference_str or ""
+        )
+
+        if mode == "evening":
+
+            system = SYSTEM_EVENING
+
+            prompt = _build_evening_prompt(
+                _korean_date,
+                _us_market_date,
+                market_data,
+                news_list,
+                _korean_datetime_str,
+                _ny_reference_str,
+                fact_reference_block,
+            )
+
+        else:
+
+            system = SYSTEM_MORNING
+
+            prompt = _build_morning_prompt(
+                _korean_date,
+                _us_market_date,
+                market_data,
+                news_list,
+                _korean_datetime_str,
+                _ny_reference_str,
+                fact_reference_block,
+            )
+
+        logger.info(
+            f"Gemini API 호출 중 (모드: {mode})..."
+        )
+
+        max_json_retries = 2
+        last_error = None
+
+        for json_attempt in range(
+            1,
+            max_json_retries + 2,
+        ):
+
+            raw = self._call_gemini(
+                system,
+                prompt,
+            )
+
+            try:
+
+                post = self._parse_json_response(
+                    raw
+                )
+
+                post = self._strip_image_tags(
+                    post
+                )
+
+                post = self._ensure_required_fields(
+                    post,
+                    mode,
+                )
+
+                post = self._normalize_disclaimer(
+                    post
+                )
+
+                logger.info(
+                    f"생성된 글자 수: "
+                    f"{len(post.get('content', ''))}자"
+                )
+
+                logger.info(
+                    f"생성된 제목: "
+                    f"{post.get('title', '')}"
+                )
+
+                post = self._fact_check_and_correct(
+                    post,
+                    system,
+                    prompt,
+                    fact_lookup,
+                    mode,
+                )
+
+                post = self._normalize_disclaimer(
+                    post
+                )
+
+                post = self._prepend_toc(
+                    post
+                )
+
+                return post
+
+            except json.JSONDecodeError as e:
+
+                last_error = e
+
+                logger.warning(
+                    "JSON 파싱 실패 "
+                    f"(시도 {json_attempt}/"
+                    f"{max_json_retries + 1}): {e}"
+                )
+
+                if (
+                    json_attempt
+                    <= max_json_retries
+                ):
+
+                    logger.info(
+                        "Gemini를 재호출해 "
+                        "다시 시도합니다..."
+                    )
+
+        raise RuntimeError(
+            "Gemini 응답을 JSON으로 파싱하는 데 "
+            f"{max_json_retries + 1}회 모두 실패했습니다: "
+            f"{last_error}"
+        )
+
+    def _fact_check_and_correct(
+        self,
+        post: dict,
+        system: str,
+        original_prompt: str,
+        fact_lookup: dict | None,
+        mode: str = "morning",
+    ) -> dict:
+
+        if not fact_lookup:
+            return post
+
+        try:
+
+            import fact_checker
+
+            violations = fact_checker.check_facts(
+                post,
+                fact_lookup,
+            )
+
+        except Exception as e:
+
+            logger.warning(
+                f"팩트체크 검사 중 오류 "
+                f"(원본 유지): {e}"
+            )
+
+            return post
+
+        if not violations:
+
+            logger.info(
+                "팩트체크: 실적/지표 발표일 "
+                "관련 사실 오류 없음"
+            )
+
+            return post
+
+        logger.warning(
+            f"팩트체크: {len(violations)}건의 "
+            "사실 오류 후보 발견"
+        )
+
+        for v in violations:
+
+            logger.warning(
+                f"  - [{v['type']}/{v['source']}] "
+                f"{v['entity']}: "
+                f"발견='{v.get('found_date')}' "
+                f"기대='{v.get('expected_date')}' "
+                f"(자동교정="
+                f"{'가능' if v.get('auto_fixable') else '불가'})"
+            )
+
+        post, applied, remaining = (
+            fact_checker.auto_correct_facts(
+                post,
+                violations,
+            )
+        )
+
+        if applied:
+
+            logger.warning(
+                f"팩트체크: {len(applied)}건 "
+                "자동 교정 완료"
+            )
+
+        if not remaining:
+
+            return self._normalize_disclaimer(
+                post
+            )
+
+        logger.warning(
+            f"팩트체크: {len(remaining)}건 "
+            "Gemini 재생성 요청"
+        )
+
+        correction_note = (
+            fact_checker.build_correction_prompt_note(
+                remaining
+            )
+        )
+
+        corrected_prompt = (
+            original_prompt
+            + "\n\n"
+            + correction_note
+        )
+
+        try:
+
+            raw2 = self._call_gemini(
+                system,
+                corrected_prompt,
+            )
+
+            post2 = self._parse_json_response(
+                raw2
+            )
+
+            post2 = self._strip_image_tags(
+                post2
+            )
+
+            post2 = self._ensure_required_fields(
+                post2,
+                mode,
+            )
+
+            post2 = self._normalize_disclaimer(
+                post2
+            )
+
+        except Exception as e:
+
+            logger.warning(
+                f"팩트체크 재생성 실패 "
+                f"(원본 유지): {e}"
+            )
+
+            post = fact_checker.neutralize_unresolved(
+                post,
+                remaining,
+            )
+
+            return self._normalize_disclaimer(
+                post
+            )
+
+        violations2 = fact_checker.check_facts(
+            post2,
+            fact_lookup,
+        )
+
+        if not violations2:
+
+            logger.info(
+                "팩트체크: 재생성 후 "
+                "모든 사실 오류 해결"
+            )
+
+            return self._normalize_disclaimer(
+                post2
+            )
+
+        post2, applied2, remaining2 = (
+            fact_checker.auto_correct_facts(
+                post2,
+                violations2,
+            )
+        )
+
+        if applied2:
+
+            logger.warning(
+                f"팩트체크: 재생성본에서 "
+                f"{len(applied2)}건 추가 교정"
+            )
+
+        if remaining2:
+
+            logger.error(
+                f"팩트체크: 재생성 후에도 "
+                f"{len(remaining2)}건 미해결 "
+                "→ 안전 대체"
+            )
+
+            post2 = fact_checker.neutralize_unresolved(
+                post2,
+                remaining2,
+            )
+
+        return self._normalize_disclaimer(
+            post2
+        )
+
+    @staticmethod
+    def _normalize_disclaimer(
+        post: dict,
+    ) -> dict:
+        """
+        면책조항의 티스토리 HTML 형식을 최종 단계에서 강제합니다.
+
+        Gemini가 다음과 같이 반환해도:
+
+            <blockquote><p>...</p></blockquote>
+
+        최종적으로:
+
+            <blockquote data-ke-style="style3">
+                <p>...</p>
+            </blockquote>
+
+        형태가 되도록 보정합니다.
+
+        면책조항이 없으면 마지막에 고정 면책조항을 추가합니다.
+        """
+
+        post = dict(post)
+
+        content = post.get(
+            "content",
+            "",
+        ) or ""
+
+        if not content:
+            post["content"] = DISCLAIMER_HTML
+            return post
+
+        # 기존 blockquote가 있는 경우
+        # 모든 속성을 제거하고 티스토리 style3으로 통일
+        content = re.sub(
+            r"<blockquote\b[^>]*>",
+            '<blockquote data-ke-style="style3">',
+            content,
+            flags=re.IGNORECASE,
+        )
+
+        # 닫는 blockquote 뒤에 다른 콘텐츠가 있다면
+        # 마지막 blockquote를 유지하되, 최종적으로 면책조항이
+        # 마지막 HTML 요소가 되도록 처리합니다.
+        if "<blockquote" in content.lower():
+
+            # 기존 blockquote가 이미 존재하면
+            # 마지막 blockquote 이후의 불필요한 텍스트를 제거합니다.
+            match = list(
+                re.finditer(
+                    r"</blockquote>",
+                    content,
+                    flags=re.IGNORECASE,
+                )
+            )
+
+            if match:
+
+                last_end = match[-1].end()
+
+                before = content[:last_end]
+
+                # 마지막 blockquote의 내용은 그대로 두되
+                # data-ke-style만 강제합니다.
+                content = before.strip()
+
+        else:
+
+            # Gemini가 면책조항을 아예 누락한 경우
+            # 반드시 고정 면책조항 추가
+            content = (
+                content.rstrip()
+                + "\n"
+                + DISCLAIMER_HTML
+            )
+
+        # 혹시 빈 blockquote가 생성됐으면 고정 면책조항으로 교체
+        content = re.sub(
+            r'<blockquote data-ke-style="style3">'
+            r'\s*</blockquote>',
+            DISCLAIMER_HTML,
+            content,
+            flags=re.IGNORECASE,
+        )
+
+        post["content"] = content
+
+        return post
+
+    @staticmethod
+    def _prepend_toc(
+        post: dict,
+    ) -> dict:
+        """
+        본문 최상단에 티스토리 목차를 삽입합니다.
+        """
+
+        post = dict(post)
+
+        content = post.get(
+            "content",
+            "",
+        ) or ""
+
+        if 'id="toc"' in content:
+
+            return post
+
+        post["content"] = (
+            f"{TOC_HTML_SNIPPET}\n"
+            f"{content}"
+        )
+
+        return post
+
+    @staticmethod
+    def _ensure_required_fields(
+        post: dict,
+        mode: str,
+    ) -> dict:
+        """
+        Gemini 응답에서 필수 필드가 누락되더라도
+        파이프라인이 KeyError로 종료되지 않도록 보장합니다.
+        """
+
+        post = dict(post)
+
+        if not post.get("title"):
+
+            logger.warning(
+                "Gemini 응답에 title 필드 누락 "
+                "— 기본값으로 대체"
+            )
+
+            post["title"] = (
+                "미국 증시 브리핑"
+            )
+
+        if not post.get("content"):
+
+            logger.warning(
+                "Gemini 응답에 content 필드 누락 "
+                "— 빈 문자열로 대체"
+            )
+
+            post["content"] = ""
+
+        if (
+            not isinstance(
+                post.get("tags"),
+                list,
+            )
+            or not post.get("tags")
+        ):
+
+            logger.warning(
+                "Gemini 응답에 tags 필드 누락 "
+                "— 기본 태그로 대체"
+            )
+
+            post["tags"] = [
+                "미국증시",
+                "주식",
+                "나스닥",
+                "S&P500",
+                "증시분석",
+            ]
+
+        if not post.get("image_prompt"):
+
+            logger.warning(
+                "Gemini 응답에 image_prompt "
+                "필드 누락 — 기본 프롬프트로 대체"
+            )
+
+            post["image_prompt"] = (
+                FALLBACK_IMAGE_PROMPT.get(
+                    mode,
+                    FALLBACK_IMAGE_PROMPT["morning"],
+                )
+            )
+
+        return post
+
+    @staticmethod
+    def _strip_image_tags(
+        post: dict,
+    ) -> dict:
+        """
+        본문에 삽입된 이미지 태그를 제거합니다.
+        """
+
+        content = post.get(
+            "content",
+            "",
+        ) or ""
+
+        if not content:
+            return post
+
+        before_len = len(content)
+
+        # 티스토리 이미지 태그
+        content = re.sub(
+            r"\[##_Image\|[^\]]*_##\]",
+            "",
+            content,
+        )
+
+        # Markdown 이미지
+        content = re.sub(
+            r"!\[[^\]]*\]\([^)]*\)",
+            "",
+            content,
+        )
+
+        # HTML img
+        content = re.sub(
+            r"<img\b[^>]*>",
+            "",
+            content,
+            flags=re.IGNORECASE,
+        )
+
+        # 빈 줄 정리
+        content = re.sub(
+            r"\n{3,}",
+            "\n\n",
+            content,
+        )
+
+        content = content.strip()
+
+        if len(content) != before_len:
+
+            logger.warning(
+                "본문에서 이미지 태그 제거함 "
+                f"({before_len - len(content)}자 감소)"
+            )
+
+        post = dict(post)
+        post["content"] = content
+
+        return post
+
+    @staticmethod
+    def _parse_json_response(
+        raw: str,
+    ) -> dict:
+        """
+        Gemini 응답을 JSON으로 파싱합니다.
+
+        1. 코드블록 제거
+        2. 직접 json.loads
+        3. JSON 객체 범위 추출 후 파싱
+        4. 필드별 안전 추출
+        """
+
+        if not raw:
+            raise json.JSONDecodeError(
+                "빈 Gemini 응답",
+                "",
+                0,
+            )
+
+        candidate = raw.strip()
+
+        # ── 1단계: Markdown 코드블록 제거 ──────────────────────────────────
+        if "```" in candidate:
+
+            blocks = re.findall(
+                r"```(?:json)?\s*(.*?)```",
+                candidate,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
+            for block in blocks:
+
+                block = block.strip()
+
+                try:
+
+                    result = json.loads(block)
+
+                    if isinstance(result, dict):
+                        return result
+
+                except json.JSONDecodeError:
+                    continue
+
+            candidate = re.sub(
+                r"```(?:json)?",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+
+            candidate = candidate.replace(
+                "```",
+                "",
+            ).strip()
+
+        # ── 2단계: 직접 JSON 파싱 ───────────────────────────────────────────
+        try:
+
+            result = json.loads(candidate)
+
+            if isinstance(result, dict):
+                return result
+
+        except json.JSONDecodeError:
+            pass
+
+        # ── 3단계: 첫 { ~ 마지막 } 범위 추출 ───────────────────────────────
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+
+        if start >= 0 and end > start:
+
+            json_candidate = candidate[
+                start:end + 1
+            ]
+
+            try:
+
+                result = json.loads(
+                    json_candidate
+                )
+
+                if isinstance(result, dict):
+                    return result
+
+            except json.JSONDecodeError:
+                pass
+
+        # ── 4단계: 필드별 안전 추출 ────────────────────────────────────────
+        logger.warning(
+            "JSON 파싱 전략 1~3 실패 "
+            "— 필드별 추출 시도"
+        )
+
+        def extract_string_field(
+            text: str,
+            field: str,
+        ) -> str:
+
+            pattern = (
+                rf'"{re.escape(field)}"\s*:\s*"'
+                r'((?:\\.|[^"\\])*)"\s*(?=,|\})'
+            )
+
+            match = re.search(
+                pattern,
+                text,
+                flags=re.DOTALL,
+            )
+
+            if not match:
+                return ""
+
+            value = match.group(1)
+
+            try:
+
+                # JSON 문자열 자체를 안전하게 디코딩
+                return json.loads(
+                    '"' + value + '"'
+                )
+
+            except Exception:
+
+                return (
+                    value
+                    .replace("\\n", "\n")
+                    .replace('\\"', '"')
+                    .replace("\\\\", "\\")
+                )
+
+        def extract_tags(
+            text: str,
+        ) -> list:
+
+            match = re.search(
+                r'"tags"\s*:\s*(.*?)',
+                text,
+                flags=re.DOTALL,
+            )
+
+            if not match:
+                return []
+
+            raw_tags = match.group(1)
+
+            tags = re.findall(
+                r'"((?:\\.|[^"\\])*)"',
+                raw_tags,
+            )
+
+            result = []
+
+            for tag in tags:
+
+                try:
+                    result.append(
+                        json.loads(
+                            '"' + tag + '"'
+                        )
+                    )
+
+                except Exception:
+
+                    result.append(
+                        tag.replace(
+                            '\\"',
+                            '"',
+                        )
+                    )
+
+            return result
+
+        title = extract_string_field(
+            candidate,
+            "title",
+        )
+
+        content = extract_string_field(
+            candidate,
+            "content",
+        )
+
+        image_prompt = extract_string_field(
+            candidate,
+            "image_prompt",
+        )
+
+        tags = extract_tags(candidate)
+
+        if title or content:
+
+            logger.warning(
+                "필드별 JSON 추출 성공 "
+                f"(title={title[:30]}..., "
+                f"content={len(content)}자)"
+            )
+
+            return {
+                "title": title,
+                "content": content,
+                "tags": tags,
+                "image_prompt": image_prompt,
+            }
+
+        # 모든 방법 실패
+        raise json.JSONDecodeError(
+            "Gemini 응답을 JSON으로 파싱할 수 없습니다.",
+            raw,
+            0,
+        )
