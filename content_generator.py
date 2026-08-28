@@ -891,7 +891,7 @@ class ContentGenerator:
             f"Gemini API 호출 중 (모드: {mode})..."
         )
 
-               max_json_retries = 2
+        max_json_retries = 2
         last_error = None
 
         for json_attempt in range(
@@ -1118,11 +1118,6 @@ class ContentGenerator:
                 mode,
             )
 
-            post2 = self._ensure_required_fields(
-                post2,
-                mode,
-            )
-
             post2_content = (
                 post2.get("content", "")
                 or ""
@@ -1148,11 +1143,7 @@ class ContentGenerator:
             post2 = self._normalize_disclaimer(
                 post2
             )
-
-            post2 = self._normalize_disclaimer(
-                post2
-            )
-
+           
         except Exception as e:
 
             logger.warning(
@@ -1332,7 +1323,7 @@ class ContentGenerator:
 
         return post
 
-        @staticmethod
+    @staticmethod
     def _ensure_required_fields(
         post: dict,
         mode: str,
@@ -1485,7 +1476,7 @@ class ContentGenerator:
 
         return post
 
-        @staticmethod
+    @staticmethod
     def _parse_json_response(
         raw: str,
     ) -> dict:
