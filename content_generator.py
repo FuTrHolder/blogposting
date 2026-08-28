@@ -953,6 +953,19 @@ class ContentGenerator:
                     or ""
                 ).strip()
 
+                ContentGenerator._validate_content_integrity(
+                    final_content,
+                    "최종 원고",
+                )
+
+                post["content"] = final_content
+
+                post = self._prepend_toc(
+                    post
+                )
+
+                return post
+
                 if not final_content:
                     raise ValueError(
                         "후처리 이후 content가 비어 있습니다. "
@@ -1481,18 +1494,20 @@ class ContentGenerator:
         raw: str,
     ) -> dict:
         """
-        Gemini 응답을 최대한 안전하게 JSON으로 복원합니다.
+        Gemini 응답을 안전하게 JSON으로 복원합니다.
 
         처리 순서:
         1. Markdown 코드블록 제거
         2. 일반 json.loads
-        3. JSON 객체 범위 탐색 + json.loads
+        3. JSON 객체 범위 추출
         4. JSONDecoder.raw_decode
         5. 필드별 안전 추출
-        6. content가 존재하는 경우 불완전 JSON에서도 본문 복구
 
-        특히 content는 HTML 본문이 길기 때문에 단순 정규식으로
-        추출하지 않습니다.
+        중요:
+        - content 내부의 큰따옴표를 JSON 종료 문자로 오인하지 않습니다.
+        - Gemini가 JSON을 부분적으로 깨뜨린 경우에도
+          content 전체를 최대한 보존합니다.
+        - 본문이 중간에서 잘린 경우 정상 응답으로 처리하지 않습니다.
         """
 
         if not raw:
@@ -1543,7 +1558,7 @@ class ContentGenerator:
         ).strip()
 
         # ---------------------------------------------------------
-        # 2. 직접 JSON 파싱
+        # 2. 정상 JSON
         # ---------------------------------------------------------
         try:
             result = json.loads(candidate)
@@ -1555,7 +1570,7 @@ class ContentGenerator:
             pass
 
         # ---------------------------------------------------------
-        # 3. 첫 { ~ 마지막 } 범위 추출
+        # 3. JSON 객체 범위 추출
         # ---------------------------------------------------------
         start = candidate.find("{")
         end = candidate.rfind("}")
@@ -1573,9 +1588,7 @@ class ContentGenerator:
                 pass
 
             # -----------------------------------------------------
-            # 4. JSONDecoder.raw_decode
-            #
-            # Gemini가 JSON 뒤에 설명문을 붙이는 경우 대응
+            # 4. raw_decode
             # -----------------------------------------------------
             try:
                 decoder = json.JSONDecoder()
@@ -1587,22 +1600,24 @@ class ContentGenerator:
                 if isinstance(result, dict):
                     return result
 
-            except (json.JSONDecodeError, ValueError):
+            except (
+                json.JSONDecodeError,
+                ValueError,
+            ):
                 pass
 
-        # ---------------------------------------------------------
-        # 5. 필드별 안전 추출
-        # ---------------------------------------------------------
         logger.warning(
             "JSON 파싱 전략 1~4 실패 "
-            "— 필드별 안전 추출 시도"
+            "— 필드별 안전 복구를 시작합니다."
         )
 
+        # ---------------------------------------------------------
+        # 5. 필드 위치 찾기
+        # ---------------------------------------------------------
         def find_field_start(
             text: str,
             field: str,
         ) -> int:
-
             pattern = re.compile(
                 rf'"{re.escape(field)}"\s*:\s*"',
                 flags=re.DOTALL,
@@ -1615,10 +1630,19 @@ class ContentGenerator:
 
             return match.end()
 
-        def extract_json_string_from_position(
+        # ---------------------------------------------------------
+        # 일반 문자열 필드 추출
+        #
+        # title / image_prompt 등에 사용
+        # ---------------------------------------------------------
+        def extract_simple_string(
             text: str,
-            start_pos: int,
+            field: str,
         ) -> str:
+            start_pos = find_field_start(
+                text,
+                field,
+            )
 
             if start_pos < 0:
                 return ""
@@ -1628,35 +1652,11 @@ class ContentGenerator:
             length = len(text)
 
             while i < length:
-
                 ch = text[i]
 
-                # 문자열 종료
-                if ch == '"':
-                    raw_value = "".join(chars)
-
-                    try:
-                        return json.loads(
-                            '"' + raw_value + '"'
-                        )
-                    except Exception:
-                        # JSON decode가 안 되더라도
-                        # 기본적인 escape 복구 시도
-                        return (
-                            raw_value
-                            .replace(r"\\", "\\")
-                            .replace(r"\"", '"')
-                            .replace(r"\n", "\n")
-                            .replace(r"\r", "\r")
-                            .replace(r"\t", "\t")
-                        )
-
-                # escape sequence
                 if ch == "\\" and i + 1 < length:
-
                     next_ch = text[i + 1]
 
-                    # 정상적인 JSON escape
                     if next_ch in (
                         '"',
                         "\\",
@@ -1672,8 +1672,10 @@ class ContentGenerator:
                         i += 2
                         continue
 
-                    # \uXXXX
-                    if next_ch == "u" and i + 5 < length:
+                    if (
+                        next_ch == "u"
+                        and i + 5 < length
+                    ):
                         hex_part = text[i + 2:i + 6]
 
                         if re.fullmatch(
@@ -1686,17 +1688,168 @@ class ContentGenerator:
                             i += 6
                             continue
 
-                    # 알 수 없는 escape
-                    # 백슬래시 자체를 보존
+                if ch == '"':
+                    value = "".join(chars)
+
+                    try:
+                        return json.loads(
+                            '"' + value + '"'
+                        ).strip()
+
+                    except Exception:
+                        return value.strip()
+
+                chars.append(ch)
+                i += 1
+
+            return "".join(chars).strip()
+
+        # ---------------------------------------------------------
+        # content 전용 복구
+        #
+        # 핵심:
+        # content 내부의 "..."는 종료 따옴표가 아닐 수 있습니다.
+        #
+        # 다음 JSON 필드인 tags/image_prompt를 기준으로
+        # content의 실제 끝을 판단합니다.
+        # ---------------------------------------------------------
+        def extract_content_field(
+            text: str,
+        ) -> str:
+            start_pos = find_field_start(
+                text,
+                "content",
+            )
+
+            if start_pos < 0:
+                return ""
+
+            chars = []
+            i = start_pos
+            length = len(text)
+
+            while i < length:
+                ch = text[i]
+
+                # -------------------------------------------------
+                # Escape sequence
+                # -------------------------------------------------
+                if ch == "\\" and i + 1 < length:
+                    next_ch = text[i + 1]
+
+                    if next_ch in (
+                        '"',
+                        "\\",
+                        "/",
+                        "b",
+                        "f",
+                        "n",
+                        "r",
+                        "t",
+                    ):
+                        chars.append(ch)
+                        chars.append(next_ch)
+                        i += 2
+                        continue
+
+                    if (
+                        next_ch == "u"
+                        and i + 5 < length
+                    ):
+                        hex_part = text[i + 2:i + 6]
+
+                        if re.fullmatch(
+                            r"[0-9a-fA-F]{4}",
+                            hex_part,
+                        ):
+                            chars.append(
+                                text[i:i + 6]
+                            )
+                            i += 6
+                            continue
+
+                    # 알 수 없는 escape는
+                    # 백슬래시를 보존
                     chars.append("\\")
                     i += 1
                     continue
 
-                # JSON 문자열 안의 실제 줄바꿈
-                #
-                # Gemini가 잘못된 JSON을 반환한 경우
-                # 실제 newline이 들어올 수 있습니다.
-                # content 복구를 위해 그대로 보존합니다.
+                # -------------------------------------------------
+                # 큰따옴표 처리
+                # -------------------------------------------------
+                if ch == '"':
+                    rest = text[i + 1:]
+
+                    # ---------------------------------------------
+                    # 이 따옴표가 실제 content 종료인지 확인
+                    #
+                    # 정상 JSON 구조:
+                    #
+                    # "content": "...",
+                    # "tags": [...]
+                    #
+                    # 또는:
+                    #
+                    # "content": "...",
+                    # "image_prompt": "..."
+                    # ---------------------------------------------
+                    boundary_match = re.match(
+                        r'\s*,\s*"'
+                        r'(?:tags|image_prompt)'
+                        r'"\s*:',
+                        rest,
+                        flags=re.IGNORECASE,
+                    )
+
+                    if boundary_match:
+                        raw_value = "".join(chars)
+
+                        try:
+                            return json.loads(
+                                '"' + raw_value + '"'
+                            ).strip()
+
+                        except Exception:
+                            # Gemini가 content 내부의
+                            # escape를 일부 깨뜨렸을 경우
+                            # 안전 복구
+                            return (
+                                raw_value
+                                .replace(
+                                    r"\\",
+                                    "\\",
+                                )
+                                .replace(
+                                    r"\"",
+                                    '"',
+                                )
+                                .replace(
+                                    r"\n",
+                                    "\n",
+                                )
+                                .replace(
+                                    r"\r",
+                                    "\r",
+                                )
+                                .replace(
+                                    r"\t",
+                                    "\t",
+                                )
+                                .strip()
+                            )
+
+                    # ---------------------------------------------
+                    # 중요:
+                    # boundary가 아니면 본문 내부의 큰따옴표
+                    # 로 간주하고 보존합니다.
+                    # ---------------------------------------------
+                    chars.append('"')
+                    i += 1
+                    continue
+
+                # -------------------------------------------------
+                # 실제 줄바꿈
+                # -------------------------------------------------
                 if ch == "\r":
                     if (
                         i + 1 < length
@@ -1718,36 +1871,28 @@ class ContentGenerator:
                 chars.append(ch)
                 i += 1
 
-            # 닫는 따옴표를 찾지 못한 경우
+            # -----------------------------------------------------
+            # JSON이 끝까지 닫히지 않은 경우
             #
-            # Gemini가 MAX_TOKENS 등으로 JSON 문자열을
-            # 완전히 닫지 못한 경우를 대비합니다.
-            return "".join(chars)
+            # 이것은 정상 성공으로 취급하면 안 됩니다.
+            # -----------------------------------------------------
+            value = "".join(chars).strip()
 
-        def extract_string_field(
-            text: str,
-            field: str,
-        ) -> str:
+            if value:
+                raise json.JSONDecodeError(
+                    "content 문자열이 정상적으로 종료되지 않았습니다.",
+                    raw,
+                    0,
+                )
 
-            start_pos = find_field_start(
-                text,
-                field,
-            )
+            return ""
 
-            if start_pos < 0:
-                return ""
-
-            value = extract_json_string_from_position(
-                text,
-                start_pos,
-            )
-
-            return value.strip()
-
+        # ---------------------------------------------------------
+        # 6. tags 추출
+        # ---------------------------------------------------------
         def extract_tags(
             text: str,
         ) -> list:
-
             match = re.search(
                 r'"tags"\s*:\s*\[(.*?)\]',
                 text,
@@ -1772,11 +1917,18 @@ class ContentGenerator:
                     value = json.loads(
                         '"' + value + '"'
                     )
+
                 except Exception:
                     value = (
                         value
-                        .replace(r"\"", '"')
-                        .replace(r"\\", "\\")
+                        .replace(
+                            r"\"",
+                            '"',
+                        )
+                        .replace(
+                            r"\\",
+                            "\\",
+                        )
                     )
 
                 if value:
@@ -1784,17 +1936,19 @@ class ContentGenerator:
 
             return tags
 
-        title = extract_string_field(
+        # ---------------------------------------------------------
+        # 7. 필드 복구
+        # ---------------------------------------------------------
+        title = extract_simple_string(
             candidate,
             "title",
         )
 
-        content = extract_string_field(
+        content = extract_content_field(
             candidate,
-            "content",
         )
 
-        image_prompt = extract_string_field(
+        image_prompt = extract_simple_string(
             candidate,
             "image_prompt",
         )
@@ -1802,32 +1956,13 @@ class ContentGenerator:
         tags = extract_tags(candidate)
 
         # ---------------------------------------------------------
-        # content 복구 검증
+        # 8. content 필수 검증
         # ---------------------------------------------------------
-        #
-        # title만 추출되고 content가 0자가 되는 상황을
-        # 정상적인 JSON 파싱 성공으로 취급하지 않습니다.
-        #
-        if title and not content:
-
+        if not content:
             logger.error(
-                "Gemini 응답에서 title은 추출됐지만 "
-                "content를 추출하지 못했습니다."
+                "Gemini 응답에서 content를 "
+                "복구하지 못했습니다."
             )
-
-            # content 키 자체가 존재하는지 확인
-            content_key = re.search(
-                r'"content"\s*:',
-                candidate,
-                flags=re.IGNORECASE,
-            )
-
-            if content_key:
-
-                logger.error(
-                    "content 필드는 응답에 존재하지만 "
-                    "본문 추출에 실패했습니다."
-                )
 
             raise json.JSONDecodeError(
                 "Gemini content 필드 추출 실패",
@@ -1836,25 +1971,211 @@ class ContentGenerator:
             )
 
         # ---------------------------------------------------------
-        # 정상적인 필드별 추출
+        # 9. HTML 본문 최소 검증
         # ---------------------------------------------------------
-        if title or content:
+        text_only = re.sub(
+            r"<[^>]+>",
+            "",
+            content,
+        ).strip()
 
-            logger.warning(
-                "필드별 JSON 추출 성공 "
-                f"(title={title[:30]}..., "
-                f"content={len(content)}자)"
+        if len(text_only) < 300:
+            logger.error(
+                "복구된 Gemini content가 "
+                "비정상적으로 짧습니다: "
+                f"{len(text_only)}자"
             )
 
-            return {
-                "title": title,
-                "content": content,
-                "tags": tags,
-                "image_prompt": image_prompt,
-            }
+            raise json.JSONDecodeError(
+                "Gemini content가 비정상적으로 짧습니다.",
+                raw,
+                0,
+            )
 
-        raise json.JSONDecodeError(
-            "Gemini 응답을 JSON으로 파싱할 수 없습니다.",
-            raw,
-            0,
+        # ---------------------------------------------------------
+        # 10. 본문이 미완성 문장으로 끝나는지 검사
+        # ---------------------------------------------------------
+        def looks_truncated(
+            html_content: str,
+        ) -> bool:
+            plain = re.sub(
+                r"<[^>]+>",
+                "",
+                html_content,
+            )
+
+            plain = re.sub(
+                r"\s+",
+                " ",
+                plain,
+            ).strip()
+
+            if not plain:
+                return True
+
+            # HTML 태그가 열려 있는 경우
+            if plain.count("<") > plain.count(">"):
+                return True
+
+            # 문장이 조사/접속 표현에서 끝나는 경우
+            truncated_endings = (
+                "은",
+                "는",
+                "이",
+                "가",
+                "을",
+                "를",
+                "에",
+                "의",
+                "로",
+                "으로",
+                "와",
+                "과",
+                "하고",
+                "하며",
+                "때문에",
+                "따라서",
+                "하지만",
+                "그리고",
+                "즉",
+                "또한",
+                "다만",
+                "특히",
+                "반면",
+            )
+
+            last_word = plain.split()[-1]
+
+            if (
+                len(last_word) <= 8
+                and last_word.endswith(
+                    truncated_endings
+                )
+            ):
+                return True
+
+            # 마지막 문장부호가 없는 경우
+            #
+            # 단, HTML 마지막 요소가 리스트인 경우 등은
+            # 무조건 실패시키지 않기 위해 충분히 긴 경우에만 적용
+            if len(plain) > 500:
+                if not re.search(
+                    r"[.!?。！？다요죠됨임음함함니다요]$",
+                    plain,
+                ):
+                    return True
+
+            return False
+
+        if looks_truncated(content):
+            logger.error(
+                "Gemini content가 미완성 문장으로 "
+                "종료된 것으로 판단됩니다."
+            )
+
+            raise json.JSONDecodeError(
+                "Gemini content가 중간에서 잘린 것으로 판단됩니다.",
+                raw,
+                0,
+            )
+
+        logger.warning(
+            "필드별 JSON 복구 성공 "
+            f"(title={title[:30]}..., "
+            f"content={len(content)}자)"
         )
+
+        return {
+            "title": title,
+            "content": content,
+            "tags": tags,
+            "image_prompt": image_prompt,
+        }   
+
+    @staticmethod
+    def _validate_content_integrity(
+        content: str,
+        stage: str = "본문",
+    ) -> None:
+        """
+        본문이 비어 있거나 중간에서 잘린 것으로 보이면
+        ValueError를 발생시킵니다.
+        """
+
+        if not isinstance(content, str):
+            raise ValueError(
+                f"{stage}이 문자열이 아닙니다."
+            )
+
+        content = content.strip()
+
+        if not content:
+            raise ValueError(
+                f"{stage}이 비어 있습니다."
+            )
+
+        plain = re.sub(
+            r"<[^>]+>",
+            "",
+            content,
+        )
+
+        plain = re.sub(
+            r"\s+",
+            " ",
+            plain,
+        ).strip()
+
+        if len(plain) < 300:
+            raise ValueError(
+                f"{stage}이 비정상적으로 짧습니다. "
+                f"({len(plain)}자)"
+            )
+
+        # HTML 구조 기본 검증
+        if plain.count("<") > plain.count(">"):
+            raise ValueError(
+                f"{stage}의 HTML 구조가 "
+                "완전히 닫히지 않았습니다."
+            )
+
+        # 본문이 명백히 문장 중간에서 끝난 경우
+        truncated_endings = (
+            "은",
+            "는",
+            "이",
+            "가",
+            "을",
+            "를",
+            "에",
+            "의",
+            "로",
+            "으로",
+            "와",
+            "과",
+            "하고",
+            "하며",
+            "때문에",
+            "따라서",
+            "하지만",
+            "그리고",
+            "즉",
+            "또한",
+            "다만",
+            "특히",
+            "반면",
+        )
+
+        last_word = plain.split()[-1]
+
+        if (
+            len(last_word) <= 8
+            and last_word.endswith(
+                truncated_endings
+            )
+        ):
+            raise ValueError(
+                f"{stage}이 문장 중간에서 "
+                "종료된 것으로 판단됩니다. "
+                f"마지막 표현: '{last_word}'"
+            )
