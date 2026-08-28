@@ -891,7 +891,7 @@ class ContentGenerator:
             f"Gemini API 호출 중 (모드: {mode})..."
         )
 
-        max_json_retries = 2
+               max_json_retries = 2
         last_error = None
 
         for json_attempt in range(
@@ -899,12 +899,11 @@ class ContentGenerator:
             max_json_retries + 2,
         ):
 
-            raw = self._call_gemini(
-                system,
-                prompt,
-            )
-
             try:
+                raw = self._call_gemini(
+                    system,
+                    prompt,
+                )
 
                 post = self._parse_json_response(
                     raw
@@ -945,18 +944,49 @@ class ContentGenerator:
                     post
                 )
 
+                # -------------------------------------------------
+                # 팩트체크/후처리 이후에도 본문이 비어 있으면
+                # 절대 발행하지 않음
+                # -------------------------------------------------
+                final_content = (
+                    post.get("content", "")
+                    or ""
+                ).strip()
+
+                if not final_content:
+                    raise ValueError(
+                        "후처리 이후 content가 비어 있습니다. "
+                        "빈 본문 발행을 차단합니다."
+                    )
+
+                if len(
+                    re.sub(
+                        r"<[^>]+>",
+                        "",
+                        final_content,
+                    ).strip()
+                ) < 300:
+                    raise ValueError(
+                        "후처리 이후 본문이 "
+                        "비정상적으로 짧습니다. "
+                        f"({len(final_content)}자)"
+                    )
+
                 post = self._prepend_toc(
                     post
                 )
 
                 return post
 
-            except json.JSONDecodeError as e:
+            except (
+                json.JSONDecodeError,
+                ValueError,
+            ) as e:
 
                 last_error = e
 
                 logger.warning(
-                    "JSON 파싱 실패 "
+                    "Gemini 원고 검증 실패 "
                     f"(시도 {json_attempt}/"
                     f"{max_json_retries + 1}): {e}"
                 )
@@ -965,14 +995,13 @@ class ContentGenerator:
                     json_attempt
                     <= max_json_retries
                 ):
-
                     logger.info(
-                        "Gemini를 재호출해 "
-                        "다시 시도합니다..."
+                        "본문이 정상적으로 복구되지 않아 "
+                        "Gemini를 재호출합니다..."
                     )
 
         raise RuntimeError(
-            "Gemini 응답을 JSON으로 파싱하는 데 "
+            "Gemini에서 유효한 블로그 본문을 생성하지 못했습니다. "
             f"{max_json_retries + 1}회 모두 실패했습니다: "
             f"{last_error}"
         )
@@ -1087,6 +1116,37 @@ class ContentGenerator:
             post2 = self._ensure_required_fields(
                 post2,
                 mode,
+            )
+
+            post2 = self._ensure_required_fields(
+                post2,
+                mode,
+            )
+
+            post2_content = (
+                post2.get("content", "")
+                or ""
+            ).strip()
+
+            if not post2_content:
+                raise ValueError(
+                    "팩트체크 재생성본의 content가 비어 있습니다."
+                )
+
+            if len(
+                re.sub(
+                    r"<[^>]+>",
+                    "",
+                    post2_content,
+                ).strip()
+            ) < 300:
+                raise ValueError(
+                    "팩트체크 재생성본의 본문이 "
+                    "비정상적으로 짧습니다."
+                )
+
+            post2 = self._normalize_disclaimer(
+                post2
             )
 
             post2 = self._normalize_disclaimer(
@@ -1272,38 +1332,60 @@ class ContentGenerator:
 
         return post
 
-    @staticmethod
+        @staticmethod
     def _ensure_required_fields(
         post: dict,
         mode: str,
     ) -> dict:
         """
-        Gemini 응답에서 필수 필드가 누락되더라도
-        파이프라인이 KeyError로 종료되지 않도록 보장합니다.
+        Gemini 응답의 필수 필드를 검증합니다.
+
+        중요:
+        - content가 비어 있으면 정상적인 결과로 취급하지 않습니다.
+        - 빈 본문 상태로 대시보드/티스토리에 전달되는 것을 방지합니다.
         """
 
         post = dict(post)
 
         if not post.get("title"):
-
             logger.warning(
                 "Gemini 응답에 title 필드 누락 "
                 "— 기본값으로 대체"
             )
 
-            post["title"] = (
-                "미국 증시 브리핑"
+            post["title"] = "미국 증시 브리핑"
+
+        # ---------------------------------------------------------
+        # content는 절대로 빈 문자열을 정상값으로 허용하지 않음
+        # ---------------------------------------------------------
+        content = post.get("content")
+
+        if not isinstance(content, str):
+            content = ""
+
+        content = content.strip()
+
+        if not content:
+            raise ValueError(
+                "Gemini 응답의 content가 비어 있습니다. "
+                "빈 본문을 발행하지 않기 위해 생성을 실패 처리합니다."
             )
 
-        if not post.get("content"):
-
-            logger.warning(
-                "Gemini 응답에 content 필드 누락 "
-                "— 빈 문자열로 대체"
+        # 너무 짧은 본문도 비정상 응답으로 처리
+        #
+        # 정상적인 블로그 글이 최소 수백 자 이하일 가능성은
+        # 매우 낮기 때문에 안전장치로 사용합니다.
+        if len(re.sub(r"<[^>]+>", "", content).strip()) < 300:
+            raise ValueError(
+                "Gemini 응답의 content가 비정상적으로 짧습니다. "
+                f"(HTML 포함 {len(content)}자)"
             )
 
-            post["content"] = ""
+        post["content"] = content
 
+        # ---------------------------------------------------------
+        # tags
+        # ---------------------------------------------------------
         if (
             not isinstance(
                 post.get("tags"),
@@ -1311,7 +1393,6 @@ class ContentGenerator:
             )
             or not post.get("tags")
         ):
-
             logger.warning(
                 "Gemini 응답에 tags 필드 누락 "
                 "— 기본 태그로 대체"
@@ -1325,11 +1406,13 @@ class ContentGenerator:
                 "증시분석",
             ]
 
+        # ---------------------------------------------------------
+        # image_prompt
+        # ---------------------------------------------------------
         if not post.get("image_prompt"):
-
             logger.warning(
-                "Gemini 응답에 image_prompt "
-                "필드 누락 — 기본 프롬프트로 대체"
+                "Gemini 응답에 image_prompt 필드 누락 "
+                "— 기본 프롬프트로 대체"
             )
 
             post["image_prompt"] = (
@@ -1402,17 +1485,23 @@ class ContentGenerator:
 
         return post
 
-    @staticmethod
+        @staticmethod
     def _parse_json_response(
         raw: str,
     ) -> dict:
         """
-        Gemini 응답을 JSON으로 파싱합니다.
+        Gemini 응답을 최대한 안전하게 JSON으로 복원합니다.
 
-        1. 코드블록 제거
-        2. 직접 json.loads
-        3. JSON 객체 범위 추출 후 파싱
-        4. 필드별 안전 추출
+        처리 순서:
+        1. Markdown 코드블록 제거
+        2. 일반 json.loads
+        3. JSON 객체 범위 탐색 + json.loads
+        4. JSONDecoder.raw_decode
+        5. 필드별 안전 추출
+        6. content가 존재하는 경우 불완전 JSON에서도 본문 복구
+
+        특히 content는 HTML 본문이 길기 때문에 단순 정규식으로
+        추출하지 않습니다.
         """
 
         if not raw:
@@ -1424,44 +1513,48 @@ class ContentGenerator:
 
         candidate = raw.strip()
 
-        # ── 1단계: Markdown 코드블록 제거 ──────────────────────────────────
-        if "```" in candidate:
+        # ---------------------------------------------------------
+        # 1. Markdown 코드블록 제거
+        # ---------------------------------------------------------
+        blocks = re.findall(
+            r"```(?:json)?\s*(.*?)```",
+            candidate,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
 
-            blocks = re.findall(
-                r"```(?:json)?\s*(.*?)```",
-                candidate,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-
+        if blocks:
             for block in blocks:
-
                 block = block.strip()
 
                 try:
-
                     result = json.loads(block)
 
                     if isinstance(result, dict):
                         return result
 
                 except json.JSONDecodeError:
-                    continue
+                    pass
 
-            candidate = re.sub(
-                r"```(?:json)?",
-                "",
-                candidate,
-                flags=re.IGNORECASE,
-            )
+            candidate = blocks[0].strip()
 
-            candidate = candidate.replace(
-                "```",
-                "",
-            ).strip()
+        candidate = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
 
-        # ── 2단계: 직접 JSON 파싱 ───────────────────────────────────────────
+        candidate = re.sub(
+            r"\s*```$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # ---------------------------------------------------------
+        # 2. 직접 JSON 파싱
+        # ---------------------------------------------------------
         try:
-
             result = json.loads(candidate)
 
             if isinstance(result, dict):
@@ -1470,21 +1563,17 @@ class ContentGenerator:
         except json.JSONDecodeError:
             pass
 
-        # ── 3단계: 첫 { ~ 마지막 } 범위 추출 ───────────────────────────────
+        # ---------------------------------------------------------
+        # 3. 첫 { ~ 마지막 } 범위 추출
+        # ---------------------------------------------------------
         start = candidate.find("{")
         end = candidate.rfind("}")
 
         if start >= 0 and end > start:
-
-            json_candidate = candidate[
-                start:end + 1
-            ]
+            json_candidate = candidate[start:end + 1]
 
             try:
-
-                result = json.loads(
-                    json_candidate
-                )
+                result = json.loads(json_candidate)
 
                 if isinstance(result, dict):
                     return result
@@ -1492,55 +1581,184 @@ class ContentGenerator:
             except json.JSONDecodeError:
                 pass
 
-        # ── 4단계: 필드별 안전 추출 ────────────────────────────────────────
+            # -----------------------------------------------------
+            # 4. JSONDecoder.raw_decode
+            #
+            # Gemini가 JSON 뒤에 설명문을 붙이는 경우 대응
+            # -----------------------------------------------------
+            try:
+                decoder = json.JSONDecoder()
+
+                result, _ = decoder.raw_decode(
+                    json_candidate
+                )
+
+                if isinstance(result, dict):
+                    return result
+
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # ---------------------------------------------------------
+        # 5. 필드별 안전 추출
+        # ---------------------------------------------------------
         logger.warning(
-            "JSON 파싱 전략 1~3 실패 "
-            "— 필드별 추출 시도"
+            "JSON 파싱 전략 1~4 실패 "
+            "— 필드별 안전 추출 시도"
         )
+
+        def find_field_start(
+            text: str,
+            field: str,
+        ) -> int:
+
+            pattern = re.compile(
+                rf'"{re.escape(field)}"\s*:\s*"',
+                flags=re.DOTALL,
+            )
+
+            match = pattern.search(text)
+
+            if not match:
+                return -1
+
+            return match.end()
+
+        def extract_json_string_from_position(
+            text: str,
+            start_pos: int,
+        ) -> str:
+
+            if start_pos < 0:
+                return ""
+
+            chars = []
+            i = start_pos
+            length = len(text)
+
+            while i < length:
+
+                ch = text[i]
+
+                # 문자열 종료
+                if ch == '"':
+                    raw_value = "".join(chars)
+
+                    try:
+                        return json.loads(
+                            '"' + raw_value + '"'
+                        )
+                    except Exception:
+                        # JSON decode가 안 되더라도
+                        # 기본적인 escape 복구 시도
+                        return (
+                            raw_value
+                            .replace(r"\\", "\\")
+                            .replace(r"\"", '"')
+                            .replace(r"\n", "\n")
+                            .replace(r"\r", "\r")
+                            .replace(r"\t", "\t")
+                        )
+
+                # escape sequence
+                if ch == "\\" and i + 1 < length:
+
+                    next_ch = text[i + 1]
+
+                    # 정상적인 JSON escape
+                    if next_ch in (
+                        '"',
+                        "\\",
+                        "/",
+                        "b",
+                        "f",
+                        "n",
+                        "r",
+                        "t",
+                    ):
+                        chars.append(ch)
+                        chars.append(next_ch)
+                        i += 2
+                        continue
+
+                    # \uXXXX
+                    if next_ch == "u" and i + 5 < length:
+                        hex_part = text[i + 2:i + 6]
+
+                        if re.fullmatch(
+                            r"[0-9a-fA-F]{4}",
+                            hex_part,
+                        ):
+                            chars.append(
+                                text[i:i + 6]
+                            )
+                            i += 6
+                            continue
+
+                    # 알 수 없는 escape
+                    # 백슬래시 자체를 보존
+                    chars.append("\\")
+                    i += 1
+                    continue
+
+                # JSON 문자열 안의 실제 줄바꿈
+                #
+                # Gemini가 잘못된 JSON을 반환한 경우
+                # 실제 newline이 들어올 수 있습니다.
+                # content 복구를 위해 그대로 보존합니다.
+                if ch == "\r":
+                    if (
+                        i + 1 < length
+                        and text[i + 1] == "\n"
+                    ):
+                        chars.append("\n")
+                        i += 2
+                        continue
+
+                    chars.append("\n")
+                    i += 1
+                    continue
+
+                if ch == "\n":
+                    chars.append("\n")
+                    i += 1
+                    continue
+
+                chars.append(ch)
+                i += 1
+
+            # 닫는 따옴표를 찾지 못한 경우
+            #
+            # Gemini가 MAX_TOKENS 등으로 JSON 문자열을
+            # 완전히 닫지 못한 경우를 대비합니다.
+            return "".join(chars)
 
         def extract_string_field(
             text: str,
             field: str,
         ) -> str:
 
-            pattern = (
-                rf'"{re.escape(field)}"\s*:\s*"'
-                r'((?:\\.|[^"\\])*)"\s*(?=,|\})'
-            )
-
-            match = re.search(
-                pattern,
+            start_pos = find_field_start(
                 text,
-                flags=re.DOTALL,
+                field,
             )
 
-            if not match:
+            if start_pos < 0:
                 return ""
 
-            value = match.group(1)
+            value = extract_json_string_from_position(
+                text,
+                start_pos,
+            )
 
-            try:
-
-                # JSON 문자열 자체를 안전하게 디코딩
-                return json.loads(
-                    '"' + value + '"'
-                )
-
-            except Exception:
-
-                return (
-                    value
-                    .replace("\\n", "\n")
-                    .replace('\\"', '"')
-                    .replace("\\\\", "\\")
-                )
+            return value.strip()
 
         def extract_tags(
             text: str,
         ) -> list:
 
             match = re.search(
-                r'"tags"\s*:\s*(.*?)',
+                r'"tags"\s*:\s*\[(.*?)\]',
                 text,
                 flags=re.DOTALL,
             )
@@ -1550,32 +1768,30 @@ class ContentGenerator:
 
             raw_tags = match.group(1)
 
-            tags = re.findall(
+            tags = []
+
+            for match_tag in re.finditer(
                 r'"((?:\\.|[^"\\])*)"',
                 raw_tags,
-            )
-
-            result = []
-
-            for tag in tags:
+                flags=re.DOTALL,
+            ):
+                value = match_tag.group(1)
 
                 try:
-                    result.append(
-                        json.loads(
-                            '"' + tag + '"'
-                        )
+                    value = json.loads(
+                        '"' + value + '"'
                     )
-
                 except Exception:
-
-                    result.append(
-                        tag.replace(
-                            '\\"',
-                            '"',
-                        )
+                    value = (
+                        value
+                        .replace(r"\"", '"')
+                        .replace(r"\\", "\\")
                     )
 
-            return result
+                if value:
+                    tags.append(value)
+
+            return tags
 
         title = extract_string_field(
             candidate,
@@ -1594,6 +1810,43 @@ class ContentGenerator:
 
         tags = extract_tags(candidate)
 
+        # ---------------------------------------------------------
+        # content 복구 검증
+        # ---------------------------------------------------------
+        #
+        # title만 추출되고 content가 0자가 되는 상황을
+        # 정상적인 JSON 파싱 성공으로 취급하지 않습니다.
+        #
+        if title and not content:
+
+            logger.error(
+                "Gemini 응답에서 title은 추출됐지만 "
+                "content를 추출하지 못했습니다."
+            )
+
+            # content 키 자체가 존재하는지 확인
+            content_key = re.search(
+                r'"content"\s*:',
+                candidate,
+                flags=re.IGNORECASE,
+            )
+
+            if content_key:
+
+                logger.error(
+                    "content 필드는 응답에 존재하지만 "
+                    "본문 추출에 실패했습니다."
+                )
+
+            raise json.JSONDecodeError(
+                "Gemini content 필드 추출 실패",
+                raw,
+                0,
+            )
+
+        # ---------------------------------------------------------
+        # 정상적인 필드별 추출
+        # ---------------------------------------------------------
         if title or content:
 
             logger.warning(
@@ -1609,7 +1862,6 @@ class ContentGenerator:
                 "image_prompt": image_prompt,
             }
 
-        # 모든 방법 실패
         raise json.JSONDecodeError(
             "Gemini 응답을 JSON으로 파싱할 수 없습니다.",
             raw,
