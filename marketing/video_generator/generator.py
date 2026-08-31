@@ -1128,6 +1128,42 @@ def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> boo
 
     logger.warning(f"Pexels: 모든 키워드 시도 실패 {queries}")
     return False
+  
+
+def _download_bg_pixabay(keywords: list[str], dest: Path, pixabay_key: str) -> bool:
+    """Pexels 실패 시 마지막으로 시도하는 실사진 소스. 브랜드 그라디언트로
+    넘어가기 전, 콘텐츠와 관련 있는 이미지를 한 번 더 찾아봅니다."""
+    if not pixabay_key:
+        return False
+    queries = keywords if keywords else ["finance"]
+    for query in queries:
+        try:
+            resp = requests.get(
+                "https://pixabay.com/api/",
+                params={
+                    "key": pixabay_key, "q": query, "image_type": "photo",
+                    "orientation": "vertical", "per_page": 10,
+                    "safesearch": "true", "category": "business",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            hits = resp.json().get("hits", [])
+            if not hits:
+                logger.info(f"Pixabay 검색 결과 없음({query}) — 다음 키워드로 재시도")
+                continue
+            idx = int(time.time() / 86400) % len(hits)
+            ir = requests.get(hits[idx]["largeImageURL"], timeout=30)
+            ir.raise_for_status()
+            dest.write_bytes(ir.content)
+            Image.open(dest).verify()
+            logger.info(f"Pixabay 배경 확보 성공: '{query}'")
+            return True
+        except Exception as e:
+            logger.warning(f"Pixabay 실패 (키워드: {query}): {e}")
+            continue
+    logger.warning(f"Pixabay: 모든 키워드 시도 실패 {queries}")
+    return False
 
 
 def _download_bg_picsum_DEPRECATED_unused(dest: Path, seed: int = 0) -> bool:
@@ -1247,6 +1283,7 @@ class VideoGenerator:
     def __init__(self, output_dir: str = OUTPUT_DIR):
         self.output_dir = output_dir
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
+        self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "").strip()
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
         # 영상 배경 전용 Cloudflare Workers AI (블로그 썸네일과는 별개로
         # 텍스트 없는 새 배경을 생성하는 데 사용 — v9)
@@ -1308,6 +1345,8 @@ class VideoGenerator:
             )
             if not bg_ok:
                 bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
+            if not bg_ok:                                   # ← 신규
+                bg_ok = _download_bg_pixabay(kws, bg_path, self.pixabay_key)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
@@ -1516,6 +1555,8 @@ class VideoGenerator:
                 bg_ok = _download_bg_cloudflare(
                     kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
                 )
+            if not bg_ok:                                   # ← 신규
+                bg_ok = _download_bg_pixabay(kws, bg_path, self.pixabay_key)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
 
