@@ -1287,8 +1287,8 @@ class VideoGenerator:
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
         # 영상 배경 전용 Cloudflare Workers AI (블로그 썸네일과는 별개로
         # 텍스트 없는 새 배경을 생성하는 데 사용 — v9)
-        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         self.last_tiktok_hashtags: list[str] = []  # generate_tiktok() 호출 후 채워짐
         os.makedirs(output_dir, exist_ok=True)
 

@@ -259,8 +259,8 @@ def _draw_title_outlined(draw, xy, text, font, fill=(255, 255, 255), outline=(0,
 class ImageGenerator:
     def __init__(self, hf_token: str = ""):
         self.hf_token = hf_token
-        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         self.last_image_source = ""

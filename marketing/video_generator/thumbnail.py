@@ -368,8 +368,8 @@ class SNSThumbnailGenerator:
     def __init__(self, hf_token: str = "", output_dir: str = OUTPUT_DIR):
         self.output_dir  = output_dir
         self.hf_token    = hf_token
-        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-        self.cf_api_token  = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        self.cf_api_token  = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         self.pexels_key  = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
