@@ -10,10 +10,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
+GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+]
+GEMINI_API_URL_TMPL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 
 SYSTEM_PROMPT = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의 SNS 마케팅 전문가입니다.
@@ -130,7 +133,6 @@ class ContentAdapter:
         self.api_key = api_key
 
     def _call_gemini(self, prompt: str, max_retries: int = 3) -> dict:
-        url = f"{GEMINI_API_URL}?key={self.api_key}"
         payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -144,65 +146,87 @@ class ContentAdapter:
         # 재시도 가능한 HTTP 상태코드 (일시적 서버 장애)
         RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                resp = requests.post(url, json=payload, timeout=60)
-                resp.raise_for_status()
-                data = resp.json()
-                raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        last_error = None
 
-                # JSON 파싱 (코드블록 방어)
-                if "```" in raw:
-                    for part in raw.split("```"):
-                        part = part.strip()
-                        if part.startswith("json"):
-                            part = part[4:].strip()
-                        try:
-                            return json.loads(part)
-                        except json.JSONDecodeError:
-                            continue
+        for model in GEMINI_MODELS:
+            url = f"{GEMINI_API_URL_TMPL.format(model=model)}?key={self.api_key}"
 
-                return json.loads(raw)
+            for attempt in range(1, max_retries + 1):
+                try:
+                    resp = requests.post(url, json=payload, timeout=60)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-            except requests.exceptions.HTTPError as e:
-                status = resp.status_code
-                if status in RETRYABLE_STATUS:
-                    # 지수 백오프: 429는 30s 기준, 나머지는 10s 기준
-                    base = 30 if status == 429 else 10
-                    wait = base * (2 ** (attempt - 1))  # 10s → 20s → 40s
+                    # JSON 파싱 (코드블록 방어)
+                    if "```" in raw:
+                        for part in raw.split("```"):
+                            part = part.strip()
+                            if part.startswith("json"):
+                                part = part[4:].strip()
+                            try:
+                                return json.loads(part)
+                            except json.JSONDecodeError:
+                                continue
+
+                    return json.loads(raw)
+
+                except requests.exceptions.HTTPError as e:
+                    status = resp.status_code
+                    last_error = e
+
+                    if status in RETRYABLE_STATUS:
+                        # 지수 백오프: 429는 30s 기준, 나머지는 10s 기준
+                        base = 30 if status == 429 else 10
+                        wait = base * (2 ** (attempt - 1))  # 10s → 20s → 40s
+                        if attempt < max_retries:
+                            logger.warning(
+                                f"Gemini API {status} 오류 (모델: {model}, "
+                                f"시도 {attempt}/{max_retries}). {wait}초 후 재시도..."
+                            )
+                            time.sleep(wait)
+                        else:
+                            logger.warning(
+                                f"모델 {model} 재시도 {max_retries}회 모두 실패({status}) "
+                                "→ 다음 모델로 폴백"
+                            )
+                    elif status == 404:
+                        # 해당 모델 자체를 사용할 수 없는 경우 — 같은 모델 반복 호출 없이
+                        # 즉시 다음 모델로 이동
+                        logger.error(f"Gemini 모델을 찾을 수 없음 (모델: {model}): {e}")
+                        break
+                    else:
+                        # 400, 401, 403 등 재시도 불가 오류는 즉시 실패
+                        logger.error(f"Gemini API 오류 ({status}, 모델: {model}): {e}")
+                        raise
+
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout) as e:
+                    last_error = e
+                    wait = 10 * (2 ** (attempt - 1))
                     if attempt < max_retries:
                         logger.warning(
-                            f"Gemini API {status} 오류 (시도 {attempt}/{max_retries}). "
-                            f"{wait}초 후 재시도..."
+                            f"Gemini 네트워크 오류 (모델: {model}, "
+                            f"시도 {attempt}/{max_retries}). {wait}초 후 재시도... ({e})"
                         )
                         time.sleep(wait)
                     else:
-                        logger.error(f"Gemini API {status} 오류: 최대 재시도 초과")
-                        raise
-                else:
-                    # 400, 401, 403 등 재시도 불가 오류는 즉시 실패
-                    logger.error(f"Gemini API 오류 ({status}): {e}")
-                    raise
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout) as e:
-                wait = 10 * (2 ** (attempt - 1))
-                if attempt < max_retries:
-                    logger.warning(
-                        f"Gemini 네트워크 오류 (시도 {attempt}/{max_retries}). "
-                        f"{wait}초 후 재시도... ({e})"
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.error(f"Gemini 네트워크 오류: 최대 재시도 초과")
-                    raise
-            except Exception as e:
-                logger.warning(f"Gemini 호출 실패 (시도 {attempt}/{max_retries}): {e}")
-                if attempt < max_retries:
-                    time.sleep(10)
-                else:
-                    raise
+                        logger.warning(f"모델 {model} 네트워크 오류로 전체 실패 → 다음 모델로 폴백")
 
-        raise RuntimeError("Gemini API 최대 재시도 초과")
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"Gemini 호출 실패 (모델: {model}, 시도 {attempt}/{max_retries}): {e}"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(10)
+
+            logger.warning(f"모델 {model} 모든 시도 실패 → 다음 모델로 폴백")
+
+        raise RuntimeError(
+            "모든 Gemini 모델 호출 실패. "
+            f"시도 모델: {', '.join(GEMINI_MODELS)}. 마지막 오류: {last_error}"
+        )
 
     def generate_all(self, post: dict) -> dict:
         """
