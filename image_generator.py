@@ -259,8 +259,8 @@ def _draw_title_outlined(draw, xy, text, font, fill=(255, 255, 255), outline=(0,
 class ImageGenerator:
     def __init__(self, hf_token: str = ""):
         self.hf_token = hf_token
-        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
-        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         self.last_image_source = ""
@@ -344,26 +344,25 @@ class ImageGenerator:
 
         suffix = FLUX_SUFFIX.get(mode, FLUX_SUFFIX["morning"])
         full_prompt = f"{prompt}{suffix}"
-        seed = int(hashlib.md5(
-            f"{datetime.now().strftime('%Y%m%d')}{mode}".encode()
-        ).hexdigest()[:8], 16) % (2 ** 32)
 
         # 주의: Cloudflare Workers AI의 flux-1-schnell 공식 입력 스키마는
         # prompt(필수)와 steps(기본 4, 최대 8)만 받습니다 — width/height는
         # 아예 지원하지 않고, 파라미터 이름도 "num_steps"가 아니라 "steps"
         # 입니다. 문서 참고:
         # https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/schema-input.json
-        # 지원하지 않는 필드를 보내면 무시되거나 검증 오류가 날 수 있으므로,
-        # 스키마에 없는 width/height는 보내지 않고 대신 응답 이미지를
-        # 받은 뒤 원하는 비율(1024x576)로 직접 크롭합니다.
+        # [실전 확인] 문서의 curl 예제에는 seed가 등장하지만, 실제 API는
+        # seed를 보내면 매번 400 Bad Request로 거부합니다
+        # ("Additional or unevaluated properties '/seed' at '/' not allowed") —
+        # 스키마가 반드시 필요한 필드 없어야 함(additionalProperties: false)을
+        # 엄격히 검증합니다. 그래서 seed는 절대 페이로드에 넣지 않습니다
+        # (매일 같은 이미지를 재현하는 기능은 이 모델에서는 포기).
         url = f"{CF_API_BASE}/{self.cf_account_id}/ai/run/{CF_FLUX_MODEL}"
         payload = {
             "prompt": full_prompt,
             "steps": 8,
-            "seed": seed,
         }
 
-        logger.info(f"Cloudflare Workers AI 이미지 생성 중 (모드: {mode}, 시드: {seed})...")
+        logger.info(f"Cloudflare Workers AI 이미지 생성 중 (모드: {mode})...")
         try:
             resp = requests.post(
                 url,
