@@ -368,8 +368,8 @@ class SNSThumbnailGenerator:
     def __init__(self, hf_token: str = "", output_dir: str = OUTPUT_DIR):
         self.output_dir  = output_dir
         self.hf_token    = hf_token
-        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
-        self.cf_api_token  = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        self.cf_api_token  = os.environ.get("CLOUDFLARE_API_TOKEN", "")
         self.pexels_key  = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         os.makedirs(output_dir, exist_ok=True)
@@ -389,14 +389,16 @@ class SNSThumbnailGenerator:
         platform_suffix = PLATFORM_STYLE_SUFFIX.get(platform, "")
         full_prompt = f"{prompt}{mode_suffix}{platform_suffix}"
 
-        seed = int(hashlib.md5(
-            f"{datetime.now().strftime('%Y%m%d')}{mode}{platform}".encode()
-        ).hexdigest()[:8], 16) % (2 ** 32)
-
         # 주의: flux-1-schnell의 공식 입력 스키마는 prompt(필수)와
         # steps(기본 4, 최대 8)만 받습니다 — width/height는 지원하지 않고
         # 파라미터 이름도 "num_steps"가 아니라 "steps"입니다. 문서:
         # https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/schema-input.json
+        # [실전 확인] 문서의 curl 예제에는 seed가 등장하지만, 실제 API는
+        # seed를 보내면 매번 400 Bad Request로 거부합니다
+        # ("Additional or unevaluated properties '/seed' at '/' not allowed") —
+        # 스키마가 정의되지 않은 필드를 엄격히 거부하므로 seed는 절대
+        # 페이로드에 넣지 않습니다 (매일 같은 이미지를 재현하는 기능은
+        # 이 모델에서는 포기 — 대신 매번 새로운 이미지가 생성됩니다).
         # W/H 파라미터는 받은 이미지를 이후 _build_thumbnail()의 _crop_fit()
         # 단계에서 각 플랫폼 규격으로 다시 크롭할 때 쓰이므로 여기서
         # API에 그대로 전달하지 않아도 문제 없습니다.
@@ -404,12 +406,11 @@ class SNSThumbnailGenerator:
         payload = {
             "prompt": full_prompt,
             "steps": 8,
-            "seed": seed,
         }
 
         logger.info(
             f"Cloudflare Workers AI SNS 배경 생성 중 (모드: {mode}, "
-            f"채널: {platform or '공용'}, 시드: {seed})..."
+            f"채널: {platform or '공용'})..."
         )
         try:
             resp = requests.post(
