@@ -1833,18 +1833,6 @@ class VideoGenerator:
                 out,
             )
             
-                        # 4. 클립 합치기
-            silent_video = str(tmp / "silent.mp4")
-            _concat_clips(slide_clips, silent_video)
-
-            # 5. 오디오 합성 (TTS만, BGM 없음)
-            _merge_audio_to_video(
-                silent_video,
-                tts_segments,
-                total_duration,
-                out,
-            )
-
             # ── 최종 안전장치 ────────────────────────────────────────────────
             # 최초 나래이션 → CTA 1회 → 확장 나래이션 재생성까지
             # 모두 시도했는데도 60초 미만이면 완성 영상을 2회 반복한다.
