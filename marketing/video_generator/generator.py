@@ -1262,6 +1262,22 @@ def _concat_clips(clip_paths: list[str], out_path: str):
     finally:
         os.unlink(lst)
 
+def _repeat_video_twice(video_path: str, out_path: str):
+    """
+    완성된 영상을 통째로 2회 반복한다.
+
+    영상과 오디오를 함께 반복하므로,
+    최종적으로 동일한 영상과 나래이션이 2회 재생된다.
+    """
+    _run([
+        "ffmpeg",
+        "-y",
+        "-stream_loop", "1",
+        "-i", video_path,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        out_path,
+    ])
 
 def _merge_audio_to_video(video: str, tts_segments: list[dict], total_dur: float, out: str):
     """
@@ -1566,11 +1582,11 @@ class VideoGenerator:
         # 이탈률 방지를 위해 세그먼트 수를 강제로도 상한선 적용 (최대 7개).
         # 단, 이 상한은 "본편" 세그먼트에만 적용 — 60초 미달 시 뒤에 붙는
         # 참여 유도 CTA 세그먼트는 이 개수에 포함되지 않습니다.
-        if len(narration_segments) > 7:
+        if len(narration_segments) > 9:
             logger.warning(
-                f"틱톡 세그먼트 {len(narration_segments)}개 → 7개로 축소 (이탈률 방지)"
+                f"틱톡 세그먼트 {len(narration_segments)}개 → 9개로 축소"
             )
-            narration_segments = narration_segments[:7]
+            narration_segments = narration_segments[:9]
 
         logger.info(
             f"틱톡 나래이션 세그먼트: {len(narration_segments)}개, "
@@ -1689,7 +1705,7 @@ class VideoGenerator:
 
                 rendered_count = total
 
-               if current_time >= 60.0:
+                if current_time >= 60.0:
                     break
                 
                 # CTA는 딱 한 번만 추가한다.
@@ -1817,43 +1833,48 @@ class VideoGenerator:
                 out,
             )
             
-            # ── 최종 안전장치 ────────────────────────────────────────────────────────
-            # 최초 나래이션 + CTA 1회 + 확장 나래이션까지 시도했는데도
-            # 60초에 미달하면 CTA를 추가하지 않고 완성된 영상을 통째로 2회 반복한다.
-            #
-            # 이렇게 하면 같은 CTA가 반복되는 것이 아니라,
-            # 영상 전체의 흐름이 자연스럽게 처음부터 한 번 더 재생된다.
+                        # 4. 클립 합치기
+            silent_video = str(tmp / "silent.mp4")
+            _concat_clips(slide_clips, silent_video)
+
+            # 5. 오디오 합성 (TTS만, BGM 없음)
+            _merge_audio_to_video(
+                silent_video,
+                tts_segments,
+                total_duration,
+                out,
+            )
+
+            # ── 최종 안전장치 ────────────────────────────────────────────────
+            # 최초 나래이션 → CTA 1회 → 확장 나래이션 재생성까지
+            # 모두 시도했는데도 60초 미만이면 완성 영상을 2회 반복한다.
             if total_duration < 60.0:
-                repeated_out = os.path.join(
-                    tmp_s,
-                    "tiktok_repeated.mp4",
-                )
-            
+                repeated_out = str(tmp / "tiktok_repeated.mp4")
+
                 logger.warning(
                     f"[틱톡] 모든 나래이션 보강 후에도 "
-                    f"{total_duration:.2f}초 — 영상을 2회 반복합니다."
+                    f"{total_duration:.2f}초 — 완성 영상을 2회 반복합니다."
                 )
-            
-                _concat_clips(
-                    [out, out],
+
+                _repeat_video_twice(
+                    out,
                     repeated_out,
                 )
-            
-                # 임시 반복 파일을 최종 출력 위치로 이동
+
                 import shutil
                 shutil.copy2(repeated_out, out)
-            
+
                 total_duration *= 2
-            
+
                 logger.info(
                     f"[틱톡] 영상 2회 반복 완료: "
                     f"{total_duration:.2f}초"
                 )
-            
+
             logger.info(
                 f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)"
             )
-            
+
             return out
 
     def generate_tiktok_with_fallback(
