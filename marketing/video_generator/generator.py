@@ -368,7 +368,11 @@ def generate_narration_script(
 
 
 def generate_narration_script_tiktok(
-    blog_content: str, title: str, mode: str, api_key: str
+    blog_content: str,
+    title: str,
+    mode: str,
+    api_key: str,
+    extended: bool = False,
 ) -> tuple[list[dict], list[str]]:
     """
     틱톡용 나래이션 스크립트 생성 (이탈률 개선 버전).
@@ -388,21 +392,55 @@ def generate_narration_script_tiktok(
 
     mode_label = "전일 마감 리뷰" if mode == "morning" else "프리마켓 & 이슈"
     post_time_label = "매일 아침 9시" if mode == "morning" else "매일 저녁 9시"
+    if extended:
+        duration_instruction = (
+            "이번 요청은 1차 영상이 60초에 미달하여 다시 생성하는 확장 나래이션입니다.\n"
+            "기존 내용과 핵심 주제는 유지하되, 새로운 사실을 억지로 추가하지 말고 "
+            "기존 핵심 내용을 더 자세하고 자연스럽게 설명하세요.\n"
+            "세그먼트는 8~9개로 작성하고, 각 세그먼트는 65~90음절 정도로 충분히 설명하세요.\n"
+            "전체 나래이션은 자연스러운 발화 기준 약 90~105초 분량을 목표로 하세요.\n"
+            "같은 문장을 반복하거나 의미 없는 문장으로 분량만 늘리지 마세요.\n"
+            "각 세그먼트는 서로 다른 정보나 관점을 전달해야 합니다."
+        )
+    else:
+        duration_instruction = (
+            "세그먼트는 6~7개, 전체 길이는 65초~80초여야 합니다 "
+            "(실제 음성 재생은 이보다 빨라지므로 목표를 넉넉히 잡아야 "
+            "최종 영상이 60초를 넘습니다)."
+        )
+    
     prompt = (
         f"블로그 제목: {title}\n"
         f"포스팅 모드: {mode_label} (실제 발행 시각: {post_time_label})\n\n"
         f"블로그 본문 전문:\n{blog_content[:5000]}\n\n"
         "위 내용을 바탕으로 틱톡용 나래이션 스크립트를 JSON으로 작성해주세요.\n"
-        "세그먼트는 6~7개, 전체 길이는 65초~80초여야 합니다 (실제 음성 재생은 "
-        "이보다 빨라지므로 목표를 넉넉히 잡아야 최종 영상이 60초를 넘습니다).\n"
-        "블로그의 핵심 내용 중 가장 임팩트 있는 것만 선별하고, 다 담으려 하지 마세요.\n"
+        f"{duration_instruction}\n"
+        "블로그의 핵심 내용 중 가장 임팩트 있는 것을 우선적으로 선별하세요.\n"
+        "같은 내용을 반복해서 분량을 늘리지 마세요.\n"
         "1번 세그먼트는 반드시 강력한 훅으로 시작해야 합니다 (인사말 절대 금지)."
     )
 
+    system_prompt = NARRATION_SYSTEM_TIKTOK
+    
+    if extended:
+        system_prompt = NARRATION_SYSTEM_TIKTOK + """
+    
+    [확장 나래이션 재생성 모드]
+    현재 영상이 60초에 미달하여 나래이션을 확장하는 단계입니다.
+    
+    - 기존 스크립트의 핵심 주제와 사실관계를 유지하세요.
+    - 단순한 CTA나 좋아요/팔로우 문구를 추가하지 마세요.
+    - 같은 문장을 반복하지 마세요.
+    - 기존 내용을 더 구체적으로 설명하거나 배경, 원인, 영향, 전망을 자연스럽게 보강하세요.
+    - 총 8~9개 세그먼트를 작성하세요.
+    - 각 세그먼트는 충분한 설명을 포함하고, 전체적으로 자연스러운 발화 기준 90~105초를 목표로 하세요.
+    - 정보가 없는 부분을 추측해서 만들어내지 마세요.
+    """
+  
     for model in [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]:
         url     = f"{GEMINI_BASE_URL}{model}:generateContent?key={api_key}"
         payload = {
-            "system_instruction": {"parts": [{"text": NARRATION_SYSTEM_TIKTOK}]},
+            "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.75,
@@ -1490,9 +1528,13 @@ class VideoGenerator:
           - 세그먼트 간 TTS 이어붙임 gap을 최소화(TTS_GAP_SEC_TIKTOK)해
             음성 끊김 체감 완화
           - 해시태그를 화면에도 표시하고, 대시보드/발행용 콘텐츠에도 반환
-          - [1분 미달 방지] 실제 TTS 합성 결과가 60초 미만이면, 스크립트를
-            처음부터 다시 만들지 않고 "좋아요/팔로우/공유" 유도 세그먼트를
-            뒤에 추가로 이어 붙여 60초를 넘길 때까지 보강합니다(최대 3회 시도).
+          - [1분 미달 방지]
+            1차 나래이션이 60초 미만이면 참여 유도 CTA를 1개만 추가합니다.
+            CTA 1개를 추가한 뒤에도 60초 미만이면 CTA를 반복하지 않고,
+            기존 블로그 내용을 유지하면서 더 긴 나래이션을 Gemini로 재생성합니다.
+            확장 나래이션으로 다시 영상을 생성한 뒤에도 60초 미만이면
+            완성된 영상을 통째로 2회 반복하여 최종 업로드 영상으로 사용합니다.
+            동일 CTA를 여러 번 반복하지 않는 것을 최우선으로 합니다.
             빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
             끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
             이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
@@ -1568,7 +1610,7 @@ class VideoGenerator:
             all_segments = list(narration_segments)
             rendered_count = 0  # all_segments 중 이미 렌더링된 개수
             cta_rounds = 0
-            MAX_CTA_ROUNDS = 3  # 무한 루프 방지 (최대 3회, 라운드당 1개씩 추가)
+            extended_narration_used = False
 
             while True:
                 total = len(all_segments)
@@ -1647,22 +1689,73 @@ class VideoGenerator:
 
                 rendered_count = total
 
-                # ── 1분 미달 여부 확인 → 미달이면 CTA 세그먼트 1개 추가 후 재시도 ──
-                if current_time >= 60.0:
+               if current_time >= 60.0:
                     break
-                if cta_rounds >= MAX_CTA_ROUNDS:
+                
+                # CTA는 딱 한 번만 추가한다.
+                if cta_rounds == 0:
+                    cta_rounds = 1
+                
                     logger.warning(
-                        f"[틱톡] {MAX_CTA_ROUNDS}회 보강 후에도 "
-                        f"{current_time:.2f}초로 1분 미달 — 더 이상 보강하지 않고 종료"
+                        f"[틱톡] 현재 {current_time:.2f}초로 1분 미달 — "
+                        "참여 유도 CTA 1개만 추가합니다."
                     )
-                    break
-
-                cta_rounds += 1
-                logger.warning(
-                    f"[틱톡] 현재 {current_time:.2f}초로 1분 미달 — "
-                    f"참여 유도 CTA 세그먼트 추가 (보강 {cta_rounds}/{MAX_CTA_ROUNDS})"
-                )
-                all_segments = append_engagement_cta_segments(all_segments, mode, count=1)
+                
+                    all_segments = append_engagement_cta_segments(
+                        all_segments,
+                        mode,
+                        count=1,
+                    )
+                
+                    continue
+                
+                # CTA 1개를 추가했는데도 60초 미달이면
+                # CTA를 또 추가하지 않고, 전체 나래이션을 길게 재생성한다.
+                if not extended_narration_used:
+                    extended_narration_used = True
+                
+                    logger.warning(
+                        f"[틱톡] CTA 1회 추가 후에도 {current_time:.2f}초로 1분 미달 — "
+                        "나래이션 확장 재생성을 시작합니다."
+                    )
+                
+                    extended_segments, extended_hashtags = generate_narration_script_tiktok(
+                        blog_content,
+                        blog_title,
+                        mode,
+                        self.gemini_key,
+                        extended=True,
+                    )
+                
+                    if extended_segments:
+                        narration_segments = extended_segments
+                
+                        if extended_hashtags:
+                            hashtags = extended_hashtags
+                            self.last_tiktok_hashtags = hashtags
+                
+                        logger.info(
+                            f"[틱톡] 확장 나래이션 재생성 완료: "
+                            f"{len(narration_segments)}개 세그먼트"
+                        )
+                
+                        all_segments = list(narration_segments)
+                
+                        # 기존 렌더링 결과를 모두 폐기하고 처음부터 다시 렌더링
+                        slide_clips = []
+                        slide_durs = []
+                        tts_segments = []
+                        current_time = 0.0
+                        rendered_count = 0
+                        cta_rounds = 0
+                
+                        continue
+                
+                    logger.warning(
+                        "[틱톡] 확장 나래이션 재생성 실패 — 기존 영상으로 진행합니다."
+                    )
+                
+                break
 
             if not slide_clips:
                 raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
@@ -1717,9 +1810,50 @@ class VideoGenerator:
             _concat_clips(slide_clips, silent_video)
 
             # 5. 오디오 합성 (TTS만, BGM 없음)
-            _merge_audio_to_video(silent_video, tts_segments, total_duration, out)
-
-            logger.info(f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)")
+            _merge_audio_to_video(
+                silent_video,
+                tts_segments,
+                total_duration,
+                out,
+            )
+            
+            # ── 최종 안전장치 ────────────────────────────────────────────────────────
+            # 최초 나래이션 + CTA 1회 + 확장 나래이션까지 시도했는데도
+            # 60초에 미달하면 CTA를 추가하지 않고 완성된 영상을 통째로 2회 반복한다.
+            #
+            # 이렇게 하면 같은 CTA가 반복되는 것이 아니라,
+            # 영상 전체의 흐름이 자연스럽게 처음부터 한 번 더 재생된다.
+            if total_duration < 60.0:
+                repeated_out = os.path.join(
+                    tmp_s,
+                    "tiktok_repeated.mp4",
+                )
+            
+                logger.warning(
+                    f"[틱톡] 모든 나래이션 보강 후에도 "
+                    f"{total_duration:.2f}초 — 영상을 2회 반복합니다."
+                )
+            
+                _concat_clips(
+                    [out, out],
+                    repeated_out,
+                )
+            
+                # 임시 반복 파일을 최종 출력 위치로 이동
+                import shutil
+                shutil.copy2(repeated_out, out)
+            
+                total_duration *= 2
+            
+                logger.info(
+                    f"[틱톡] 영상 2회 반복 완료: "
+                    f"{total_duration:.2f}초"
+                )
+            
+            logger.info(
+                f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)"
+            )
+            
             return out
 
     def generate_tiktok_with_fallback(
