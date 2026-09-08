@@ -628,3 +628,39 @@ def push_marketing_result(
             f"(계속 진행, {platform}): {e}"
         )
         return False
+
+
+# ── URL 단축 (무료, 가입/키 불필요) ──────────────────────────────────────────
+
+def shorten_url(long_url: str) -> str:
+    """
+    티스토리 한글 제목 URL(퍼센트 인코딩으로 매우 길어짐)을 무료 공개
+    단축 URL 서비스로 축약합니다. 전부 실패해도 원본 URL을 그대로
+    반환해 파이프라인을 절대 중단시키지 않습니다 (기존 이미지 소스
+    폴백 체인과 동일한 설계).
+
+    이미 공개된 블로그 글 링크만 다루므로 개인정보/보안 이슈는 없습니다.
+    """
+    if not long_url:
+        return long_url
+
+    shorteners = [
+        ("is.gd", "https://is.gd/create.php", {"format": "simple", "url": long_url}),
+        ("v.gd", "https://v.gd/create.php", {"format": "simple", "url": long_url}),
+        ("TinyURL", "https://tinyurl.com/api-create.php", {"url": long_url}),
+    ]
+
+    for name, endpoint, params in shorteners:
+        try:
+            resp = requests.get(endpoint, params=params, timeout=10)
+            resp.raise_for_status()
+            short = resp.text.strip()
+            if short.startswith("http") and len(short) < len(long_url):
+                logger.info(f"URL 단축 성공 ({name}): {short}")
+                return short
+            logger.warning(f"{name} 응답이 유효한 URL이 아님: {short[:100]}")
+        except Exception as e:
+            logger.warning(f"{name} 단축 실패 (다음 서비스로 폴백): {e}")
+
+    logger.warning("모든 단축 URL 서비스 실패 — 원본 URL 그대로 사용")
+    return long_url
