@@ -79,6 +79,23 @@ _PLATFORM_THUMB_KEY = {
 # 대시보드에 영상을 보여줘야 하는 플랫폼
 _VIDEO_RESULT_PLATFORMS = {"youtube", "facebook_reels", "instagram_reels", "threads_reels", "tiktok"}
 
+def _use_short_url_in_captions(content: dict, long_url: str, short_url: str) -> None:
+    """
+    Gemini가 캡션에 원본 장문 URL을 그대로 썼거나 "[블로그 URL]" 플레이스홀더를
+    남겨둔 경우 모두 짧은 URL로 통일합니다. content["blog_url"] 자체(대시보드
+    표시/기록용 원본)는 건드리지 않습니다 — 실제 발행 캡션 텍스트만 대상.
+    """
+    if not short_url or short_url == long_url:
+        return
+    for key in ("facebook_post", "instagram_post", "threads_post",
+                "x_post", "kakao_post", "tiktok_post"):
+        text = content.get(key)
+        if not text:
+            continue
+        if long_url:
+            text = text.replace(long_url, short_url)
+        text = text.replace("[블로그 URL]", short_url).replace("[Blog URL]", short_url)
+        content[key] = text
 
 # ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
 
@@ -252,6 +269,12 @@ def main():
         adapter = ContentAdapter(api_key=os.environ["GEMINI_API_KEY"])
         content = adapter.generate_all(post)
         content["blog_thumbnail_url"] = post.get("thumbnail_url", "")
+
+        # 캡션용 단축 URL 확보 (dashboard/D1의 blog_url 원본 필드는 그대로 유지)
+        short_url = dashboard_client.shorten_url(post_url)
+        content["short_blog_url"] = short_url
+        _use_short_url_in_captions(content, post_url, short_url)
+
         logger.info("  → 플랫폼별 텍스트 생성 완료")
         state.add_log("CONTENT_GENERATED", "Gemini 콘텐츠 생성 완료", post_id=post_id)
     except Exception as e:
