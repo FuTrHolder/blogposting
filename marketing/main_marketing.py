@@ -87,15 +87,25 @@ def _use_short_url_in_captions(content: dict, long_url: str, short_url: str) -> 
     """
     if not short_url or short_url == long_url:
         return
+
+    def _replace(text: str) -> str:
+        if long_url:
+            text = text.replace(long_url, short_url)
+        return text.replace("[블로그 URL]", short_url).replace("[Blog URL]", short_url)
+
     for key in ("facebook_post", "instagram_post", "threads_post",
                 "x_post", "kakao_post", "tiktok_post"):
         text = content.get(key)
         if not text:
             continue
-        if long_url:
-            text = text.replace(long_url, short_url)
-        text = text.replace("[블로그 URL]", short_url).replace("[Blog URL]", short_url)
-        content[key] = text
+        content[key] = _replace(text)
+
+    # threads_thread는 문자열이 아니라 배열이라 위 루프와 별도로 처리합니다.
+    thread_items = content.get("threads_thread")
+    if isinstance(thread_items, list) and thread_items:
+        content["threads_thread"] = [
+            _replace(str(t)) if str(t) else t for t in thread_items
+        ]
 
 # ── 키워드 추출 헬퍼 ───────────────────────────────────────────────────────
 
@@ -155,6 +165,14 @@ def _push_results_to_dashboard(
             # tiktok_post 없으면 x_post → instagram_post 순으로 fallback
             if platform == "tiktok" and not content_text:
                 content_text = content.get("x_post", "") or content.get("instagram_post", "")[:280]
+
+        # threads는 답글 체인(threads_thread)이 있으면 대시보드에도 전체
+        # 체인을 순서대로 보여줍니다 (실제 발행 여부와 무관하게 "무엇을
+        # 보내려 했는지" 확인용 — 부분 실패 시 진단에도 도움).
+        if platform == "threads":
+            thread_items = content.get("threads_thread")
+            if isinstance(thread_items, list) and len(thread_items) >= 2:
+                content_text = "\n\n─────\n\n".join(str(t) for t in thread_items)
 
         # 썸네일 경로
         thumbnail_path = media_paths.get(thumb_key) if thumb_key else None
@@ -409,8 +427,33 @@ def main():
             if url:
                 content["video_public_url"] = url
 
+        # v7: 인스타그램 캐러셀 슬라이드 이미지들도 공개 URL 확보 (Instagram
+        # Graph API는 로컬 파일을 받지 않고 공개 URL만 받으므로, 릴스/썸네일과
+        # 동일하게 GitHub Release에 업로드합니다). 슬라이드 중 일부만 업로드에
+        # 실패해도(예: 순간적인 네트워크 오류) 2장 이상만 확보되면 캐러셀
+        # 발행을 시도합니다 — InstagramPublisher가 2장 미만이면 자동으로
+        # 단일 이미지 방식으로 폴백합니다.
+        carousel_local_paths = media_paths.get("instagram_carousel") or []
+        if carousel_local_paths:
+            carousel_urls = []
+            for idx, p in enumerate(carousel_local_paths, start=1):
+                url = dashboard_client.upload_media_get_public_url(
+                    p, f"carousel_instagram_{post['mode']}_{timestamp}_{idx:02d}.jpg"
+                )
+                if url:
+                    carousel_urls.append(url)
+            if len(carousel_urls) >= 2:
+                content["instagram_carousel_urls"] = carousel_urls
+                logger.info(f"  → 인스타그램 캐러셀 공개 URL {len(carousel_urls)}장 확보")
+            else:
+                logger.warning(
+                    f"  → 인스타그램 캐러셀 URL {len(carousel_urls)}장만 확보돼 "
+                    "단일 이미지 방식으로 폴백됩니다"
+                )
+
         acquired = [k for k in (
-            "threads_thumbnail_url", "instagram_thumbnail_url", "video_public_url"
+            "threads_thumbnail_url", "instagram_thumbnail_url", "video_public_url",
+            "instagram_carousel_urls",
         ) if content.get(k)]
         logger.info(f"  → 확보된 공개 URL: {acquired or '없음'}")
         state.add_log("PUBLIC_URLS_READY", f"공개 URL: {acquired or '없음'}", post_id=post_id)

@@ -360,6 +360,100 @@ def _build_thumbnail(
     return _overlay_text_on_image(img, title, mode, platform, date_str, blog_url)
 
 
+# ── 캐러셀 슬라이드 조립 (v7 신규) ─────────────────────────────────────────────
+_CAROUSEL_SIZE = (1080, 1350)  # 4:5 — 인스타그램 피드 캐러셀 표준 비율
+
+
+def _build_carousel_slide(
+    bg_image: Image.Image | None,
+    headline: str,
+    body: str,
+    mode: str,
+    slide_num: int,
+    total: int,
+) -> Image.Image:
+    """
+    캐러셀 슬라이드 1장을 만듭니다. 인스타그램 콘텐츠 제작 지침(§4-1 슬라이드
+    구조 공식)에 따라 슬라이드당 메시지 1개 원칙을 지키기 위해 headline(짧은
+    제목/키워드) + body(부연설명 1문장) 2단 구조로만 텍스트를 배치합니다.
+    같은 캐러셀의 모든 슬라이드는 같은 배경(bg_image)을 공유해 시각적 통일감을
+    유지합니다 (슬라이드마다 새로 이미지를 생성하지 않음 — API 호출 절약).
+    """
+    W, H = _CAROUSEL_SIZE
+
+    if bg_image:
+        img = _crop_fit(bg_image.copy(), W, H)
+        img = ImageEnhance.Contrast(img).enhance(1.1)
+        img = ImageEnhance.Color(img).enhance(1.15)
+    else:
+        base = (
+            [(6, 20, 60), (15, 50, 110), (6, 20, 60)]
+            if mode == "morning"
+            else [(20, 5, 55), (50, 15, 100), (20, 5, 55)]
+        )
+        img = _make_gradient(W, H, base)
+
+    result = img.convert("RGBA")
+    accent = (37, 150, 255) if mode == "morning" else (140, 100, 220)
+
+    # 하단 가독성 그라디언트 (_overlay_text_on_image와 동일한 패턴)
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad)
+    grad_start = int(H * 0.38)
+    for y in range(grad_start, H):
+        alpha = int(230 * ((y - grad_start) / (H - grad_start)) ** 0.7)
+        gd.line([(0, y), (W, y)], fill=(6, 10, 30, min(alpha, 235)))
+    result = Image.alpha_composite(result, grad)
+    draw = ImageDraw.Draw(result)
+
+    draw.rectangle([(0, 0), (W, 8)], fill=(*accent, 255))
+
+    # 슬라이드 번호 뱃지 (n / 총)
+    f_badge = _font(int(H * 0.026), "bold")
+    badge_txt = f"{slide_num} / {total}"
+    bb = draw.textbbox((0, 0), badge_txt, font=f_badge)
+    bw, bh = bb[2] - bb[0] + 22, bb[3] - bb[1] + 14
+    draw.rounded_rectangle(
+        [(W - 20 - bw, 18), (W - 20, 18 + bh)], radius=bh // 2, fill=(*accent, 230)
+    )
+    draw.text((W - 20 - bw + 11, 18 + 6), badge_txt, font=f_badge, fill=(255, 255, 255))
+
+    f_headline = _font(int(H * 0.052), "black")
+    f_body     = _font(int(H * 0.028), "regular")
+    CX, WRAPW  = W // 2, int(W * 0.86)
+
+    headline_clean = _clean_text(headline)
+    body_clean     = _clean_text(body)
+
+    text_y = int(H * 0.56)
+    lines  = _pixel_wrap(headline_clean, f_headline, WRAPW, max_lines=3)
+    for line in lines:
+        h = _center_text(draw, CX, text_y, line, f_headline, (255, 255, 255), ow=4)
+        text_y += h + 8
+
+    if body_clean:
+        draw.rectangle([(int(W * 0.12), text_y + 6), (int(W * 0.88), text_y + 9)],
+                        fill=(*accent, 170))
+        text_y += 22
+        body_lines = _pixel_wrap(body_clean, f_body, WRAPW, max_lines=3)
+        for line in body_lines:
+            h = _center_text(draw, CX, text_y, line, f_body, (225, 225, 230), ow=2)
+            text_y += h + 6
+
+    # 첫 슬라이드: 스와이프 유도 / 마지막 슬라이드: 저장 CTA
+    # (§5 지침: 첫 슬라이드에 스와이프 유도 문구를 넣으면 완독률이 올라감)
+    if slide_num == 1 and total > 1:
+        hint = "스와이프해서 더 보기 →"
+        hb = draw.textbbox((0, 0), hint, font=f_body)
+        draw.text((CX - (hb[2] - hb[0]) // 2, H - 60), hint, font=f_body, fill=(*accent, 255))
+    elif slide_num == total:
+        cta = "저장해두고 놓치지 마세요"
+        cb = draw.textbbox((0, 0), cta, font=f_body)
+        draw.text((CX - (cb[2] - cb[0]) // 2, H - 60), cta, font=f_body, fill=(255, 255, 255))
+
+    return result.convert("RGB")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SNSThumbnailGenerator
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -672,6 +766,51 @@ class SNSThumbnailGenerator:
             return "wall street stock exchange morning finance"
         return "stock market trading floor night city"
 
+    # ── 인스타그램 캐러셀 슬라이드 생성 (v7 신규) ────────────────────────────
+    def generate_carousel(
+        self,
+        slides: list[dict],
+        mode: str,
+        timestamp: str = "",
+        bg_image: "Image.Image | None" = None,
+    ) -> list[str]:
+        """
+        instagram_carousel(4~6개 슬라이드 배열)을 실제 이미지 파일들로
+        렌더링합니다. bg_image가 주어지면(generate_all()이 이미 확보한
+        instagram 그룹 배경) 추가 API 호출 없이 그대로 재사용하고, 없으면
+        새로 한 번만 확보합니다 — 슬라이드마다 새로 생성하지 않습니다.
+        """
+        if not slides:
+            return []
+        if not timestamp:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+        if bg_image is None:
+            flux_prompt = "stock market finance chart"
+            bg_image = self._generate_cf_bg(flux_prompt, mode, 1024, 1024, platform="instagram")
+            if not bg_image:
+                bg_image = self._generate_flux_bg(flux_prompt, mode, 1024, 1024, platform="instagram")
+
+        total = len(slides)
+        paths: list[str] = []
+
+        for i, slide in enumerate(slides, start=1):
+            try:
+                num = int(slide.get("slide") or i)
+                headline = slide.get("headline", "")
+                body = slide.get("body", "")
+                img = _build_carousel_slide(bg_image, headline, body, mode, num, total)
+
+                filename = f"carousel_instagram_{mode}_{timestamp}_{num:02d}.jpg"
+                path = os.path.join(self.output_dir, filename)
+                img.save(path, "JPEG", quality=95, optimize=True)
+                paths.append(path)
+                logger.info(f"[instagram 캐러셀 {num}/{total}] 저장: {path}")
+            except Exception as e:
+                logger.error(f"[instagram 캐러셀] 슬라이드 생성 실패: {e}", exc_info=True)
+
+        return paths
+
     # ── 전체 생성 진입점 ──────────────────────────────────────────────────────
     def generate_all(
         self,
@@ -682,7 +821,7 @@ class SNSThumbnailGenerator:
         timestamp: str = "",
         content: dict | None = None,
         image_prompt: str = "",
-    ) -> dict[str, str]:
+    ) -> dict[str, "str | list[str]"]:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         content  = content or {}
@@ -693,7 +832,7 @@ class SNSThumbnailGenerator:
         date_str = _extract_date(title)
 
         platform_list = ["facebook", "threads", "instagram", "instagram_portrait", "kakao"]
-        paths: dict[str, str] = {}
+        paths: dict[str, "str | list[str]"] = {}
 
         # ── 채널별 배경을 "스타일 그룹" 단위로 생성 ──────────────────────────
         # 플랫폼마다 매번 새로 생성하면 API 호출이 5배로 늘어나므로, 비주얼
@@ -748,5 +887,26 @@ class SNSThumbnailGenerator:
 
             except Exception as e:
                 logger.error(f"[{platform}] 썸네일 생성 실패: {e}", exc_info=True)
+
+        # ── 인스타그램 캐러셀 (v7 신규) ────────────────────────────────────
+        # content_adapter가 instagram_carousel(4~6개 슬라이드)을 만들어줬으면
+        # 위에서 이미 확보한 instagram 그룹 배경(group_bg["instagram"])을
+        # 그대로 재사용해 슬라이드 이미지들을 렌더링합니다 — 추가 API 호출
+        # 없이 무료로 처리됩니다. 실패해도 단일 이미지 발행 경로에는 영향
+        # 없습니다(InstagramPublisher가 자동으로 단일 이미지로 폴백).
+        carousel_slides = content.get("instagram_carousel") if content else None
+        if isinstance(carousel_slides, list) and len(carousel_slides) >= 2:
+            try:
+                carousel_paths = self.generate_carousel(
+                    slides=carousel_slides,
+                    mode=mode,
+                    timestamp=timestamp,
+                    bg_image=group_bg.get("instagram"),
+                )
+                if carousel_paths:
+                    paths["instagram_carousel"] = carousel_paths
+                    logger.info(f"[instagram 캐러셀] {len(carousel_paths)}장 생성 완료")
+            except Exception as e:
+                logger.error(f"[instagram 캐러셀] 전체 생성 실패: {e}", exc_info=True)
 
         return paths

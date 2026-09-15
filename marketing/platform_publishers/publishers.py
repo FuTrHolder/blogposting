@@ -1,5 +1,33 @@
 """
-플랫폼 발행 모듈 v6
+플랫폼 발행 모듈 v7
+변경사항 v7:
+  - [기능 추가] Threads 답글 체인(스레드) 발행
+      기존에는 threads_post 문자열 1개만 단일 게시물로 발행했습니다. Grok이
+      제안한 "긴 분석을 여러 게시물로 나눠 스레드 형태로 올리기" 전략을
+      반영해, content_adapter가 만든 threads_thread(짧은 게시물 2~4개 배열)가
+      있으면 첫 게시물(루트, 이미지 첨부 가능) 아래로 reply_to_id를 이용해
+      답글을 순서대로 이어 붙입니다.
+      → ThreadsPublisher.publish()가 threads_thread 유무를 먼저 확인하고,
+        없거나 유효한 항목이 1개 이하면 기존 단일 게시물 방식(threads_post)
+        으로 그대로 폴백합니다 — 기존 동작에 대한 회귀 없음.
+      → 답글 하나가 실패해도 체인 전체를 중단하지 않고, 직전에 성공한
+        게시물을 기준으로 다음 답글을 계속 시도합니다(부분 성공 허용).
+      → 루트 게시물의 실제 열람 링크(permalink)를 추가로 조회해 발행
+        결과에 담습니다 — 실패해도 기존처럼 일반 링크로 폴백하므로
+        파이프라인에는 영향 없습니다.
+
+  - [기능 추가] Instagram 캐러셀 발행
+      content_adapter가 만든 instagram_carousel(4~6개 슬라이드)이 있고
+      main_marketing.py가 그 슬라이드 이미지들을 GitHub Release에 올려
+      instagram_carousel_urls(공개 URL 2장 이상)를 확보하면, 기존 단일
+      이미지 게시 대신 캐러셀 게시물로 발행합니다.
+      → InstagramPublisher._publish_carousel(): 이미지마다 자식 컨테이너
+        생성 → media_type=CAROUSEL 부모 컨테이너 생성 → media_publish.
+      → 캐러셀 발행이 실패하면(자식 컨테이너 오류, 타임아웃 등) 기존 단일
+        이미지 방식으로 자동 폴백합니다 — 회귀 없음. 같은 캡션으로 단일
+        이미지와 캐러셀을 동시에 올리면 중복 게시가 되므로 "추가" 방식인
+        릴스와 달리 "대체" 방식으로 설계했습니다.
+
 변경사항 v6:
   - [버그 수정] Threads 썸네일 미업로드 문제 해결
       기존(v4)에는 Threads가 쓸 수 있는 이미지 URL이 "티스토리 썸네일(대부분
@@ -402,6 +430,18 @@ class ThreadsPublisher(PlatformPublisher):
         if not self.user_id or not self.access_token:
             return {"status": "skip", "message": "Threads 설정 미완료"}
 
+        # v7: threads_thread(짧은 게시물 2~4개 배열)가 있으면 답글 체인으로
+        # 발행합니다. 없거나 유효한 항목이 1개 이하면 기존 단일 게시물
+        # 방식(threads_post)으로 그대로 폴백합니다 — 기존 동작 회귀 없음.
+        thread_items = content.get("threads_thread")
+        valid_items = (
+            [str(t).strip() for t in thread_items if str(t).strip()]
+            if isinstance(thread_items, list)
+            else []
+        )
+        if len(valid_items) >= 2:
+            return self._publish_chain(valid_items, content)
+
         blog_url   = content.get("blog_url", "")
         text       = self._replace_placeholder(
             content.get("threads_post", ""), blog_url
@@ -417,6 +457,82 @@ class ThreadsPublisher(PlatformPublisher):
             logger.warning(f"Threads 이미지 게시 실패, 텍스트 전용으로 전환: {result['message']}")
 
         return self._publish_text(text)
+
+    def _publish_chain(self, texts: list[str], content: dict) -> dict:
+        """
+        threads_thread 배열을 답글로 서로 이어 붙여 하나의 스레드(체인)로
+        발행합니다.
+
+        - 첫 게시물(루트)에는 이미지가 있으면 첨부합니다 (_resolve_image_url
+          우선순위를 기존 단일 게시물 방식과 동일하게 사용).
+        - 이후 게시물은 reply_to_id로 직전에 성공한 게시물에 답글을 답니다.
+        - 답글 하나가 실패해도 체인 전체를 중단하지 않고, 마지막으로 성공한
+          게시물을 기준으로 다음 답글을 계속 시도합니다 (부분 성공 허용 —
+          예: 4개 중 3개만 게시돼도 독자 입장에서는 여전히 읽을 수 있는
+          스레드이므로, 실패했다고 전부 버리지 않습니다).
+        - 게시물 사이에 2초 간격을 두어 연속 게시로 인한 레이트리밋을 방지합니다.
+        """
+        blog_url = content.get("blog_url", "")
+        texts = [self._replace_placeholder(t, blog_url) for t in texts]
+
+        image_url = self._resolve_image_url(content)
+
+        root_result = None
+        if image_url:
+            root_result = self._publish_with_image(texts[0], image_url)
+            if root_result["status"] != "ok":
+                logger.warning(
+                    f"Threads 체인 루트 이미지 게시 실패, 텍스트 전용으로 전환: "
+                    f"{root_result['message']}"
+                )
+                root_result = None
+        if root_result is None:
+            root_result = self._publish_text(texts[0])
+
+        if root_result["status"] != "ok":
+            return {"status": "error", "message": f"체인 루트 게시 실패: {root_result['message']}"}
+
+        root_post_id = root_result.get("post_id", "")
+        last_id = root_post_id
+        ok_count = 1
+        failures: list[str] = []
+
+        for idx, text in enumerate(texts[1:], start=2):
+            time.sleep(2)
+            reply_result = self._publish_reply(text, reply_to_id=last_id)
+            if reply_result["status"] == "ok":
+                last_id = reply_result.get("post_id", "") or last_id
+                ok_count += 1
+            else:
+                failures.append(f"{idx}번째: {reply_result['message']}")
+                logger.warning(
+                    f"Threads 체인 {idx}번째 답글 실패 (체인은 계속 유지): "
+                    f"{reply_result['message']}"
+                )
+
+        url = self._fetch_permalink(root_post_id) or "https://www.threads.net"
+        message = f"답글 체인 {ok_count}/{len(texts)}건 게시 성공"
+        if failures:
+            message += f" (실패: {'; '.join(failures)})"
+
+        logger.info(f"Threads 답글 체인 발행 완료: {message}")
+        return {"status": "ok", "url": url, "message": message}
+
+    def _fetch_permalink(self, media_id: str) -> str:
+        """게시된 Threads 미디어의 실제 열람 링크를 조회합니다. 실패해도
+        빈 문자열만 반환하고 파이프라인에는 영향을 주지 않습니다."""
+        if not media_id:
+            return ""
+        try:
+            resp = requests.get(
+                f"{self.GRAPH_API}/{media_id}",
+                params={"fields": "permalink", "access_token": self.access_token},
+                timeout=10,
+            )
+            return resp.json().get("permalink", "") or ""
+        except Exception as e:
+            logger.warning(f"Threads permalink 조회 실패 (무시): {e}")
+            return ""
 
     def _publish_text(self, text: str) -> dict:
         try:
@@ -451,10 +567,53 @@ class ThreadsPublisher(PlatformPublisher):
 
             post_id = data2.get("id", "")
             logger.info(f"Threads 텍스트 게시 완료: {post_id}")
-            return {"status": "ok", "url": "https://www.threads.net",
+            return {"status": "ok", "url": "https://www.threads.net", "post_id": post_id,
                     "message": f"텍스트 게시 성공 (ID: {post_id})"}
         except Exception as e:
             logger.error(f"Threads 게시 실패: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def _publish_reply(self, text: str, reply_to_id: str) -> dict:
+        """
+        _publish_text()와 동일한 흐름이지만, reply_to_id를 지정해 특정
+        게시물에 답글로 답니다 (체인 연결용). Threads API는 media_type=TEXT
+        답글에는 컨테이너 처리 대기가 필요 없어 이미지/영상 게시와 달리
+        바로 발행을 시도합니다.
+        """
+        try:
+            resp1 = requests.post(
+                f"{self.GRAPH_API}/{self.user_id}/threads",
+                params={
+                    "access_token": self.access_token,
+                    "text": text,
+                    "media_type": "TEXT",
+                    "reply_to_id": reply_to_id,
+                },
+                timeout=30,
+            )
+            data1 = resp1.json()
+            if "error" in data1:
+                return {"status": "error", "message": data1["error"].get("message", str(data1))}
+
+            creation_id = data1.get("id")
+            if not creation_id:
+                return {"status": "error", "message": "creation_id 없음"}
+
+            resp2 = requests.post(
+                f"{self.GRAPH_API}/{self.user_id}/threads_publish",
+                params={"creation_id": creation_id, "access_token": self.access_token},
+                timeout=30,
+            )
+            data2 = resp2.json()
+            if "error" in data2:
+                return {"status": "error", "message": data2["error"].get("message", str(data2))}
+
+            post_id = data2.get("id", "")
+            logger.info(f"Threads 답글 게시 완료 (부모: {reply_to_id}): {post_id}")
+            return {"status": "ok", "post_id": post_id,
+                    "message": f"답글 게시 성공 (ID: {post_id})"}
+        except Exception as e:
+            logger.error(f"Threads 답글 게시 실패: {e}")
             return {"status": "error", "message": str(e)}
 
     def _publish_with_image(self, text: str, image_url: str) -> dict:
@@ -492,7 +651,7 @@ class ThreadsPublisher(PlatformPublisher):
 
             post_id = data2.get("id", "")
             logger.info(f"Threads 이미지 게시 완료: {post_id}")
-            return {"status": "ok", "url": "https://www.threads.net",
+            return {"status": "ok", "url": "https://www.threads.net", "post_id": post_id,
                     "message": f"이미지 게시 성공 (ID: {post_id})"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -586,6 +745,11 @@ class InstagramPublisher(PlatformPublisher):
         썸네일(이미지) + 캡션 게시. v6부터는 영상(릴스) 발행이 publish_reels()로
         분리되어, 이 메서드는 항상 이미지 게시물만 담당합니다 (릴스가 성공하든
         실패하든 이 게시물은 그대로 유지 — 썸네일+릴스 둘 다 발행하는 것이 목적).
+
+        v7: instagram_carousel_urls(캐러셀 이미지 공개 URL 2장 이상)가 확보되면
+        단일 이미지 대신 캐러셀 게시물로 발행합니다 (같은 캡션으로 단일+캐러셀을
+        동시에 올리면 중복 게시가 되므로 "대체" 방식 — 릴스처럼 "추가" 방식이
+        아닙니다). 캐러셀 발행이 실패하면 기존 단일 이미지 방식으로 폴백합니다.
         """
         if not self.account_id or not self.access_token:
             return {"status": "skip", "message": "Instagram 설정 미완료"}
@@ -595,11 +759,96 @@ class InstagramPublisher(PlatformPublisher):
         if blog_url:
             caption = caption.replace("[블로그 URL]", blog_url)
 
+        carousel_urls = content.get("instagram_carousel_urls")
+        valid_carousel = (
+            [u for u in carousel_urls if u]
+            if isinstance(carousel_urls, list)
+            else []
+        )
+        if len(valid_carousel) >= 2:
+            result = self._publish_carousel(caption, valid_carousel)
+            if result["status"] == "ok":
+                return result
+            logger.warning(f"Instagram 캐러셀 게시 실패, 단일 이미지로 전환: {result['message']}")
+
         image_url = self._resolve_image_url(content)
         if image_url:
             return self._publish_image(caption, image_url)
 
         return {"status": "skip", "message": "Instagram은 이미지 없이 텍스트만 게시 불가"}
+
+    def _publish_carousel(self, caption: str, image_urls: list[str]) -> dict:
+        """
+        여러 장의 이미지를 하나의 캐러셀 게시물로 발행합니다.
+        Instagram Graph API 3단계:
+          1) 이미지마다 is_carousel_item=true로 자식(child) 컨테이너 생성
+          2) media_type=CAROUSEL + children=[자식ID...]로 부모 컨테이너 생성
+          3) media_publish로 최종 발행
+        최대 10장까지 지원되지만, 이 파이프라인은 4~6장 내외로 생성합니다.
+        자식 컨테이너 하나라도 생성/처리에 실패하면 전체를 중단하고 에러를
+        반환합니다(부분 캐러셀은 허용하지 않음 — Instagram API 특성상 부모
+        컨테이너 생성 시 모든 children ID가 유효해야 함).
+        """
+        try:
+            children_ids: list[str] = []
+            for idx, url in enumerate(image_urls, start=1):
+                resp = requests.post(
+                    f"{self.GRAPH_API}/{self.account_id}/media",
+                    params={
+                        "image_url": url,
+                        "is_carousel_item": "true",
+                        "access_token": self.access_token,
+                    },
+                    timeout=30,
+                )
+                data = resp.json()
+                if "error" in data:
+                    return {"status": "error",
+                            "message": f"캐러셀 자식({idx}) 생성 실패: {data['error']['message']}"}
+                child_id = data.get("id")
+                if not child_id:
+                    return {"status": "error", "message": f"캐러셀 자식({idx}) ID 없음"}
+                if not self._wait_for_container(child_id):
+                    return {"status": "error", "message": f"캐러셀 자식({idx}) 처리 타임아웃"}
+                children_ids.append(child_id)
+
+            resp1 = requests.post(
+                f"{self.GRAPH_API}/{self.account_id}/media",
+                params={
+                    "media_type": "CAROUSEL",
+                    "children": ",".join(children_ids),
+                    "caption": caption,
+                    "access_token": self.access_token,
+                },
+                timeout=30,
+            )
+            data1 = resp1.json()
+            if "error" in data1:
+                return {"status": "error",
+                        "message": f"캐러셀 부모 컨테이너 생성 실패: {data1['error']['message']}"}
+
+            creation_id = data1.get("id")
+            if not creation_id:
+                return {"status": "error", "message": "캐러셀 부모 컨테이너 ID 없음"}
+
+            resp2 = requests.post(
+                f"{self.GRAPH_API}/{self.account_id}/media_publish",
+                params={"creation_id": creation_id, "access_token": self.access_token},
+                timeout=30,
+            )
+            data2 = resp2.json()
+            if "error" in data2:
+                return {"status": "error",
+                        "message": f"캐러셀 게시 실패: {data2['error']['message']}"}
+
+            post_id = data2.get("id", "")
+            url     = f"https://www.instagram.com/p/{post_id}/"
+            logger.info(f"Instagram 캐러셀 게시 완료: {url} ({len(children_ids)}장)")
+            return {"status": "ok", "url": url,
+                    "message": f"캐러셀 게시 성공 ({len(children_ids)}장)"}
+        except Exception as e:
+            logger.error(f"Instagram 캐러셀 게시 실패: {e}")
+            return {"status": "error", "message": str(e)}
 
     def _resolve_image_url(self, content: dict) -> str:
         # 1순위: 환경변수 수동 지정
