@@ -783,11 +783,21 @@ class InstagramPublisher(PlatformPublisher):
         Instagram Graph API 3단계:
           1) 이미지마다 is_carousel_item=true로 자식(child) 컨테이너 생성
           2) media_type=CAROUSEL + children=[자식ID...]로 부모 컨테이너 생성
-          3) media_publish로 최종 발행
+          3) 부모 컨테이너도 처리 완료(FINISHED)를 대기한 뒤 media_publish로 발행
         최대 10장까지 지원되지만, 이 파이프라인은 4~6장 내외로 생성합니다.
         자식 컨테이너 하나라도 생성/처리에 실패하면 전체를 중단하고 에러를
         반환합니다(부분 캐러셀은 허용하지 않음 — Instagram API 특성상 부모
         컨테이너 생성 시 모든 children ID가 유효해야 함).
+
+        [버그 수정] 최초 구현에서는 부모(CAROUSEL) 컨테이너를 생성한 직후
+        처리 완료 대기 없이 바로 media_publish를 호출해 "Media ID is not
+        available" 에러로 실패했습니다 (자식 컨테이너들은 각각 _wait_for_
+        container()로 완료를 기다렸지만, 정작 부모 컨테이너 자체는 기다리지
+        않았던 것이 원인 — 단일 이미지 발행(_publish_image)에는 있던 대기
+        단계가 캐러셀 부모 컨테이너 경로에는 누락되어 있었습니다). 자식보다
+        처리할 이미지가 많아 시간이 더 걸릴 수 있으므로 대기 시간을 60초로
+        늘리고, media_publish 자체도 일시적 처리 지연에 대비해 짧게
+        재시도합니다.
         """
         try:
             children_ids: list[str] = []
@@ -831,21 +841,33 @@ class InstagramPublisher(PlatformPublisher):
             if not creation_id:
                 return {"status": "error", "message": "캐러셀 부모 컨테이너 ID 없음"}
 
-            resp2 = requests.post(
-                f"{self.GRAPH_API}/{self.account_id}/media_publish",
-                params={"creation_id": creation_id, "access_token": self.access_token},
-                timeout=30,
-            )
-            data2 = resp2.json()
-            if "error" in data2:
-                return {"status": "error",
-                        "message": f"캐러셀 게시 실패: {data2['error']['message']}"}
+            # 자식과 달리 부모(CAROUSEL) 컨테이너도 반드시 FINISHED 상태를
+            # 확인한 뒤에 발행해야 합니다 (이번 실패의 직접 원인이었던 부분).
+            if not self._wait_for_container(creation_id, max_wait=60):
+                return {"status": "error", "message": "캐러셀 부모 컨테이너 처리 타임아웃"}
 
-            post_id = data2.get("id", "")
-            url     = f"https://www.instagram.com/p/{post_id}/"
-            logger.info(f"Instagram 캐러셀 게시 완료: {url} ({len(children_ids)}장)")
-            return {"status": "ok", "url": url,
-                    "message": f"캐러셀 게시 성공 ({len(children_ids)}장)"}
+            last_err = ""
+            for attempt in range(1, 4):
+                resp2 = requests.post(
+                    f"{self.GRAPH_API}/{self.account_id}/media_publish",
+                    params={"creation_id": creation_id, "access_token": self.access_token},
+                    timeout=30,
+                )
+                data2 = resp2.json()
+                if "error" not in data2:
+                    post_id = data2.get("id", "")
+                    url     = f"https://www.instagram.com/p/{post_id}/"
+                    logger.info(f"Instagram 캐러셀 게시 완료: {url} ({len(children_ids)}장)")
+                    return {"status": "ok", "url": url,
+                            "message": f"캐러셀 게시 성공 ({len(children_ids)}장)"}
+
+                last_err = data2["error"].get("message", str(data2))
+                if attempt < 3:
+                    wait = 10 * attempt
+                    logger.info(f"Instagram 캐러셀 발행 처리 대기 중 — {wait}초 후 재시도 ({last_err})")
+                    time.sleep(wait)
+
+            return {"status": "error", "message": f"캐러셀 게시 실패(재시도 초과): {last_err}"}
         except Exception as e:
             logger.error(f"Instagram 캐러셀 게시 실패: {e}")
             return {"status": "error", "message": str(e)}
