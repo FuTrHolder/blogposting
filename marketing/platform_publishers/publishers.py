@@ -575,46 +575,351 @@ class ThreadsPublisher(PlatformPublisher):
 
     def _publish_reply(self, text: str, reply_to_id: str) -> dict:
         """
-        _publish_text()와 동일한 흐름이지만, reply_to_id를 지정해 특정
-        게시물에 답글로 답니다 (체인 연결용). Threads API는 media_type=TEXT
-        답글에는 컨테이너 처리 대기가 필요 없어 이미지/영상 게시와 달리
-        바로 발행을 시도합니다.
+        Threads 답글 게시.
+
+        기존 동작:
+          - reply_to_id를 이용해 특정 게시물에 답글 게시
+          - 컨테이너 생성 → threads_publish 2단계
+
+        안정성 개선:
+          - 컨테이너 생성과 발행 각각 재시도
+          - 5초 → 10초 → 20초 backoff
+          - 각 단계의 HTTP status / error.code / error.type / error.message 상세 로깅
+          - 재시도마다 새로운 creation_id를 생성
+          - 최종 실패 시 원래 부모 ID를 유지한 채 실패 반환
+          - _publish_chain()이 기존 방식대로 마지막 성공 게시물을 부모로 유지
         """
-        try:
-            resp1 = requests.post(
-                f"{self.GRAPH_API}/{self.user_id}/threads",
-                params={
-                    "access_token": self.access_token,
-                    "text": text,
-                    "media_type": "TEXT",
-                    "reply_to_id": reply_to_id,
-                },
-                timeout=30,
+        max_attempts = 3
+        backoff_seconds = [5, 10]
+
+        def _parse_response(resp, stage: str, attempt: int, creation_id: str = "") -> dict:
+            """Threads API 응답을 안전하게 파싱하고 상세 오류를 기록합니다."""
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {
+                    "error": {
+                        "message": resp.text[:500] if resp.text else "JSON 응답 없음"
+                    }
+                }
+
+            if "error" in data:
+                error = data.get("error") or {}
+
+                error_code = error.get("code", "")
+                error_type = error.get("type", "")
+                error_message = error.get(
+                    "message",
+                    "알 수 없는 Threads API 오류",
+                )
+
+                logger.warning(
+                    "Threads 답글 API 오류 "
+                    f"[stage={stage}, attempt={attempt}/{max_attempts}] "
+                    f"[http_status={resp.status_code}] "
+                    f"[error_code={error_code}] "
+                    f"[error_type={error_type}] "
+                    f"[parent_id={reply_to_id}] "
+                    f"[creation_id={creation_id or '-'}] "
+                    f"[message={error_message}]"
+                )
+
+                return {
+                    "status": "error",
+                    "message": error_message,
+                    "error_code": error_code,
+                    "error_type": error_type,
+                    "http_status": resp.status_code,
+                    "raw_error": error,
+                }
+
+            logger.info(
+                "Threads 답글 API 정상 응답 "
+                f"[stage={stage}, attempt={attempt}/{max_attempts}] "
+                f"[http_status={resp.status_code}] "
+                f"[parent_id={reply_to_id}] "
+                f"[creation_id={creation_id or '-'}] "
+                f"[response={data}]"
             )
-            data1 = resp1.json()
-            if "error" in data1:
-                return {"status": "error", "message": data1["error"].get("message", str(data1))}
 
-            creation_id = data1.get("id")
-            if not creation_id:
-                return {"status": "error", "message": "creation_id 없음"}
+            return {
+                "status": "ok",
+                "data": data,
+                "http_status": resp.status_code,
+            }
 
-            resp2 = requests.post(
-                f"{self.GRAPH_API}/{self.user_id}/threads_publish",
-                params={"creation_id": creation_id, "access_token": self.access_token},
-                timeout=30,
-            )
-            data2 = resp2.json()
-            if "error" in data2:
-                return {"status": "error", "message": data2["error"].get("message", str(data2))}
+        last_error = {
+            "message": "알 수 없는 오류",
+            "error_code": "",
+            "error_type": "",
+            "http_status": "",
+        }
 
-            post_id = data2.get("id", "")
-            logger.info(f"Threads 답글 게시 완료 (부모: {reply_to_id}): {post_id}")
-            return {"status": "ok", "post_id": post_id,
-                    "message": f"답글 게시 성공 (ID: {post_id})"}
-        except Exception as e:
-            logger.error(f"Threads 답글 게시 실패: {e}")
-            return {"status": "error", "message": str(e)}
+        for attempt in range(1, max_attempts + 1):
+            creation_id = ""
+
+            try:
+                # ─────────────────────────────────────────────
+                # 1. 답글 컨테이너 생성
+                # ─────────────────────────────────────────────
+                logger.info(
+                    "Threads 답글 컨테이너 생성 시도 "
+                    f"[{attempt}/{max_attempts}] "
+                    f"[parent_id={reply_to_id}]"
+                )
+
+                resp1 = requests.post(
+                    f"{self.GRAPH_API}/{self.user_id}/threads",
+                    params={
+                        "access_token": self.access_token,
+                        "text": text,
+                        "media_type": "TEXT",
+                        "reply_to_id": reply_to_id,
+                    },
+                    timeout=30,
+                )
+
+                result1 = _parse_response(
+                    resp1,
+                    stage="container_create",
+                    attempt=attempt,
+                )
+
+                if result1["status"] != "ok":
+                    last_error = result1
+
+                    if attempt < max_attempts:
+                        wait = backoff_seconds[attempt - 1]
+
+                        logger.warning(
+                            "Threads 답글 컨테이너 생성 실패 → "
+                            f"{wait}초 후 재시도 "
+                            f"[parent_id={reply_to_id}] "
+                            f"[error={last_error['message']}]"
+                        )
+
+                        time.sleep(wait)
+                        continue
+
+                    break
+
+                data1 = result1["data"]
+                creation_id = data1.get("id", "")
+
+                if not creation_id:
+                    last_error = {
+                        "message": "creation_id 없음",
+                        "error_code": "",
+                        "error_type": "",
+                        "http_status": resp1.status_code,
+                    }
+
+                    logger.error(
+                        "Threads 답글 컨테이너 생성 성공 응답이지만 "
+                        f"creation_id가 없습니다 "
+                        f"[parent_id={reply_to_id}] "
+                        f"[response={data1}]"
+                    )
+
+                    if attempt < max_attempts:
+                        wait = backoff_seconds[attempt - 1]
+                        time.sleep(wait)
+                        continue
+
+                    break
+
+                logger.info(
+                    "Threads 답글 컨테이너 생성 완료 "
+                    f"[parent_id={reply_to_id}] "
+                    f"[creation_id={creation_id}]"
+                )
+
+                # ─────────────────────────────────────────────
+                # 2. 컨테이너 처리 안정화를 위한 짧은 대기
+                # ─────────────────────────────────────────────
+                #
+                # 현재 문제는 컨테이너 생성 직후 publish를 호출할 때
+                # "The requested resource does not exist"가 발생할
+                # 가능성을 고려해야 하므로 짧게 대기합니다.
+                #
+                # _publish_chain() 자체의 2초 간격은 그대로 유지하고,
+                # 여기서는 API 컨테이너 생성 → publish 사이의 안정화
+                # 시간만 추가합니다.
+                #
+                time.sleep(3)
+
+                # ─────────────────────────────────────────────
+                # 3. 답글 컨테이너 발행
+                # ─────────────────────────────────────────────
+                logger.info(
+                    "Threads 답글 발행 시도 "
+                    f"[{attempt}/{max_attempts}] "
+                    f"[parent_id={reply_to_id}] "
+                    f"[creation_id={creation_id}]"
+                )
+
+                resp2 = requests.post(
+                    f"{self.GRAPH_API}/{self.user_id}/threads_publish",
+                    params={
+                        "creation_id": creation_id,
+                        "access_token": self.access_token,
+                    },
+                    timeout=30,
+                )
+
+                result2 = _parse_response(
+                    resp2,
+                    stage="publish",
+                    attempt=attempt,
+                    creation_id=creation_id,
+                )
+
+                if result2["status"] != "ok":
+                    last_error = result2
+
+                    if attempt < max_attempts:
+                        wait = backoff_seconds[attempt - 1]
+
+                        logger.warning(
+                            "Threads 답글 발행 실패 → "
+                            f"{wait}초 후 새 컨테이너로 재시도 "
+                            f"[parent_id={reply_to_id}] "
+                            f"[creation_id={creation_id}] "
+                            f"[error={last_error['message']}]"
+                        )
+
+                        time.sleep(wait)
+                        continue
+
+                    break
+
+                data2 = result2["data"]
+                post_id = data2.get("id", "")
+
+                if not post_id:
+                    last_error = {
+                        "message": "발행 성공 응답에 post_id 없음",
+                        "error_code": "",
+                        "error_type": "",
+                        "http_status": resp2.status_code,
+                    }
+
+                    logger.error(
+                        "Threads 답글 발행 응답에 post_id가 없습니다 "
+                        f"[parent_id={reply_to_id}] "
+                        f"[creation_id={creation_id}] "
+                        f"[response={data2}]"
+                    )
+
+                    if attempt < max_attempts:
+                        wait = backoff_seconds[attempt - 1]
+                        time.sleep(wait)
+                        continue
+
+                    break
+
+                # ─────────────────────────────────────────────
+                # 4. 최종 성공
+                # ─────────────────────────────────────────────
+                logger.info(
+                    "Threads 답글 게시 완료 "
+                    f"[parent_id={reply_to_id}] "
+                    f"[post_id={post_id}] "
+                    f"[creation_id={creation_id}] "
+                    f"[attempt={attempt}/{max_attempts}]"
+                )
+
+                return {
+                    "status": "ok",
+                    "post_id": post_id,
+                    "message": f"답글 게시 성공 (ID: {post_id})",
+                }
+
+            except requests.RequestException as e:
+                last_error = {
+                    "message": str(e),
+                    "error_code": "",
+                    "error_type": type(e).__name__,
+                    "http_status": "",
+                }
+
+                logger.warning(
+                    "Threads 답글 네트워크 오류 "
+                    f"[attempt={attempt}/{max_attempts}] "
+                    f"[parent_id={reply_to_id}] "
+                    f"[creation_id={creation_id or '-'}] "
+                    f"[error_type={type(e).__name__}] "
+                    f"[message={e}]"
+                )
+
+                if attempt < max_attempts:
+                    wait = backoff_seconds[attempt - 1]
+
+                    logger.info(
+                        "Threads 답글 네트워크 오류 → "
+                        f"{wait}초 후 재시도 "
+                        f"[parent_id={reply_to_id}]"
+                    )
+
+                    time.sleep(wait)
+                    continue
+
+            except Exception as e:
+                last_error = {
+                    "message": str(e),
+                    "error_code": "",
+                    "error_type": type(e).__name__,
+                    "http_status": "",
+                }
+
+                logger.error(
+                    "Threads 답글 게시 중 예외 발생 "
+                    f"[attempt={attempt}/{max_attempts}] "
+                    f"[parent_id={reply_to_id}] "
+                    f"[creation_id={creation_id or '-'}] "
+                    f"[error_type={type(e).__name__}] "
+                    f"[message={e}]"
+                )
+
+                if attempt < max_attempts:
+                    wait = backoff_seconds[attempt - 1]
+                    time.sleep(wait)
+                    continue
+
+        # ─────────────────────────────────────────────────────
+        # 모든 재시도 실패
+        # ─────────────────────────────────────────────────────
+        error_code = last_error.get("error_code", "")
+        error_type = last_error.get("error_type", "")
+        http_status = last_error.get("http_status", "")
+        error_message = last_error.get("message", "알 수 없는 오류")
+
+        detailed_message = (
+            f"{error_message}"
+            f" [HTTP={http_status or '-'}"
+            f", code={error_code or '-'}"
+            f", type={error_type or '-'}"
+            f", parent={reply_to_id}]"
+        )
+
+        logger.error(
+            "Threads 답글 최종 실패 "
+            f"[parent_id={reply_to_id}] "
+            f"[attempts={max_attempts}] "
+            f"[HTTP={http_status or '-'}] "
+            f"[code={error_code or '-'}] "
+            f"[type={error_type or '-'}] "
+            f"[message={error_message}]"
+        )
+
+        return {
+            "status": "error",
+            "message": detailed_message,
+            "error_code": error_code,
+            "error_type": error_type,
+            "http_status": http_status,
+            "parent_id": reply_to_id,
+        }
 
     def _publish_with_image(self, text: str, image_url: str) -> dict:
         """이미지 URL로 Threads 이미지 포함 게시."""
