@@ -8,6 +8,11 @@ import time
 import json
 import requests
 
+# repo 루트의 fact_reference.py를 가져옵니다. marketing/main_marketing.py가
+# 이 모듈(content_adapter.adapter)을 임포트하기 전에 sys.path에 repo
+# 루트를 이미 추가해두므로(main_marketing.py 상단 참고) 정상 동작합니다.
+import fact_reference
+
 logger = logging.getLogger(__name__)
 
 GEMINI_MODELS = [
@@ -19,7 +24,7 @@ GEMINI_API_URL_TMPL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 
-SYSTEM_PROMPT = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의 SNS 마케팅 전문가입니다.
+SYSTEM_PROMPT_INTRO = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의 SNS 마케팅 전문가입니다.
 이 블로그는 하루 2회, 정해진 시각에 발행되는 "시황 브리핑 시리즈"입니다.
   - morning : 한국시간 오전 9시 발행 — 미국 전일 정규장 마감 리뷰
   - evening : 한국시간 저녁 9시 발행 — 미국 당일 개장 전 이슈 + 프리마켓 프리뷰
@@ -40,7 +45,24 @@ SYSTEM_PROMPT = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)
 이 글이 "매일 아침·저녁 반복되는 시리즈"라는 점을 각 플랫폼 CTA에 자연스럽게
 녹여, 다음 업데이트도 놓치지 않도록 팔로우·저장·구독을 유도하세요. 단,
 플랫폼별 톤에 맞게 표현 방식은 아래 각 항목 규칙을 따라 다르게 하세요.
+"""
 
+# [신규] 인물 정보는 날짜 정보와 마찬가지로 "사실"이며, Gemini의 사전지식이
+# 낡아 있을 수 있는 영역입니다(예: 연준 의장 교체). fact_reference.py의
+# CURRENT_OFFICIALS를 그대로 프롬프트에 주입해, 블로그 본문 생성
+# (content_generator.py)과 동일한 인물 정보를 SNS 콘텐츠에도 강제합니다.
+SYSTEM_PROMPT_OFFICIALS_NOTE = (
+    "\n"
+    + fact_reference.officials_reference_text()
+    + "\n위 인물 정보는 날짜와 마찬가지로 반드시 지켜야 하는 사실입니다. "
+    "인물의 이름이나 직책을 언급할 때는 반드시 이 표를 따르고, 학습 시점의 "
+    "기억에 의존해 이전 인물 이름을 쓰지 마세요.\n"
+)
+
+SYSTEM_PROMPT = (
+    SYSTEM_PROMPT_INTRO
+    + SYSTEM_PROMPT_OFFICIALS_NOTE
+    + """
 ────────────────────────────────────────
 [스레드(Threads)] threads_post 작성 규칙
 채널 포지션: "실시간 시장 반응 & 의견(hot-take) 데스크"
@@ -216,6 +238,7 @@ thumbnail_copy 작성 규칙:
 - 둘째 줄: 클릭 유도 서브 카피 (20자 이내)
   예: "지금 사야 할까?", "오늘 밤 대응 전략은"
 """
+)
 
 
 class ContentAdapter:
@@ -414,6 +437,32 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
                         "body": str(item.get("body", ""))[:120],
                     })
         result["instagram_carousel"] = cleaned_carousel if len(cleaned_carousel) >= 2 else []
+
+        # [신규] 최종 안전망: SNS용으로 새로 생성된 모든 텍스트 필드에서
+        # 이미 교체된 인물의 이름이 남아있으면 자동으로 현재 인물 이름으로
+        # 교정합니다. blog_title/blog_url/mode는 원본 크롤링 값을 그대로
+        # 쓰는 필드라(이미 블로그 생성 단계에서 검증됨) 대상에서 제외합니다.
+        official_fixes: list[dict] = []
+
+        def _scrub(value):
+            if isinstance(value, str):
+                fixed, applied = fact_reference.scrub_outdated_officials(value)
+                official_fixes.extend(applied)
+                return fixed
+            if isinstance(value, list):
+                return [_scrub(v) for v in value]
+            if isinstance(value, dict):
+                return {k: _scrub(v) for k, v in value.items()}
+            return value
+
+        for key in result:
+            if key in ("blog_title", "blog_url", "mode"):
+                continue
+            result[key] = _scrub(result[key])
+
+        if official_fixes:
+            for fix in official_fixes:
+                logger.warning(fact_reference.format_official_fix_log(fix))
 
         logger.info(
             f"ContentAdapter 완료: "

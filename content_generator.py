@@ -957,6 +957,30 @@ class ContentGenerator:
 
                 post["content"] = final_content
 
+                # [신규] 최종 안전망: 이미 교체된 인물(예: 전임 연준 의장)의
+                # 이름이 제목/본문 어디에 남아있든 현재 인물 이름으로
+                # 자동 교정합니다. Gemini가 프롬프트의 [현재 주요 인물]
+                # 안내를 놓쳐도 항상 적용되는 결정론적 치환이라 재생성 없이
+                # 안전합니다 (fact_reference.CURRENT_OFFICIALS 참고).
+                import fact_reference
+
+                post["title"], _title_official_fixes = (
+                    fact_reference.scrub_outdated_officials(
+                        post.get("title", "")
+                    )
+                )
+
+                post["content"], _content_official_fixes = (
+                    fact_reference.scrub_outdated_officials(
+                        post["content"]
+                    )
+                )
+
+                for _fix in _title_official_fixes + _content_official_fixes:
+                    logger.warning(
+                        fact_reference.format_official_fix_log(_fix)
+                    )
+
                 post = self._prepend_toc(
                     post
                 )

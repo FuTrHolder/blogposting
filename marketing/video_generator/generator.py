@@ -70,6 +70,11 @@ from pathlib import Path
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+# repo 루트의 fact_reference.py를 가져옵니다. marketing/main_marketing.py가
+# 이 모듈(video_generator.generator)을 임포트하기 전에 sys.path에 repo
+# 루트를 이미 추가해두므로(main_marketing.py 상단 참고) 정상 동작합니다.
+import fact_reference
+
 logger = logging.getLogger(__name__)
 
 # ── 규격 ─────────────────────────────────────────────────────────────────────
@@ -191,10 +196,25 @@ GEMINI_MODEL   = "gemini-2.5-flash-lite"
 GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
-NARRATION_SYSTEM = """당신은 유튜브 쇼츠 나래이션 작가입니다.
+NARRATION_SYSTEM_INTRO = """당신은 유튜브 쇼츠 나래이션 작가입니다.
 블로그 본문을 읽고, 빠른 속도로 읽어도 55초 이하가 되는 나래이션 스크립트를 작성합니다.
 한국어 발화 속도를 기준으로 세그먼트당 나래이션을 적절히 조절하세요.
+"""
 
+# [신규] fact_reference.py의 현재 인물 정보를 그대로 주입합니다. 나레이션은
+# 블로그 본문을 참고해 새로 문장을 만들기 때문에, 블로그에 없는 인물
+# 언급을 나레이션이 자체적으로 추가하면서 낡은 이름(예: 전임 연준 의장)을
+# 쓸 수 있어 여기서도 동일하게 안내합니다.
+NARRATION_OFFICIALS_NOTE = (
+    "\n" + fact_reference.officials_reference_text()
+    + "\n위 인물 정보는 반드시 지켜야 하는 사실입니다. 학습 시점의 기억에 "
+    "의존해 이전 인물 이름을 쓰지 마세요.\n"
+)
+
+NARRATION_SYSTEM = (
+    NARRATION_SYSTEM_INTRO
+    + NARRATION_OFFICIALS_NOTE
+    + """
 규칙:
 - 나래이션은 자연스러운 구어체로 작성 (문어체 금지)
 - 각 세그먼트는 핵심 내용 하나만 전달
@@ -230,14 +250,18 @@ TTS로 읽었을 때 사람이 직접 브리핑하는 것처럼 들리도록 아
     }
   ]
 }"""
+)
 
 
 # ── 틱톡 전용 나래이션 시스템 프롬프트 (이탈률 개선 — 짧고 강한 훅 중심) ────
-NARRATION_SYSTEM_TIKTOK = """당신은 틱톡 금융 시황 채널의 바이럴 콘텐츠 작가입니다.
+NARRATION_SYSTEM_TIKTOK = (
+    """당신은 틱톡 금융 시황 채널의 바이럴 콘텐츠 작가입니다.
 틱톡 알고리즘은 "첫 1~2초 이탈 여부"로 확산을 결정합니다. 시청 데이터를 보면
 영상 길이가 길고 도입부가 약할수록 시청자가 2~3초 만에 스와이프하고 나갑니다.
 이 문제를 해결하기 위해, 아래 규칙을 반드시 지키는 짧고 강렬한 스크립트를 작성합니다.
-
+"""
+    + NARRATION_OFFICIALS_NOTE
+    + """
 핵심 원칙:
 - 전체 나래이션 길이(자연스러운 속도로 읽었을 때) = 65초~80초
   (실제 음성 합성은 이보다 빠른 속도로 재생되므로, 목표를 넉넉히 잡아야
@@ -285,6 +309,27 @@ NARRATION_SYSTEM_TIKTOK = """당신은 틱톡 금융 시황 채널의 바이럴 
   ],
   "hashtags": ["미국주식", "나스닥", "재테크", "주식초보", "경제뉴스"]
 }"""
+)
+
+
+def _scrub_segments_officials(segments: list[dict]) -> list[dict]:
+    """
+    생성된 나레이션 세그먼트에서 이미 교체된 인물의 이름이 남아있으면
+    현재 인물 이름으로 자동 교정합니다 (narration/keyword/description
+    필드 전부 대상). 나레이션은 블로그 본문을 참고해 Gemini가 새로 문장을
+    만들어내는 과정이라, 블로그에는 없던 낡은 인물 이름을 나레이션이
+    자체적으로 추가할 수 있어 여기서도 최종 안전망을 둡니다.
+    """
+    fixes: list[dict] = []
+    for seg in segments:
+        for field in ("narration", "keyword", "description"):
+            if seg.get(field):
+                fixed, applied = fact_reference.scrub_outdated_officials(seg[field])
+                seg[field] = fixed
+                fixes.extend(applied)
+    for fix in fixes:
+        logger.warning(fact_reference.format_official_fix_log(fix))
+    return segments
 
 
 def generate_narration_script(
@@ -338,6 +383,7 @@ def generate_narration_script(
                             parsed = json.loads(part)
                             segs = parsed.get("segments", [])
                             if segs:
+                                segs = _scrub_segments_officials(segs)
                                 logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
                                 return segs
                         except json.JSONDecodeError:
@@ -346,6 +392,7 @@ def generate_narration_script(
                 parsed = json.loads(raw)
                 segs   = parsed.get("segments", [])
                 if segs:
+                    segs = _scrub_segments_officials(segs)
                     logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
                     return segs
 
@@ -478,6 +525,7 @@ def generate_narration_script_tiktok(
                 segs = parsed.get("segments", [])
                 tags = parsed.get("hashtags", [])
                 if segs:
+                    segs = _scrub_segments_officials(segs)
                     logger.info(
                         f"틱톡 나래이션 스크립트 생성 완료: {len(segs)}개 세그먼트, "
                         f"해시태그 {len(tags)}개"

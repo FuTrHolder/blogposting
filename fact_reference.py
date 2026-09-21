@@ -70,6 +70,7 @@ Earnings Dashboard가 제공한 report_date를 그대로 사용합니다.
 import csv
 import io
 import logging
+import re
 from datetime import datetime, date, timedelta, timezone
 
 import requests
@@ -404,6 +405,233 @@ IMMINENT_WORDS = [
     "곧",
     "임박",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [신규] 주요 인물/직책 참조표
+#
+# LLM(Gemini)은 학습 데이터에 오래 각인된 인물(예: "연준 의장 = 파월")을
+# 실제로 교체된 뒤에도 관성적으로 계속 언급하는 경향이 있습니다. 날짜와
+# 달리 이런 "인물 정보"는 코드 어디에도 하드코딩되어 있지 않고 전적으로
+# Gemini의 사전지식에 의존하기 때문에, 실제 교체가 있었는데도 원고에서
+# 계속 옛 인물 이름이 나오는 문제가 발생할 수 있습니다 (2026-09-16 확인:
+# 연준 의장이 케빈 워시로 교체되었는데도 원고에 "파월 의장"이 언급됨).
+#
+# 이 표는 그 문제를 막기 위한 참조 데이터입니다. 블로그 본문
+# (content_generator.py), SNS 콘텐츠(marketing/content_adapter/adapter.py),
+# 영상 나레이션(marketing/video_generator/generator.py) 3곳 모두 이 표
+# 하나를 공유해서 프롬프트에 안내문을 넣고, 발행 직전에는
+# scrub_outdated_officials()로 이전 인물 이름이 남아있지 않은지 최종
+# 교정합니다.
+#
+# 업데이트 방법: 직책이 바뀌면 이 표에 항목만 추가/수정하면 됩니다.
+# outdated_aliases에는 "의장"/"체어" 같은 직책 접미사를 붙이지 말고
+# 이름만 넣으세요 (예: "파월 의장"이 아니라 "파월") — 그래야
+# scrub_outdated_officials()가 이름만 바꿔서 "파월 의장" → "케빈 워시
+# 의장"처럼 문장 구조를 그대로 살릴 수 있습니다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LAST_VERIFIED_OFFICIALS = "2026-09-16"
+
+CURRENT_OFFICIALS = {
+    "fed_chair": {
+        "role_ko": "연준(Fed) 의장",
+        "current_name": "케빈 워시",
+        "current_aliases": ["케빈 워시", "Kevin Warsh"],
+        "outdated_aliases": ["제롬 파월", "파월", "Jerome Powell", "Powell"],
+    },
+}
+
+
+def officials_reference_text() -> str:
+    """
+    프롬프트에 주입할 '현재 주요 인물' 안내문을 만듭니다. 외부 API 호출이
+    전혀 없는 순수 하드코딩 조회라 부담 없이 매 호출마다 사용할 수 있습니다.
+    """
+    lines = ["[현재 주요 인물 — 반드시 이 이름을 사용, 이전 인물 언급 금지]"]
+    for info in CURRENT_OFFICIALS.values():
+        outdated = ", ".join(info["outdated_aliases"][:2])
+        lines.append(
+            f"  - {info['role_ko']}: {info['current_name']} "
+            f"(※ '{outdated}' 등은 이미 교체된 이전 인물이므로 현재 시점 "
+            f"기사에서 언급하지 마세요)"
+        )
+    return "\n".join(lines)
+
+
+def _has_batchim(word: str) -> bool:
+    """
+    단어 마지막 글자에 받침이 있는지 확인합니다 (조사 은/는 등 선택에 사용).
+    한글 음절이 아니면(영문 등) 받침이 없다고 간주합니다.
+    """
+    if not word:
+        return False
+
+    ch = word[-1]
+    code = ord(ch)
+
+    if 0xAC00 <= code <= 0xD7A3:
+        return (code - 0xAC00) % 28 != 0
+
+    return False
+
+
+# 받침 유무에 따라 짝을 이루는 조사들. scrub_outdated_officials()가 이름
+# 뒤에 바로 붙은 조사를 새 이름의 받침 유무에 맞게 함께 교정하는 데 사용
+# (예: "파월은" → "케빈 워시는" — 받침 없는 '워시'에는 '는'이 맞음).
+_PARTICLE_PAIRS = {
+    "은": ("은", "는"),
+    "는": ("은", "는"),
+    "이": ("이", "가"),
+    "가": ("이", "가"),
+    "을": ("을", "를"),
+    "를": ("을", "를"),
+    "과": ("과", "와"),
+    "와": ("과", "와"),
+}
+
+
+# 이름 주변에 이 단어들이 있으면 "현재 인물로 잘못 언급"이 아니라 "전임자에
+# 대한 정당한 역사적 언급"으로 판단해 치환하지 않습니다. fact_checker.py가
+# IMMINENT_WORDS로 "임박 표현"을 감지하는 것과 동일한 문맥 창(window) 방식을
+# 사용합니다 — 형태소 분석기 없이도 오탐을 크게 줄일 수 있는 실용적인 절충안.
+HISTORICAL_CONTEXT_MARKERS = [
+    "전임", "전직", "전(前)", "前 ",
+    "전 의장", "전 연준",
+    "이었던", "였던", "이었습니다", "였습니다",
+    "물러난", "물러났", "사임했", "사임한",
+    "퇴임했", "퇴임한", "퇴임 후",
+    "역대", "역임했", "역임한",
+    "재임 시절", "재임 당시", "재임 기간", "재임했",
+    "이끌던", "이끌었던", "지냈던",
+]
+
+# 별칭 앞뒤로 이만큼의 글자를 문맥으로 봅니다 (fact_checker.py의
+# _CONTEXT_WINDOW=40과 비슷한 취지이나, 조사 하나 차이로 오탐이 늘지 않게
+# 조금 더 좁게 잡았습니다).
+_HISTORICAL_CONTEXT_WINDOW = 20
+
+
+def _looks_historical(text: str, start: int, end: int) -> bool:
+    """
+    별칭이 발견된 위치(start~end) 앞뒤 문맥에 '전임/과거' 신호가 있는지
+    확인합니다. 있으면 이름을 그대로 두는 것이 맞습니다 — 예를 들어
+    "전임 연준 의장이었던 파월은 2018년부터 재임했습니다"를 "케빈 워시는
+    2018년부터 재임했습니다"로 바꿔버리면, 교정 전보다 더 나쁜(엉뚱한
+    사람에게 재임 이력을 붙이는) 오류가 됩니다.
+    """
+    lo = max(0, start - _HISTORICAL_CONTEXT_WINDOW)
+    hi = min(len(text), end + _HISTORICAL_CONTEXT_WINDOW)
+    window = text[lo:hi]
+    return any(marker in window for marker in HISTORICAL_CONTEXT_MARKERS)
+
+
+def scrub_outdated_officials(text: str) -> tuple[str, list[dict]]:
+    """
+    생성된 텍스트에서 이미 교체된 인물의 이름을 발견하면 현재 인물 이름으로
+    치환합니다. Gemini가 프롬프트 지시를 놓쳐도 항상 적용되는 결정론적
+    최종 안전망입니다 (날짜 자동교정과 동일한 철학 — 그럴듯하게 문장을
+    새로 만들지 않고 이름만 정확히 치환).
+
+    다만 무조건 치환하지는 않습니다. "전임 연준 의장 파월"처럼 이미 과거
+    인물로 정확하게 언급된 경우까지 이름을 바꾸면, 원래 오류(현재 인물처럼
+    잘못 언급)보다 더 나쁜 오류(전임자의 이력을 현재 인물에게 잘못 붙이는
+    것)가 됩니다. 그래서 이름 주변 문맥에 HISTORICAL_CONTEXT_MARKERS(전임,
+    재임 시절 등)가 있으면 치환하지 않고 그대로 둡니다 — 형태소 분석 없이
+    적용 가능한 실용적 절충안이며, 완벽하지 않을 수 있습니다(예: 신호
+    단어 없이 자연스럽게 과거를 서술한 문장은 여전히 치환될 수 있습니다).
+
+    긴 별칭부터 치환해 "제롬 파월"이 "파월"보다 먼저 처리되도록 합니다.
+    이름 뒤에 직책이 붙는 경우("파월 의장" → "케빈 워시 의장")는 그대로
+    자연스럽게 이어지지만, 조사가 이름에 바로 붙는 경우("파월은" →
+    "케빈 워시는")는 받침 유무가 달라지면 어색해질 수 있어 조사(은/는,
+    이/가, 을/를, 과/와)도 새 이름에 맞게 함께 교정합니다.
+
+    Returns:
+        (교정된 텍스트, 적용된 교정 내역 리스트). 각 내역은 action이
+        "corrected"(실제 치환) 또는 "preserved_historical"(역사적 언급으로
+        판단해 보존)입니다. 빈 텍스트를 넣으면 그대로 반환합니다.
+    """
+    if not text:
+        return text, []
+
+    applied: list[dict] = []
+
+    for info in CURRENT_OFFICIALS.values():
+        new_name = info["current_name"]
+        new_batchim = _has_batchim(new_name)
+
+        for alias in sorted(info["outdated_aliases"], key=len, reverse=True):
+            if alias not in text:
+                continue
+
+            pattern = re.compile(
+                re.escape(alias) + r"(은|는|이|가|을|를|과|와)?"
+            )
+
+            source_text = text
+            counts = {"corrected": 0, "preserved": 0}
+
+            def _replace(
+                m: "re.Match",
+                _source: str = source_text,
+                _counts: dict = counts,
+            ) -> str:
+                if _looks_historical(_source, m.start(), m.end()):
+                    _counts["preserved"] += 1
+                    return m.group(0)
+
+                _counts["corrected"] += 1
+                particle = m.group(1)
+                if not particle:
+                    return new_name
+                with_batchim, without_batchim = _PARTICLE_PAIRS[particle]
+                return new_name + (with_batchim if new_batchim else without_batchim)
+
+            text = pattern.sub(_replace, text)
+
+            if counts["corrected"]:
+                applied.append({
+                    "role": info["role_ko"],
+                    "from": alias,
+                    "to": new_name,
+                    "action": "corrected",
+                    "count": counts["corrected"],
+                })
+
+            if counts["preserved"]:
+                applied.append({
+                    "role": info["role_ko"],
+                    "from": alias,
+                    "to": alias,
+                    "action": "preserved_historical",
+                    "count": counts["preserved"],
+                })
+
+    return text, applied
+
+
+def format_official_fix_log(fix: dict) -> str:
+    """
+    scrub_outdated_officials()가 반환한 교정 내역 한 건을 로그 메시지로
+    변환합니다. action("corrected"/"preserved_historical")에 따라 메시지를
+    구분해서, 블로그 본문·SNS 콘텐츠·영상 나레이션 3곳의 파이프라인이 동일한
+    로그 형식을 공유하도록 합니다.
+    """
+    count = fix.get("count", 1)
+    count_suffix = f" ({count}건)" if count > 1 else ""
+
+    if fix.get("action") == "preserved_historical":
+        return (
+            f"[인물 정보] '{fix['from']}' 언급이 과거/전임 맥락으로 판단되어 "
+            f"그대로 유지함{count_suffix} ({fix['role']}) — 오탐이면(실제로는 "
+            f"현재 인물을 가리킨 것이면) 원문을 확인하세요"
+        )
+
+    return (
+        f"[인물 정보 자동 교정] '{fix['from']}' → '{fix['to']}'{count_suffix} "
+        f"({fix['role']})"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1521,6 +1749,14 @@ def build_fact_reference(
         "AI가 미국시간과 한국시간의 시차를 임의로 계산하거나 "
         "API에 없는 발표 시간을 추정해서는 안 됩니다."
     )
+
+    lines.append("")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # [신규] 주요 인물/직책
+    # ─────────────────────────────────────────────────────────────────────
+
+    lines.append(officials_reference_text())
 
     lines.append("")
 
