@@ -908,119 +908,200 @@ async function loadMarketing(postDate, mode) {
 
 // ── 마케팅 워크플로우 ───────────────────────────────────────────────────────
 
-const MARKETING_POLL_INTERVAL_MS = 18000;
-const MARKETING_POLL_MAX_TRIES = 20;
+const MARKETING_PROGRESS_POLL_INTERVAL_MS = 5000;
 
-async function pollForMarketingCompletion(
+const MARKETING_PROGRESS_MESSAGES = {
+  0: "마케팅 워크플로우 시작",
+  1: "티스토리 포스트 확인 완료",
+  2: "플랫폼별 콘텐츠 생성 완료",
+  3: "영상 생성 완료",
+  4: "SNS 썸네일 생성 완료",
+  5: "발행용 공개 URL 확보 완료",
+  6: "플랫폼 발행 처리 완료",
+  7: "마케팅 워크플로우 완료"
+};
+
+function updateMarketingProgress(
+  step,
+  status = "running",
+  message = ""
+) {
+  const progress = document.getElementById(
+    "marketing-progress"
+  );
+
+  const messageElement =
+    document.getElementById(
+      "marketing-progress-message"
+    );
+
+  if (!progress) return;
+
+  const steps = progress.querySelectorAll(
+    ".marketing-progress-step"
+  );
+
+  const safeStep = Math.max(
+    0,
+    Math.min(7, Number(step) || 0)
+  );
+
+  steps.forEach((element, index) => {
+    element.classList.toggle(
+      "active",
+      index < safeStep
+    );
+  });
+
+  if (messageElement) {
+    messageElement.classList.remove(
+      "running",
+      "completed",
+      "failed"
+    );
+
+    if (
+      status === "completed" ||
+      status === "failed" ||
+      status === "running"
+    ) {
+      messageElement.classList.add(status);
+    }
+
+    messageElement.textContent =
+      message ||
+      MARKETING_PROGRESS_MESSAGES[safeStep] ||
+      "마케팅 워크플로우 실행 중...";
+  }
+}
+
+
+async function fetchMarketingProgress(
   postDate,
-  mode,
-  previousCount
+  mode
+) {
+  const res = await fetch(
+    `/api/marketing-progress?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`,
+    {
+      cache: "no-store"
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(
+      `진행률 조회 실패 (${res.status})`
+    );
+  }
+
+  return await res.json();
+}
+
+
+async function pollMarketingProgress(
+  postDate,
+  mode
 ) {
   const status =
     document.getElementById("trigger-status");
 
-  for (
-    let i = 1;
-    i <= MARKETING_POLL_MAX_TRIES;
-    i++
-  ) {
-    await new Promise((resolve) =>
+  while (true) {
+    try {
+      const progress =
+        await fetchMarketingProgress(
+          postDate,
+          mode
+        );
+
+      if (
+        progress &&
+        progress.exists
+      ) {
+        updateMarketingProgress(
+          progress.step,
+          progress.status,
+          progress.message
+        );
+
+        if (
+          progress.status === "completed"
+        ) {
+          if (status) {
+            status.textContent =
+              "마케팅 워크플로우 완료. 결과를 불러오는 중...";
+          }
+
+          setTimeout(
+            () => window.location.reload(),
+            800
+          );
+
+          return;
+        }
+
+        if (
+          progress.status === "failed"
+        ) {
+          if (status) {
+            status.textContent =
+              "마케팅 워크플로우 실행 중 오류가 발생했습니다.";
+          }
+
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(
+        "마케팅 진행률 조회 실패:",
+        e
+      );
+    }
+
+    await new Promise((resolve) => {
       setTimeout(
         resolve,
-        MARKETING_POLL_INTERVAL_MS
-      )
-    );
-
-    let results;
-
-    try {
-      const res = await fetch(
-        `/api/marketing?date=${encodeURIComponent(postDate)}&mode=${encodeURIComponent(mode)}`,
-        {
-          cache: "no-store"
-        }
+        MARKETING_PROGRESS_POLL_INTERVAL_MS
       );
-
-      results = await res.json();
-    } catch (e) {
-      continue;
-    }
-
-    const okCount =
-      (results || []).filter(
-        (r) => r.status === "ok"
-      ).length;
-
-    if (okCount > previousCount) {
-      if (status) {
-        status.textContent =
-          "✅ 마케팅 워크플로우 완료! 대시보드를 새로고침합니다...";
-      }
-
-      setTimeout(
-        () => window.location.reload(),
-        1200
-      );
-
-      return;
-    }
-
-    if (status) {
-      status.textContent =
-        `마케팅 워크플로우 실행 중... ` +
-        `(${i}/${MARKETING_POLL_MAX_TRIES}, ` +
-        `자동 새로고침 대기 중)`;
-    }
-  }
-
-  if (status) {
-    status.textContent =
-      "워크플로우가 아직 진행 중이거나 시간이 오래 걸리고 있습니다. " +
-      "잠시 후 탭을 다시 눌러 수동으로 새로고침해주세요.";
+    });
   }
 }
+
 
 // ── 마케팅 실행 버튼 ─────────────────────────────────────────────────────────
 
 function initMarketingTrigger() {
   const triggerButton =
-    document.getElementById("trigger-btn");
+    document.getElementById(
+      "trigger-btn"
+    );
 
   if (!triggerButton) return;
 
   triggerButton.addEventListener(
     "click",
     async () => {
-      if (!currentDate || !currentMode) return;
+      if (
+        !currentDate ||
+        !currentMode
+      ) {
+        return;
+      }
 
       const status =
-        document.getElementById("trigger-status");
+        document.getElementById(
+          "trigger-status"
+        );
+
+      triggerButton.disabled = true;
+
+      updateMarketingProgress(
+        0,
+        "running",
+        "마케팅 워크플로우 실행 요청 중..."
+      );
 
       if (status) {
         status.textContent =
-          "마케팅 워크플로우 실행 요청 중...";
-      }
-
-      let previousCount = 0;
-
-      try {
-        const beforeRes =
-          await fetch(
-            `/api/marketing?date=${encodeURIComponent(currentDate)}&mode=${encodeURIComponent(currentMode)}`,
-            {
-              cache: "no-store"
-            }
-          );
-
-        const beforeResults =
-          await beforeRes.json();
-
-        previousCount =
-          (beforeResults || []).filter(
-            (r) => r.status === "ok"
-          ).length;
-      } catch (e) {
-        // 0건 기준으로 계속
+          "GitHub Actions 실행 요청 중...";
       }
 
       try {
@@ -1034,8 +1115,10 @@ function initMarketingTrigger() {
                   "application/json"
               },
               body: JSON.stringify({
-                post_date: currentDate,
-                mode: currentMode
+                post_date:
+                  currentDate,
+                mode:
+                  currentMode
               })
             }
           );
@@ -1043,32 +1126,42 @@ function initMarketingTrigger() {
         const data =
           await res.json();
 
-        if (res.ok && data.ok) {
-          if (status) {
-            status.textContent =
-              "요청 완료! GitHub Actions 실행 중... " +
-              "(완료되면 자동으로 새로고침됩니다)";
-          }
-
-          void pollForMarketingCompletion(
-            currentDate,
-            currentMode,
-            previousCount
+        if (!res.ok || !data.ok) {
+          throw new Error(
+            data.error ||
+              "알 수 없는 오류"
           );
-        } else {
-          if (status) {
-            status.textContent =
-              `실행 실패: ${
-                data.error ||
-                "알 수 없는 오류"
-              }`;
-          }
         }
+
+        updateMarketingProgress(
+          0,
+          "running",
+          "GitHub Actions 실행 시작"
+        );
+
+        if (status) {
+          status.textContent =
+            "요청 완료. 마케팅 워크플로우 진행 상황을 확인하고 있습니다...";
+        }
+
+        void pollMarketingProgress(
+          currentDate,
+          currentMode
+        );
+
       } catch (e) {
+        updateMarketingProgress(
+          0,
+          "failed",
+          "마케팅 워크플로우 실행 요청 실패"
+        );
+
         if (status) {
           status.textContent =
             `실행 실패: ${e}`;
         }
+
+        triggerButton.disabled = false;
       }
     }
   );

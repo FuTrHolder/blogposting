@@ -1641,3 +1641,92 @@ textarea:focus { border-color: var(--amber); }
     min-height: 32px;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   마케팅 워크플로우 진행률
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.marketing-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 7px;
+
+  width: 100%;
+
+  margin: 14px auto 4px;
+
+  min-height: 14px;
+}
+
+.marketing-progress-step {
+  display: block;
+
+  width: 14px;
+  height: 14px;
+
+  box-sizing: border-box;
+
+  border: 1px solid var(--border-strong);
+
+  background: transparent;
+
+  border-radius: 2px;
+
+  transition:
+    background 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.marketing-progress-step.active {
+  background: var(--gain);
+
+  border-color: var(--gain);
+
+  box-shadow:
+    0 0 7px rgba(63, 191, 127, 0.25);
+}
+
+.marketing-progress-message {
+  width: 100%;
+
+  margin: 5px 0 0;
+
+  text-align: center;
+
+  font-family: var(--font-mono);
+
+  font-size: 10px;
+
+  line-height: 1.5;
+}
+
+.marketing-progress-message.running {
+  color: var(--gain);
+}
+
+.marketing-progress-message.completed {
+  color: var(--gain);
+}
+
+.marketing-progress-message.failed {
+  color: var(--loss);
+}
+
+@media (max-width: 720px) {
+  .marketing-progress {
+    gap: 6px;
+    margin-top: 12px;
+  }
+
+  .marketing-progress-step {
+    width: 12px;
+    height: 12px;
+  }
+
+  .marketing-progress-message {
+    font-size: 9px;
+  }
+}

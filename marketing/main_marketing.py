@@ -281,6 +281,23 @@ def main():
                   post_id=post_id, post_title=post_title)
     logger.info(f"  → 모드: {post['mode']} | 새 글 처리 시작")
 
+        # 대시보드 진행률 초기화
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=0,
+            status="running",
+            message="마케팅 워크플로우 시작",
+        )
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=1,
+            status="running",
+            message="티스토리 포스트 확인 완료",
+        )
+
     # ── 2. 멀티플랫폼 콘텐츠 생성 ────────────────────────────────────────
     logger.info("[2/7] Gemini 콘텐츠 어댑터 실행 중...")
     try:
@@ -295,6 +312,15 @@ def main():
 
         logger.info("  → 플랫폼별 텍스트 생성 완료")
         state.add_log("CONTENT_GENERATED", "Gemini 콘텐츠 생성 완료", post_id=post_id)
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=2,
+            status="running",
+            message="플랫폼별 콘텐츠 생성 완료",
+        )
+
     except Exception as e:
         msg = f"Gemini 콘텐츠 생성 실패: {e}"
         logger.error(f"  → {msg}")
@@ -303,6 +329,15 @@ def main():
         state.mark_as_processed(post_id, post_title, post_url,
                                  {"error": {"status": "error", "message": msg}})
         state.save()
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=1,
+            status="failed",
+            message=f"콘텐츠 생성 실패: {e}",
+        )
+
         sys.exit(1)
 
     bg_keywords = _extract_bg_keywords(post, content)
@@ -370,6 +405,15 @@ def main():
         logger.warning(f"  → 틱톡 영상 생성 실패 (계속): {e}")
         state.add_log("TIKTOK_VIDEO_FAILED", str(e), post_id=post_id, level="WARNING")
 
+
+    dashboard_client.push_marketing_progress(
+        post_date=post_date_str,
+        mode=post["mode"],
+        step=3,
+        status="running",
+        message="영상 생성 완료",
+    )
+
     # ── 4. SNS 썸네일 생성 ───────────────────────────────────────────────
     logger.info("[4/7] SNS 썸네일 생성 중...")
     thumb_paths = {}
@@ -392,6 +436,15 @@ def main():
     except Exception as e:
         logger.warning(f"  → 썸네일 생성 실패: {e}")
         state.add_log("THUMBNAILS_FAILED", str(e), post_id=post_id, level="WARNING")
+
+
+    dashboard_client.push_marketing_progress(
+        post_date=post_date_str,
+        mode=post["mode"],
+        step=4,
+        status="running",
+        message="SNS 썸네일 생성 완료",
+    )
 
     media_paths = {**thumb_paths}
     if video_path:
@@ -457,6 +510,15 @@ def main():
         ) if content.get(k)]
         logger.info(f"  → 확보된 공개 URL: {acquired or '없음'}")
         state.add_log("PUBLIC_URLS_READY", f"공개 URL: {acquired or '없음'}", post_id=post_id)
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=5,
+            status="running",
+            message="발행용 공개 URL 확보 완료",
+        )
+
     except Exception as e:
         logger.warning(f"  → 공개 URL 확보 중 예외 (계속): {e}")
         state.add_log("PUBLIC_URLS_FAILED", str(e), post_id=post_id, level="WARNING")
@@ -501,6 +563,15 @@ def main():
             "message": "틱톡 영상 생성 실패 또는 미생성",
         }
 
+
+    dashboard_client.push_marketing_progress(
+        post_date=post_date_str,
+        mode=post["mode"],
+        step=6,
+        status="running",
+        message="플랫폼 발행 처리 완료",
+    )
+
     # ── 결과 요약 ─────────────────────────────────────────────────────────
     logger.info("\n" + "=" * 60)
     logger.info("발행 결과 요약")
@@ -537,8 +608,25 @@ def main():
             results=results,
         )
         logger.info("  → 대시보드 업로드 완료 (DASHBOARD_API_URL 미설정 시 건너뜀)")
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=7,
+            status="completed",
+            message="마케팅 워크플로우 완료",
+        )
+
     except Exception as e:
         logger.warning(f"  → 대시보드 업로드 예외 (무시하고 종료): {e}")
+
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=6,
+            status="failed",
+            message=f"대시보드 결과 업로드 실패: {e}",
+        )
 
     logger.info("=" * 60)
     logger.info("마케팅 자동화 완료")

@@ -542,6 +542,84 @@ def push_content(
         )
         return False
 
+def push_marketing_progress(
+    post_date: str,
+    mode: str,
+    step: int,
+    status: str = "running",
+    message: str = "",
+) -> bool:
+    """
+    마케팅 워크플로우 전체 진행 상태를 대시보드(D1)에 업로드합니다.
+
+    step:
+      0 = 시작
+      1 = RSS/포스트 확인 완료
+      2 = 콘텐츠 생성 완료
+      3 = 영상 생성 완료
+      4 = 썸네일 생성 완료
+      5 = 공개 URL 확보 완료
+      6 = 플랫폼 발행 완료
+      7 = 대시보드 결과 업로드 완료
+
+    status:
+      running
+      completed
+      failed
+
+    진행률 업로드 실패가 전체 마케팅 파이프라인을 중단시키지 않도록
+    항상 예외를 내부에서 처리합니다.
+    """
+    base = _dashboard_base_url()
+
+    if not base:
+        logger.info(
+            "DASHBOARD_API_URL 미설정 — 마케팅 진행률 업로드 건너뜀"
+        )
+        return False
+
+    try:
+        step = max(0, min(int(step), 7))
+    except (TypeError, ValueError):
+        step = 0
+
+    status = str(status or "running").strip().lower()
+
+    if status not in {"running", "completed", "failed"}:
+        status = "running"
+
+    payload = {
+        "post_date": post_date,
+        "mode": mode,
+        "step": step,
+        "status": status,
+        "message": message or "",
+    }
+
+    try:
+        resp = requests.post(
+            f"{base}/api/ingest/marketing-progress",
+            json=payload,
+            headers=_dashboard_headers(),
+            timeout=15,
+        )
+
+        resp.raise_for_status()
+
+        logger.info(
+            "대시보드 마케팅 진행률 업로드 완료: "
+            f"{post_date} {mode} "
+            f"step={step}/7 status={status}"
+        )
+
+        return True
+
+    except Exception as e:
+        logger.warning(
+            "대시보드 마케팅 진행률 업로드 실패 "
+            f"(계속 진행, step={step}, status={status}): {e}"
+        )
+        return False
 
 def push_marketing_result(
     post_date: str,
