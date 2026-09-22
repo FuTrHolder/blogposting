@@ -555,18 +555,18 @@ def main():
         state.add_log("PUBLIC_URLS_FAILED", str(e), post_id=post_id, level="WARNING")
 
     # ── 6. 기존 플랫폼 발행 (YouTube/Facebook/Instagram/Threads/Kakao) ───
-        logger.info(
-            "[6/7] 플랫폼 발행 중 "
-            "(YouTube/Facebook/Instagram/Threads/Kakao)..."
+    logger.info(
+        "[6/7] 플랫폼 발행 중 "
+        "(YouTube/Facebook/Instagram/Threads/Kakao)..."
+    )
+
+    dispatcher = PublisherDispatcher()
+
+    try:
+        results = dispatcher.publish_all(
+            content=content,
+            media_paths=media_paths,
         )
-
-        dispatcher = PublisherDispatcher()
-
-        try:
-            results = dispatcher.publish_all(
-                content=content,
-                media_paths=media_paths,
-            )
 
         except Exception as e:
             logger.exception(
