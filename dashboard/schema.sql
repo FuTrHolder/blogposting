@@ -32,3 +32,19 @@ CREATE TABLE IF NOT EXISTS marketing_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_marketing_date_mode ON marketing_results(post_date, mode);
+
+-- 마케팅 워크플로우 진행 상태
+-- `${post_date}_${mode}` 단위로 하나의 실행 상태를 관리합니다.
+CREATE TABLE IF NOT EXISTS marketing_progress (
+  id TEXT PRIMARY KEY,              -- `${post_date}_${mode}`
+  post_date TEXT NOT NULL,
+  mode TEXT NOT NULL,               -- morning | evening
+  step INTEGER NOT NULL DEFAULT 0,  -- 0 ~ 7
+  status TEXT NOT NULL DEFAULT 'running',
+                                    -- running | completed | failed
+  message TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_marketing_progress_date_mode
+  ON marketing_progress(post_date, mode);
