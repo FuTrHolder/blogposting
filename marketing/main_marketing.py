@@ -568,30 +568,30 @@ def main():
             media_paths=media_paths,
         )
 
-        except Exception as e:
-            logger.exception(
-                "  → 플랫폼 발행 전체 단계에서 예외 발생"
-            )
+    except Exception as e:
+        logger.exception(
+            "  → 플랫폼 발행 전체 단계에서 예외 발생"
+        )
 
-            dashboard_client.push_marketing_progress(
-                post_date=post_date_str,
-                mode=post["mode"],
-                step=5,
-                status="failed",
-                message=f"플랫폼 발행 단계 실패: {e}",
-            )
+        dashboard_client.push_marketing_progress(
+            post_date=post_date_str,
+            mode=post["mode"],
+            step=5,
+            status="failed",
+            message=f"플랫폼 발행 단계 실패: {e}",
+        )
 
-            state.add_log(
-                "PUBLISH_FAILED",
-                f"플랫폼 발행 단계 실패: {e}",
-                post_id=post_id,
-                post_title=post_title,
-                level="ERROR",
-            )
+        state.add_log(
+            "PUBLISH_FAILED",
+            f"플랫폼 발행 단계 실패: {e}",
+            post_id=post_id,
+            post_title=post_title,
+            level="ERROR",
+        )
 
-            state.save()
+        state.save()
 
-            sys.exit(1)
+        sys.exit(1)
 
     # ── 틱톡 영상 대시보드 업로드 (발행 결과로 기록) ──────────────────────
     # TikTok은 공식 API 미지원으로 직접 발행 불가.
