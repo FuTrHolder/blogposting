@@ -65,11 +65,6 @@ export async function onRequestPost(context) {
     const hadWhitespace =
       token !== rawToken;
 
-    // 실제 토큰 값은 노출하지 않음
-    const tokenPreview =
-      token.length > 10
-        ? `${token.slice(0, 6)}...${token.slice(-4)} (길이 ${token.length}자)`
-        : `(길이 ${token.length}자 — 너무 짧습니다)`;
 
     const progressId =
       `${postDate}_${mode}`;
