@@ -61,6 +61,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GIST_ID: ${{ secrets.GIST_ID }}
 
+          # ── 대시보드 마케팅 실행 정보 ─────────────────────────────────
+          MARKETING_POST_DATE: ${{ github.event.client_payload.post_date }}
+          MARKETING_MODE: ${{ github.event.client_payload.mode }}
+
           # ── 강제 재실행 ───────────────────────────────────────────────
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl || 'false' }}
 

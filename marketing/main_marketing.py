@@ -228,9 +228,20 @@ def _push_results_to_dashboard(
 
 def main():
     force     = os.environ.get("FORCE_CRAWL", "false").lower() == "true"
-    now_kst   = datetime.now(KST)
+    now_kst = datetime.now(KST)
     timestamp = now_kst.strftime("%Y%m%d_%H%M")
-    post_date_str = now_kst.strftime("%Y-%m-%d")
+
+    dashboard_post_date = (
+        os.environ.get("MARKETING_POST_DATE", "").strip()
+        or now_kst.strftime("%Y-%m-%d")
+    )
+
+    dashboard_mode = (
+        os.environ.get("MARKETING_MODE", "").strip()
+        or ""
+    )
+
+    post_date_str = dashboard_post_date
 
     logger.info("=" * 60)
     logger.info("마케팅 자동화 시작")
@@ -240,6 +251,16 @@ def main():
     # ── 상태 관리자 초기화 ────────────────────────────────────────────────
     state = GistStateManager()
     state.load()
+    # 대시보드에서 전달된 실행 정보가 있으면
+    # RSS 단계부터 진행률을 기록할 수 있습니다.
+    if dashboard_post_date and dashboard_mode:
+        dashboard_client.push_marketing_progress(
+            post_date=dashboard_post_date,
+            mode=dashboard_mode,
+            step=0,
+            status="running",
+            message="마케팅 워크플로우 시작",
+        )
     state.add_log("RUN_START", f"마케팅 자동화 시작 (force={force})")
 
     # ── 1. 티스토리 새 글 감지 ────────────────────────────────────────────
@@ -252,6 +273,16 @@ def main():
         logger.info(msg)
         state.add_log("NO_POST", msg, level="WARNING")
         state.save()
+
+        if dashboard_post_date and dashboard_mode:
+            dashboard_client.push_marketing_progress(
+                post_date=dashboard_post_date,
+                mode=dashboard_mode,
+                step=0,
+                status="failed",
+                message="RSS에서 마케팅 대상 글을 가져오지 못했습니다.",
+            )
+
         sys.exit(0)
 
     post_id      = post.get("post_id", "")
@@ -281,22 +312,22 @@ def main():
                   post_id=post_id, post_title=post_title)
     logger.info(f"  → 모드: {post['mode']} | 새 글 처리 시작")
 
-        # 대시보드 진행률 초기화
-        dashboard_client.push_marketing_progress(
-            post_date=post_date_str,
-            mode=post["mode"],
-            step=0,
-            status="running",
-            message="마케팅 워크플로우 시작",
-        )
+    # 대시보드 진행률 초기화
+    dashboard_client.push_marketing_progress(
+        post_date=post_date_str,
+        mode=post["mode"],
+        step=0,
+        status="running",
+        message="마케팅 워크플로우 시작",
+    )
 
-        dashboard_client.push_marketing_progress(
-            post_date=post_date_str,
-            mode=post["mode"],
-            step=1,
-            status="running",
-            message="티스토리 포스트 확인 완료",
-        )
+    dashboard_client.push_marketing_progress(
+        post_date=post_date_str,
+        mode=post["mode"],
+        step=1,
+        status="running",
+        message="티스토리 포스트 확인 완료",
+    )
 
     # ── 2. 멀티플랫폼 콘텐츠 생성 ────────────────────────────────────────
     logger.info("[2/7] Gemini 콘텐츠 어댑터 실행 중...")
@@ -524,9 +555,43 @@ def main():
         state.add_log("PUBLIC_URLS_FAILED", str(e), post_id=post_id, level="WARNING")
 
     # ── 6. 기존 플랫폼 발행 (YouTube/Facebook/Instagram/Threads/Kakao) ───
-    logger.info("[6/7] 플랫폼 발행 중 (YouTube/Facebook/Instagram/Threads/Kakao)...")
-    dispatcher = PublisherDispatcher()
-    results    = dispatcher.publish_all(content=content, media_paths=media_paths)
+        logger.info(
+            "[6/7] 플랫폼 발행 중 "
+            "(YouTube/Facebook/Instagram/Threads/Kakao)..."
+        )
+
+        dispatcher = PublisherDispatcher()
+
+        try:
+            results = dispatcher.publish_all(
+                content=content,
+                media_paths=media_paths,
+            )
+
+        except Exception as e:
+            logger.exception(
+                "  → 플랫폼 발행 전체 단계에서 예외 발생"
+            )
+
+            dashboard_client.push_marketing_progress(
+                post_date=post_date_str,
+                mode=post["mode"],
+                step=5,
+                status="failed",
+                message=f"플랫폼 발행 단계 실패: {e}",
+            )
+
+            state.add_log(
+                "PUBLISH_FAILED",
+                f"플랫폼 발행 단계 실패: {e}",
+                post_id=post_id,
+                post_title=post_title,
+                level="ERROR",
+            )
+
+            state.save()
+
+            sys.exit(1)
 
     # ── 틱톡 영상 대시보드 업로드 (발행 결과로 기록) ──────────────────────
     # TikTok은 공식 API 미지원으로 직접 발행 불가.
