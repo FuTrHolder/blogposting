@@ -1226,11 +1226,18 @@ async function pollMarketingProgress(
 
           clearMarketingProgressTarget();
 
-          // 결과 D1 반영이 완료된 뒤 다시 불러옵니다.
+          // 결과 D1 반영이 완료된 뒤 포스트 정보와
+          // 마케팅 결과를 함께 다시 불러옵니다.
+          // 새로 생성된 티스토리 원문 링크(blog_url)도 즉시 반영합니다.
           setTimeout(() => {
             if (
               pollId === marketingProgressPollId
             ) {
+              void loadContent(
+                postDate,
+                mode
+              );
+          
               void loadMarketing(
                 postDate,
                 mode
