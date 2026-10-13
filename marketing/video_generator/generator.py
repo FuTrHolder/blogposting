@@ -98,6 +98,14 @@ SLIDE_TAIL_SEC = 0.4
 TTS_VOICE_TIKTOK = "ko-KR-SunHiNeural"
 TTS_RATE_TIKTOK  = "+38%"   # 쇼츠 기본(+28%)보다 빠르게 — 밝고 경쾌한 텐션 유지
 TTS_PITCH_TIKTOK = "+8Hz"   # 톤을 살짝 높여 더 젊고 밝은 느낌
+# TTS 기본 음성이 실패했을 때 순서대로 시도할 대체 음성.
+# 모두 edge-tts 서비스에 의존하므로 서비스 자체가 차단된 경우에는
+# 대체 음성도 실패할 수 있습니다.
+TTS_VOICE_FALLBACKS = [
+    "ko-KR-SunHiNeural",
+    "ko-KR-InJoonNeural",
+    "ko-KR-HyunsuMultilingualNeural",
+]
 # TTS 세그먼트 간 이어붙임 시 자연스러운 흐름을 위한 최소 간격 (끊김 완화)
 TTS_GAP_SEC_TIKTOK = 0.08
 
@@ -691,6 +699,85 @@ def _generate_tts_with_rate(
     except Exception as e:
         logger.error(f"TTS 생성 오류 (voice={voice}, rate={rate}): {e}")
         return False
+
+def _generate_tts_with_voice_fallback(
+    text: str,
+    path: str,
+    rate: str,
+    primary_voice: str,
+    pitch: str,
+) -> bool:
+    """
+    동일한 속도에서 여러 음성을 순서대로 시도합니다.
+
+    403 등 서비스 오류가 발생하면 속도만 바꾸어 반복 호출하는 대신
+    다음 음성으로 전환합니다.
+
+    모든 음성이 실패하면 False를 반환합니다.
+    """
+    voices = list(
+        dict.fromkeys(
+            [primary_voice] + TTS_VOICE_FALLBACKS
+        )
+    )
+
+    last_error_voice = None
+
+    for voice in voices:
+        try:
+            # 이전 시도에서 불완전한 파일이 남았다면 제거합니다.
+            candidate = Path(path)
+
+            if candidate.exists():
+                candidate.unlink()
+
+            ok = _generate_tts_with_rate(
+                text,
+                str(candidate),
+                rate,
+                voice=voice,
+                pitch=pitch,
+            )
+
+            if ok:
+                duration = _audio_duration(str(candidate))
+
+                if duration > 0:
+                    logger.info(
+                        "[TTS] 생성 성공: voice=%s, rate=%s, duration=%.2fs",
+                        voice,
+                        rate,
+                        duration,
+                    )
+                    return True
+
+                logger.warning(
+                    "[TTS] 파일 길이 확인 실패: voice=%s",
+                    voice,
+                )
+
+            last_error_voice = voice
+
+            logger.warning(
+                "[TTS] 음성 생성 실패: voice=%s. 다음 음성을 시도합니다.",
+                voice,
+            )
+
+        except Exception as e:
+            last_error_voice = voice
+
+            logger.warning(
+                "[TTS] 음성 전환 중 오류: voice=%s, error=%s",
+                voice,
+                e,
+            )
+
+    logger.error(
+        "[TTS] 모든 대체 음성 생성 실패: 마지막 음성=%s",
+        last_error_voice,
+    )
+
+    return False
 
 
 def _audio_duration(path: str) -> float:
@@ -1701,20 +1788,33 @@ class VideoGenerator:
 
                     # TTS 생성 — 젊은 여성 목소리, 빠른 속도, 시간 제한 없음
                     tts_path = str(tmp / f"tts_{i:02d}.mp3")
-                    tts_ok   = _generate_tts_with_rate(
-                        narration, tts_path, TTS_RATE_TIKTOK,
-                        voice=TTS_VOICE_TIKTOK, pitch=TTS_PITCH_TIKTOK,
+
+                    tts_ok = _generate_tts_with_voice_fallback(
+                        narration,
+                        tts_path,
+                        TTS_RATE_TIKTOK,
+                        primary_voice=TTS_VOICE_TIKTOK,
+                        pitch=TTS_PITCH_TIKTOK,
                     )
 
                     if tts_ok:
                         tts_dur = _audio_duration(tts_path)
+
                         if tts_dur <= 0:
-                            logger.warning(f"[틱톡] 슬라이드 {i} TTS 길이 0 — 4.0초 fallback")
-                            tts_dur = 4.0
-                            tts_ok  = False
-                    else:
+                            logger.error(
+                                "[틱톡] 슬라이드 %s TTS 파일의 길이를 확인할 수 없습니다.",
+                                i,
+                            )
+                            tts_ok = False
+
+                    if not tts_ok:
+                        logger.error(
+                            "[틱톡] 슬라이드 %s TTS 생성 실패. "
+                            "해당 슬라이드는 무음으로 처리됩니다.",
+                            i,
+                        )
+
                         tts_dur = 4.0
-                        logger.warning(f"[틱톡] 슬라이드 {i} TTS 생성 실패 — 4.0초 fallback")
 
                     # 슬라이드 표시 시간 = TTS 길이 + 최소 여유(gap).
                     slide_dur = tts_dur + TTS_GAP_SEC_TIKTOK
@@ -1824,6 +1924,33 @@ class VideoGenerator:
             if not slide_clips:
                 raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
 
+                # TTS 생성 성공률 검사
+                total_segments = len(all_segments)
+                successful_tts = len(tts_segments)
+
+                tts_success_rate = (
+                    successful_tts / total_segments
+                    if total_segments > 0
+                    else 0.0
+                )
+
+                logger.info(
+                    "[틱톡] TTS 성공률: %s/%s (%.1f%%)",
+                    successful_tts,
+                    total_segments,
+                    tts_success_rate * 100,
+                )
+
+                # 음성 없는 영상이 정상 결과물로 취급되는 것을 방지합니다.
+                # 성공률이 70% 미만이면 생성 실패로 처리합니다.
+                if total_segments == 0 or tts_success_rate < 0.70:
+                    raise RuntimeError(
+                        "[틱톡] TTS 생성 성공률 부족: "
+                        f"{successful_tts}/{total_segments} "
+                        f"({tts_success_rate * 100:.1f}%). "
+                        "음성 서비스 상태를 확인한 후 다시 실행하세요."
+                    )
+
             # ── 최종 마지막 슬라이드만 is_cta=True로 다시 렌더링 ───────────────
             # 위 루프에서는 몇 개의 세그먼트가 추가될지 미리 알 수 없어 모든
             # 세그먼트를 is_cta=False로 그렸습니다. 이제 전체 세그먼트 수가
@@ -1881,31 +2008,19 @@ class VideoGenerator:
                 out,
             )
             
-            # ── 최종 안전장치 ────────────────────────────────────────────────
-            # 최초 나래이션 → CTA 1회 → 확장 나래이션 재생성까지
-            # 모두 시도했는데도 60초 미만이면 완성 영상을 2회 반복한다.
+            # 최종 길이 검증: 영상을 복제해 길이를 채우지 않습니다.
             if total_duration < 60.0:
-                repeated_out = str(tmp / "tiktok_repeated.mp4")
-
-                logger.warning(
-                    f"[틱톡] 모든 나래이션 보강 후에도 "
-                    f"{total_duration:.2f}초 — 완성 영상을 2회 반복합니다."
+                raise RuntimeError(
+                    "[틱톡] 영상 길이 부족: "
+                    f"{total_duration:.2f}초. "
+                    "CTA 추가와 확장 나래이션 생성 후에도 "
+                    "60초를 충족하지 못해 결과물을 반환하지 않습니다."
                 )
 
-                _repeat_video_twice(
-                    out,
-                    repeated_out,
-                )
-
-                import shutil
-                shutil.copy2(repeated_out, out)
-
-                total_duration *= 2
-
-                logger.info(
-                    f"[틱톡] 영상 2회 반복 완료: "
-                    f"{total_duration:.2f}초"
-                )
+            logger.info(
+                "[틱톡] 최종 길이 검증 통과: %.2f초",
+                total_duration,
+            )
 
             logger.info(
                 f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)"
