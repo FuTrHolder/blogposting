@@ -11,4 +11,7 @@ google-auth>=2.23.0
 google-auth-oauthlib>=1.1.0
 huggingface_hub>=0.28.0
 # TTS (젊은 남성 한국어 음성: ko-KR-InJoonNeural)
-edge-tts>=6.1.9
+# 7.2.7 미만은 Microsoft 인증 토큰 변경으로 403이 발생할 수 있음
+edge-tts>=7.2.7
+# edge-tts 장애 시 무료 폴백 (Google 번역 TTS)
+gTTS>=2.5.0
