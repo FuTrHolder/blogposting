@@ -271,194 +271,194 @@ class ContentAdapter:
           },
       }
 
-    retryable_server_errors = {500, 502, 503, 504}
-    last_error = None
+      retryable_server_errors = {500, 502, 503, 504}
+      last_error = None
 
-    for model in GEMINI_MODELS:
-        url = (
-            f"{GEMINI_API_URL_TMPL.format(model=model)}"
-            f"?key={self.api_key}"
-        )
+      for model in GEMINI_MODELS:
+          url = (
+              f"{GEMINI_API_URL_TMPL.format(model=model)}"
+              f"?key={self.api_key}"
+          )
 
-        for attempt in range(1, max_retries + 1):
-            resp = None
+          for attempt in range(1, max_retries + 1):
+              resp = None
 
-            try:
-                resp = requests.post(
-                    url,
-                    json=payload,
-                    timeout=60,
-                )
+              try:
+                  resp = requests.post(
+                      url,
+                      json=payload,
+                      timeout=60,
+                  )
 
-                if resp.status_code == 429:
-                    last_error = RuntimeError(
-                        f"Gemini 429 RESOURCE_EXHAUSTED: {model}"
-                    )
+                  if resp.status_code == 429:
+                      last_error = RuntimeError(
+                          f"Gemini 429 RESOURCE_EXHAUSTED: {model}"
+                      )
 
-                    logger.warning(
-                        "[Gemini] 모델=%s, HTTP 429. "
-                        "동일 모델 재시도 없이 다음 모델로 전환합니다.",
-                        model,
-                    )
-                    break
+                      logger.warning(
+                          "[Gemini] 모델=%s, HTTP 429. "
+                          "동일 모델 재시도 없이 다음 모델로 전환합니다.",
+                          model,
+                      )
+                      break
 
-                if resp.status_code == 404:
-                    last_error = RuntimeError(
-                        f"Gemini model not found: {model}"
-                    )
+                  if resp.status_code == 404:
+                      last_error = RuntimeError(
+                          f"Gemini model not found: {model}"
+                      )
 
-                    logger.warning(
-                        "[Gemini] 모델=%s를 찾을 수 없습니다. "
-                        "다음 모델로 전환합니다.",
-                        model,
-                    )
-                    break
+                      logger.warning(
+                          "[Gemini] 모델=%s를 찾을 수 없습니다. "
+                          "다음 모델로 전환합니다.",
+                          model,
+                      )
+                      break
 
-                if resp.status_code in retryable_server_errors:
-                    last_error = RuntimeError(
-                        f"Gemini HTTP {resp.status_code}: {model}"
-                    )
+                  if resp.status_code in retryable_server_errors:
+                      last_error = RuntimeError(
+                          f"Gemini HTTP {resp.status_code}: {model}"
+                      )
 
-                    if attempt < max_retries:
-                        wait_sec = min(2 ** attempt, 8)
+                      if attempt < max_retries:
+                          wait_sec = min(2 ** attempt, 8)
 
-                        logger.warning(
-                            "[Gemini] 모델=%s, HTTP %s, "
-                            "%s/%s회 시도. %s초 후 재시도합니다.",
-                            model,
-                            resp.status_code,
-                            attempt,
-                            max_retries,
-                            wait_sec,
-                        )
+                          logger.warning(
+                              "[Gemini] 모델=%s, HTTP %s, "
+                              "%s/%s회 시도. %s초 후 재시도합니다.",
+                              model,
+                              resp.status_code,
+                              attempt,
+                              max_retries,
+                              wait_sec,
+                          )
 
-                        time.sleep(wait_sec)
-                        continue
+                          time.sleep(wait_sec)
+                          continue
 
-                    logger.warning(
-                        "[Gemini] 모델=%s의 서버 오류 재시도 실패. "
-                        "다음 모델로 전환합니다.",
-                        model,
-                    )
-                    break
+                      logger.warning(
+                          "[Gemini] 모델=%s의 서버 오류 재시도 실패. "
+                          "다음 모델로 전환합니다.",
+                          model,
+                      )
+                      break
 
-                resp.raise_for_status()
+                  resp.raise_for_status()
 
-                data = resp.json()
+                  data = resp.json()
 
-                candidates = data.get("candidates") or []
-                if not candidates:
-                    raise ValueError(
-                        f"Gemini 응답에 candidates가 없습니다: {model}"
-                    )
+                  candidates = data.get("candidates") or []
+                  if not candidates:
+                      raise ValueError(
+                          f"Gemini 응답에 candidates가 없습니다: {model}"
+                      )
 
-                content = candidates[0].get("content") or {}
-                parts = content.get("parts") or []
+                  content = candidates[0].get("content") or {}
+                  parts = content.get("parts") or []
 
-                raw = "".join(
-                    part.get("text", "")
-                    for part in parts
-                    if isinstance(part, dict)
-                ).strip()
+                  raw = "".join(
+                      part.get("text", "")
+                      for part in parts
+                      if isinstance(part, dict)
+                  ).strip()
 
-                if not raw:
-                    raise ValueError(
-                        f"Gemini 응답 텍스트가 비어 있습니다: {model}"
-                    )
+                  if not raw:
+                      raise ValueError(
+                          f"Gemini 응답 텍스트가 비어 있습니다: {model}"
+                      )
 
-                # JSON 코드블록 제거
-                if raw.startswith("```"):
-                    raw = raw.strip("`").strip()
+                  # JSON 코드블록 제거
+                  if raw.startswith("```"):
+                      raw = raw.strip("`").strip()
 
-                    if raw.lower().startswith("json"):
-                        raw = raw[4:].strip()
+                      if raw.lower().startswith("json"):
+                          raw = raw[4:].strip()
 
-                result = json.loads(raw)
+                  result = json.loads(raw)
 
-                if not isinstance(result, dict):
-                    raise ValueError(
-                        f"Gemini 응답 JSON이 객체가 아닙니다: {model}"
-                    )
+                  if not isinstance(result, dict):
+                      raise ValueError(
+                          f"Gemini 응답 JSON이 객체가 아닙니다: {model}"
+                      )
 
-                logger.info(
-                    "[Gemini] 호출 성공: model=%s, attempt=%s",
-                    model,
-                    attempt,
-                )
+                  logger.info(
+                      "[Gemini] 호출 성공: model=%s, attempt=%s",
+                      model,
+                      attempt,
+                  )
 
-                return result
+                  return result
 
-            except requests.exceptions.HTTPError as e:
-                status = (
-                    resp.status_code
-                    if resp is not None
-                    else "unknown"
-                )
+              except requests.exceptions.HTTPError as e:
+                  status = (
+                      resp.status_code
+                      if resp is not None
+                      else "unknown"
+                  )
 
-                last_error = e
+                  last_error = e
 
-                logger.error(
-                    "[Gemini] HTTP 오류: model=%s, status=%s, error=%s",
-                    model,
-                    status,
-                    e,
-                )
+                  logger.error(
+                      "[Gemini] HTTP 오류: model=%s, status=%s, error=%s",
+                      model,
+                      status,
+                      e,
+                  )
 
-                # 429, 404는 위에서 처리했으므로
-                # 그 밖의 클라이언트 오류는 즉시 중단합니다.
-                if isinstance(status, int) and status < 500:
-                    raise
+                  # 429, 404는 위에서 처리했으므로
+                  # 그 밖의 클라이언트 오류는 즉시 중단합니다.
+                  if isinstance(status, int) and status < 500:
+                      raise
 
-                break
+                  break
 
-            except (
-                requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError,
-            ) as e:
-                last_error = e
+              except (
+                  requests.exceptions.Timeout,
+                  requests.exceptions.ConnectionError,
+              ) as e:
+                  last_error = e
 
-                logger.warning(
-                    "[Gemini] 연결 오류: model=%s, attempt=%s/%s, error=%s",
-                    model,
-                    attempt,
-                    max_retries,
-                    e,
-                )
+                  logger.warning(
+                      "[Gemini] 연결 오류: model=%s, attempt=%s/%s, error=%s",
+                      model,
+                      attempt,
+                      max_retries,
+                      e,
+                  )
 
-                if attempt < max_retries:
-                    time.sleep(min(2 ** attempt, 8))
-                    continue
+                  if attempt < max_retries:
+                      time.sleep(min(2 ** attempt, 8))
+                      continue
 
-                break
+                  break
 
-            except (ValueError, json.JSONDecodeError) as e:
-                last_error = e
+              except (ValueError, json.JSONDecodeError) as e:
+                  last_error = e
 
-                logger.warning(
-                    "[Gemini] 응답 파싱 실패: model=%s, error=%s",
-                    model,
-                    e,
-                )
-                break
+                  logger.warning(
+                      "[Gemini] 응답 파싱 실패: model=%s, error=%s",
+                      model,
+                      e,
+                  )
+                  break
 
-            except Exception as e:
-                last_error = e
+              except Exception as e:
+                  last_error = e
 
-                logger.exception(
-                    "[Gemini] 예상하지 못한 오류: model=%s",
-                    model,
-                )
-                break
+                  logger.exception(
+                      "[Gemini] 예상하지 못한 오류: model=%s",
+                      model,
+                  )
+                  break
 
-    logger.error(
-        "[Gemini] 모든 모델 호출 실패. 마지막 오류: %s",
-        last_error,
-    )
+      logger.error(
+          "[Gemini] 모든 모델 호출 실패. 마지막 오류: %s",
+          last_error,
+      )
 
-    raise RuntimeError(
-        f"Gemini API 호출 실패: 모든 모델 사용 불가. "
-        f"마지막 오류: {last_error}"
-    )
+      raise RuntimeError(
+          f"Gemini API 호출 실패: 모든 모델 사용 불가. "
+          f"마지막 오류: {last_error}"
+      )
 
     def generate_all(self, post: dict) -> dict:
         """

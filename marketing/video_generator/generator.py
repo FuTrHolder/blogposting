@@ -406,12 +406,35 @@ def generate_narration_script(
 
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    time.sleep(30 * attempt)
-                elif e.code in (500, 503):
-                    time.sleep(10 * attempt)
-                else:
-                    logger.warning(f"Gemini 나래이션 API {e.code} ({model})")
+                    logger.warning(
+                        "[Gemini] 모델=%s, HTTP 429. "
+                        "동일 모델 재시도 없이 다음 모델로 전환합니다.",
+                        model,
+                    )
                     break
+
+                elif e.code in (500, 502, 503, 504):
+                    logger.warning(
+                        "[Gemini] 모델=%s, HTTP %s, 시도=%s/3",
+                        model,
+                        e.code,
+                        attempt,
+                    )
+
+                    if attempt < 3:
+                        time.sleep(min(2 ** attempt, 8))
+                        continue
+
+                    break
+
+                else:
+                    logger.warning(
+                        "[Gemini] API 오류: model=%s, status=%s",
+                        model,
+                        e.code,
+                    )
+                    break
+
             except Exception as e:
                 logger.warning(f"나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
                 if attempt < 3:
@@ -793,6 +816,7 @@ def _audio_duration(path: str) -> float:
         return 0.0
 
 
+
 def _fit_tts_to_budget(
     text: str,
     base_path: str,
@@ -801,61 +825,95 @@ def _fit_tts_to_budget(
     seg_idx: int,
 ) -> tuple[str | None, float, str]:
     """
-    TTS를 생성하고, 길이가 budget_sec을 초과하면 속도를 단계적으로 올려
-    budget 안에 들어오도록 재생성합니다.
+    TTS 생성 후 허용 시간 안에 들어오는 가장 적합한 파일을 선택합니다.
 
-    budget_sec: 이 세그먼트에 허용된 최대 TTS 시간 (슬라이드 tail 제외)
-    반환: (사용된 tts 파일 경로 또는 None, 실제 tts 길이, 사용된 rate 문자열)
+    반환값:
+        (TTS 파일 경로 또는 None, 재생 시간, 사용한 rate)
 
-    - 어떤 속도로도 budget을 맞추지 못하면, 마지막 속도(최고속)로 생성된
-      파일을 그대로 반환하고 호출부에서 슬라이드 시간을 TTS 길이에 맞춤
-      (절대 음성이 잘리지 않도록 보장).
-    - 5단계 속도를 모두 시도해도 TTS 자체가 실패하면(edge-tts 오류 등)
-      경로로 None을 반환합니다. base_path(아직 생성되지 않은 경로)를 그대로
-      돌려주면 호출부가 이를 실제 존재하는 파일로 착각해 tts_segments에
-      추가하고, 이후 ffmpeg가 없는 파일을 열려다 예외로 전체 영상 생성이
-      실패하는 문제가 있었습니다. None이면 호출부에서 반드시 무음(자막만)
-      슬라이드로 처리해야 합니다.
+    모든 음성 및 속도 조합이 실패하면 경로 None을 반환합니다.
     """
     best_path: str | None = None
-    best_dur  = 0.0
+    best_dur = 0.0
     best_rate = TTS_RATE_STEPS[0]
 
     for rate in TTS_RATE_STEPS:
-        candidate_path = str(tmp_dir / f"tts_{seg_idx:02d}_{rate.replace('+','p').replace('%','pct')}.mp3")
-        ok = _generate_tts_with_rate(text, candidate_path, rate)
+        rate_name = rate.replace("+", "p").replace("%", "pct")
+        candidate_path = str(
+            tmp_dir / f"tts_{seg_idx:02d}_{rate_name}.mp3"
+        )
+
+        # 이전 실행에서 불완전한 파일이 남아 있으면 제거
+        candidate = Path(candidate_path)
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except OSError as e:
+            logger.warning(
+                "[TTS] 기존 파일 삭제 실패: %s, error=%s",
+                candidate_path,
+                e,
+            )
+            continue
+
+        # 속도별로 시도하되 각 속도에서 여러 음성을 순차 시도
+        ok = _generate_tts_with_voice_fallback(
+            text=text,
+            path=candidate_path,
+            rate=rate,
+            primary_voice=TTS_VOICE,
+            pitch=TTS_PITCH,
+        )
+
         if not ok:
-            logger.warning(f"TTS 생성 실패 (rate={rate}, seg={seg_idx})")
+            logger.warning(
+                "[TTS] 모든 음성 생성 실패: rate=%s, seg=%s",
+                rate,
+                seg_idx,
+            )
             continue
 
         dur = _audio_duration(candidate_path)
+
         if dur <= 0:
+            logger.warning(
+                "[TTS] 오디오 길이 확인 실패: path=%s",
+                candidate_path,
+            )
             continue
 
-        best_path = candidate_path
-        best_dur  = dur
-        best_rate = rate
-
+        # 허용 시간 이내라면 바로 사용
         if dur <= budget_sec:
             logger.info(
-                f"  [seg {seg_idx}] TTS 확정: rate={rate}, "
-                f"dur={dur:.2f}s, budget={budget_sec:.2f}s ✓"
+                "[TTS] 시간 예산 충족: seg=%s, rate=%s, duration=%.2fs",
+                seg_idx,
+                rate,
+                dur,
             )
-            break
-        else:
-            logger.info(
-                f"  [seg {seg_idx}] TTS {dur:.2f}s > budget {budget_sec:.2f}s "
-                f"→ rate {rate} 초과, 다음 속도로 재시도"
-            )
+            return candidate_path, dur, rate
 
-    if best_dur <= 0:
-        # 모든 시도 실패 → 파일 경로 없이 fallback 길이만 반환
-        logger.error(f"  [seg {seg_idx}] 모든 TTS 시도 실패 — 무음 4.0초로 대체")
-        best_path = None
-        best_dur  = 4.0
-        best_rate = TTS_RATE_STEPS[-1]
+        # 예산 초과 파일 중 가장 짧은 파일을 보관
+        if best_path is None or dur < best_dur:
+            best_path = candidate_path
+            best_dur = dur
+            best_rate = rate
 
-    return best_path, best_dur, best_rate
+    if best_path is not None:
+        logger.warning(
+            "[TTS] 예산 내 파일 없음. 가장 짧은 음성을 사용합니다: "
+            "seg=%s, duration=%.2fs, budget=%.2fs",
+            seg_idx,
+            best_dur,
+            budget_sec,
+        )
+        return best_path, best_dur, best_rate
+
+    logger.error(
+        "[TTS] 모든 음성 및 속도 시도 실패: seg=%s. "
+        "호출부에서 무음 처리 여부를 결정해야 합니다.",
+        seg_idx,
+    )
+    return None, 0.0, best_rate
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1579,6 +1637,15 @@ class VideoGenerator:
                     tmp,
                     i,
                 )
+
+                if tts_path is None:
+                    logger.error(
+                        "[TTS] 세그먼트 %s 생성 실패 — 무음 슬라이드로 처리합니다.",
+                        seg_idx,
+                    )
+                    # 여기서 기존 코드의 무음 슬라이드 처리 경로로 연결
+                else:
+                    # 기존의 TTS 파일 사용 로직
 
                 # 슬라이드 표시 시간 = TTS 실제 길이 + tail
                 # (remaining을 넘지 않도록 클리핑)
