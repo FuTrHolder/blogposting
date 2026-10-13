@@ -1,17 +1,5 @@
 requests>=2.31.0
 feedparser>=6.0.11
-beautifulsoup4>=4.12.0
+beautifulsoup4>=4.12.3
 Pillow>=10.3.0
-moviepy==1.0.3
-decorator==4.4.2
-imageio==2.34.0
-imageio-ffmpeg>=0.4.9
-google-api-python-client>=2.100.0
-google-auth>=2.23.0
-google-auth-oauthlib>=1.1.0
 huggingface_hub>=0.28.0
-# TTS (젊은 남성 한국어 음성: ko-KR-InJoonNeural)
-# 7.2.7 미만은 Microsoft 인증 토큰 변경으로 403이 발생할 수 있음
-edge-tts>=7.2.7
-# edge-tts 장애 시 무료 폴백 (Google 번역 TTS)
-gTTS>=2.5.0
