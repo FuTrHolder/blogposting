@@ -246,30 +246,30 @@ class ContentAdapter:
         self.api_key = api_key
 
     def _call_gemini(self, prompt: str, max_retries: int = 2) -> dict:
-    """
-    Gemini API 호출.
+      """
+      Gemini API 호출.
 
-    - 429: 같은 모델을 반복 호출하지 않고 다음 모델로 전환
-    - 5xx: 짧은 지수 백오프를 적용해 제한적으로 재시도
-    - 400/401/403 등: 즉시 오류 처리
-    - 모든 모델 실패: 상세 오류를 기록하고 예외 발생
-    """
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.75,
-            "maxOutputTokens": 8192,
-            "responseMimeType": "application/json",
-        },
-    }
+      - 429: 같은 모델을 반복 호출하지 않고 다음 모델로 전환
+      - 5xx: 짧은 지수 백오프를 적용해 제한적으로 재시도
+      - 400/401/403 등: 즉시 오류 처리
+      - 모든 모델 실패: 상세 오류를 기록하고 예외 발생
+      """
+      payload = {
+          "system_instruction": {
+              "parts": [{"text": SYSTEM_PROMPT}]
+          },
+          "contents": [
+              {
+                  "role": "user",
+                  "parts": [{"text": prompt}],
+              }
+          ],
+          "generationConfig": {
+              "temperature": 0.75,
+              "maxOutputTokens": 8192,
+              "responseMimeType": "application/json",
+          },
+      }
 
     retryable_server_errors = {500, 502, 503, 504}
     last_error = None

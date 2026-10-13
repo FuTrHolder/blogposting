@@ -1924,32 +1924,32 @@ class VideoGenerator:
             if not slide_clips:
                 raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
 
-                # TTS 생성 성공률 검사
-                total_segments = len(all_segments)
-                successful_tts = len(tts_segments)
+            # TTS 생성 성공률 검사
+            total_segments = len(all_segments)
+            successful_tts = len(tts_segments)
 
-                tts_success_rate = (
-                    successful_tts / total_segments
-                    if total_segments > 0
-                    else 0.0
+            tts_success_rate = (
+                successful_tts / total_segments
+                if total_segments > 0
+                else 0.0
+            )
+
+            logger.info(
+                "[틱톡] TTS 성공률: %s/%s (%.1f%%)",
+                successful_tts,
+                total_segments,
+                tts_success_rate * 100,
+            )
+
+            # 음성 없는 영상이 정상 결과물로 취급되는 것을 방지합니다.
+            # 성공률이 70% 미만이면 생성 실패로 처리합니다.
+            if total_segments == 0 or tts_success_rate < 0.70:
+                raise RuntimeError(
+                    "[틱톡] TTS 생성 성공률 부족: "
+                    f"{successful_tts}/{total_segments} "
+                    f"({tts_success_rate * 100:.1f}%). "
+                    "음성 서비스 상태를 확인한 후 다시 실행하세요."
                 )
-
-                logger.info(
-                    "[틱톡] TTS 성공률: %s/%s (%.1f%%)",
-                    successful_tts,
-                    total_segments,
-                    tts_success_rate * 100,
-                )
-
-                # 음성 없는 영상이 정상 결과물로 취급되는 것을 방지합니다.
-                # 성공률이 70% 미만이면 생성 실패로 처리합니다.
-                if total_segments == 0 or tts_success_rate < 0.70:
-                    raise RuntimeError(
-                        "[틱톡] TTS 생성 성공률 부족: "
-                        f"{successful_tts}/{total_segments} "
-                        f"({tts_success_rate * 100:.1f}%). "
-                        "음성 서비스 상태를 확인한 후 다시 실행하세요."
-                    )
 
             # ── 최종 마지막 슬라이드만 is_cta=True로 다시 렌더링 ───────────────
             # 위 루프에서는 몇 개의 세그먼트가 추가될지 미리 알 수 없어 모든
