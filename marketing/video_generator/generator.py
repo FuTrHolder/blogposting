@@ -565,14 +565,38 @@ def generate_narration_script_tiktok(
                         tags = _fallback_hashtags_tiktok(mode)
                     return segs, tags
 
+            
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    time.sleep(30 * attempt)
-                elif e.code in (500, 503):
-                    time.sleep(10 * attempt)
-                else:
-                    logger.warning(f"Gemini 틱톡 나래이션 API {e.code} ({model})")
+                    logger.warning(
+                        "[Gemini] 틱톡 모델=%s, HTTP 429. "
+                        "다음 모델로 전환합니다.",
+                        model,
+                    )
                     break
+
+                elif e.code in (500, 502, 503, 504):
+                    logger.warning(
+                        "[Gemini] 틱톡 모델=%s, HTTP %s, 시도=%s/3",
+                        model,
+                        e.code,
+                        attempt,
+                    )
+
+                    if attempt < 3:
+                        time.sleep(min(2 ** attempt, 8))
+                        continue
+
+                    break
+
+                else:
+                    logger.warning(
+                        "[Gemini] 틱톡 API 오류: model=%s, status=%s",
+                        model,
+                        e.code,
+                    )
+                    break
+
             except Exception as e:
                 logger.warning(f"틱톡 나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
                 if attempt < 3:
@@ -1638,14 +1662,15 @@ class VideoGenerator:
                     i,
                 )
 
+                
                 if tts_path is None:
                     logger.error(
                         "[TTS] 세그먼트 %s 생성 실패 — 무음 슬라이드로 처리합니다.",
-                        seg_idx,
+                        i,
                     )
-                    # 여기서 기존 코드의 무음 슬라이드 처리 경로로 연결
-                else:
-                    # 기존의 TTS 파일 사용 로직
+                    # TTS가 없더라도 슬라이드는 표시할 수 있도록 시간을 확보합니다.
+                    tts_dur = min(2.5, tts_budget)
+
 
                 # 슬라이드 표시 시간 = TTS 실제 길이 + tail
                 # (remaining을 넘지 않도록 클리핑)
@@ -1751,7 +1776,8 @@ class VideoGenerator:
             CTA 1개를 추가한 뒤에도 60초 미만이면 CTA를 반복하지 않고,
             기존 블로그 내용을 유지하면서 더 긴 나래이션을 Gemini로 재생성합니다.
             확장 나래이션으로 다시 영상을 생성한 뒤에도 60초 미만이면
-            완성된 영상을 통째로 2회 반복하여 최종 업로드 영상으로 사용합니다.
+            영상 반복으로 길이를 채우지 않고 생성 실패로 처리합니다.
+            최종 영상은 60초 이상인 경우에만 반환합니다.
             동일 CTA를 여러 번 반복하지 않는 것을 최우선으로 합니다.
             빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
             끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
