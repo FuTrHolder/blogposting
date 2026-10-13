@@ -1,28 +1,27 @@
 """
 content_adapter/adapter.py
 Gemini API를 사용해 티스토리 블로그 포스팅을 각 SNS 플랫폼에 맞게 재가공합니다.
+
+v2: Gemini 호출을 repo 루트의 gemini_client.py로 통일
+    (API 키 헤더 전송, 429/5xx/MAX_TOKENS 통합 처리, 모델 목록 환경변수 교체 가능)
 """
 
 import logging
-import time
-import json
-import requests
 
-# repo 루트의 fact_reference.py를 가져옵니다. marketing/main_marketing.py가
-# 이 모듈(content_adapter.adapter)을 임포트하기 전에 sys.path에 repo
+# repo 루트의 fact_reference.py / gemini_client.py를 가져옵니다.
+# marketing/main_marketing.py가 이 모듈을 임포트하기 전에 sys.path에 repo
 # 루트를 이미 추가해두므로(main_marketing.py 상단 참고) 정상 동작합니다.
 import fact_reference
+from gemini_client import call_gemini_json, models_from_env
 
 logger = logging.getLogger(__name__)
 
+# 환경변수 GEMINI_MODELS="모델1,모델2,..."로 코드 수정 없이 교체 가능
 GEMINI_MODELS = [
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-2.5-flash",
 ]
-GEMINI_API_URL_TMPL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
 
 SYSTEM_PROMPT_INTRO = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의 SNS 마케팅 전문가입니다.
 이 블로그는 하루 2회, 정해진 시각에 발행되는 "시황 브리핑 시리즈"입니다.
@@ -47,7 +46,7 @@ SYSTEM_PROMPT_INTRO = """당신은 미국 증시 시황 블로그(seedsup.tistor
 플랫폼별 톤에 맞게 표현 방식은 아래 각 항목 규칙을 따라 다르게 하세요.
 """
 
-# [신규] 인물 정보는 날짜 정보와 마찬가지로 "사실"이며, Gemini의 사전지식이
+# 인물 정보는 날짜 정보와 마찬가지로 "사실"이며, Gemini의 사전지식이
 # 낡아 있을 수 있는 영역입니다(예: 연준 의장 교체). fact_reference.py의
 # CURRENT_OFFICIALS를 그대로 프롬프트에 주입해, 블로그 본문 생성
 # (content_generator.py)과 동일한 인물 정보를 SNS 콘텐츠에도 강제합니다.
@@ -246,219 +245,19 @@ class ContentAdapter:
         self.api_key = api_key
 
     def _call_gemini(self, prompt: str, max_retries: int = 2) -> dict:
-      """
-      Gemini API 호출.
+        """공용 gemini_client 사용 (키 헤더 전송, 429/5xx/MAX_TOKENS 통합 처리)."""
+        models = models_from_env("GEMINI_MODELS", GEMINI_MODELS)
 
-      - 429: 같은 모델을 반복 호출하지 않고 다음 모델로 전환
-      - 5xx: 짧은 지수 백오프를 적용해 제한적으로 재시도
-      - 400/401/403 등: 즉시 오류 처리
-      - 모든 모델 실패: 상세 오류를 기록하고 예외 발생
-      """
-      payload = {
-          "system_instruction": {
-              "parts": [{"text": SYSTEM_PROMPT}]
-          },
-          "contents": [
-              {
-                  "role": "user",
-                  "parts": [{"text": prompt}],
-              }
-          ],
-          "generationConfig": {
-              "temperature": 0.75,
-              "maxOutputTokens": 8192,
-              "responseMimeType": "application/json",
-          },
-      }
-
-      retryable_server_errors = {500, 502, 503, 504}
-      last_error = None
-
-      for model in GEMINI_MODELS:
-          url = (
-              f"{GEMINI_API_URL_TMPL.format(model=model)}"
-              f"?key={self.api_key}"
-          )
-
-          for attempt in range(1, max_retries + 1):
-              resp = None
-
-              try:
-                  resp = requests.post(
-                      url,
-                      json=payload,
-                      timeout=60,
-                  )
-
-                  if resp.status_code == 429:
-                      last_error = RuntimeError(
-                          f"Gemini 429 RESOURCE_EXHAUSTED: {model}"
-                      )
-
-                      logger.warning(
-                          "[Gemini] 모델=%s, HTTP 429. "
-                          "동일 모델 재시도 없이 다음 모델로 전환합니다.",
-                          model,
-                      )
-                      break
-
-                  if resp.status_code == 404:
-                      last_error = RuntimeError(
-                          f"Gemini model not found: {model}"
-                      )
-
-                      logger.warning(
-                          "[Gemini] 모델=%s를 찾을 수 없습니다. "
-                          "다음 모델로 전환합니다.",
-                          model,
-                      )
-                      break
-
-                  if resp.status_code in retryable_server_errors:
-                      last_error = RuntimeError(
-                          f"Gemini HTTP {resp.status_code}: {model}"
-                      )
-
-                      if attempt < max_retries:
-                          wait_sec = min(2 ** attempt, 8)
-
-                          logger.warning(
-                              "[Gemini] 모델=%s, HTTP %s, "
-                              "%s/%s회 시도. %s초 후 재시도합니다.",
-                              model,
-                              resp.status_code,
-                              attempt,
-                              max_retries,
-                              wait_sec,
-                          )
-
-                          time.sleep(wait_sec)
-                          continue
-
-                      logger.warning(
-                          "[Gemini] 모델=%s의 서버 오류 재시도 실패. "
-                          "다음 모델로 전환합니다.",
-                          model,
-                      )
-                      break
-
-                  resp.raise_for_status()
-
-                  data = resp.json()
-
-                  candidates = data.get("candidates") or []
-                  if not candidates:
-                      raise ValueError(
-                          f"Gemini 응답에 candidates가 없습니다: {model}"
-                      )
-
-                  content = candidates[0].get("content") or {}
-                  parts = content.get("parts") or []
-
-                  raw = "".join(
-                      part.get("text", "")
-                      for part in parts
-                      if isinstance(part, dict)
-                  ).strip()
-
-                  if not raw:
-                      raise ValueError(
-                          f"Gemini 응답 텍스트가 비어 있습니다: {model}"
-                      )
-
-                  # JSON 코드블록 제거
-                  if raw.startswith("```"):
-                      raw = raw.strip("`").strip()
-
-                      if raw.lower().startswith("json"):
-                          raw = raw[4:].strip()
-
-                  result = json.loads(raw)
-
-                  if not isinstance(result, dict):
-                      raise ValueError(
-                          f"Gemini 응답 JSON이 객체가 아닙니다: {model}"
-                      )
-
-                  logger.info(
-                      "[Gemini] 호출 성공: model=%s, attempt=%s",
-                      model,
-                      attempt,
-                  )
-
-                  return result
-
-              except requests.exceptions.HTTPError as e:
-                  status = (
-                      resp.status_code
-                      if resp is not None
-                      else "unknown"
-                  )
-
-                  last_error = e
-
-                  logger.error(
-                      "[Gemini] HTTP 오류: model=%s, status=%s, error=%s",
-                      model,
-                      status,
-                      e,
-                  )
-
-                  # 429, 404는 위에서 처리했으므로
-                  # 그 밖의 클라이언트 오류는 즉시 중단합니다.
-                  if isinstance(status, int) and status < 500:
-                      raise
-
-                  break
-
-              except (
-                  requests.exceptions.Timeout,
-                  requests.exceptions.ConnectionError,
-              ) as e:
-                  last_error = e
-
-                  logger.warning(
-                      "[Gemini] 연결 오류: model=%s, attempt=%s/%s, error=%s",
-                      model,
-                      attempt,
-                      max_retries,
-                      e,
-                  )
-
-                  if attempt < max_retries:
-                      time.sleep(min(2 ** attempt, 8))
-                      continue
-
-                  break
-
-              except (ValueError, json.JSONDecodeError) as e:
-                  last_error = e
-
-                  logger.warning(
-                      "[Gemini] 응답 파싱 실패: model=%s, error=%s",
-                      model,
-                      e,
-                  )
-                  break
-
-              except Exception as e:
-                  last_error = e
-
-                  logger.exception(
-                      "[Gemini] 예상하지 못한 오류: model=%s",
-                      model,
-                  )
-                  break
-
-      logger.error(
-          "[Gemini] 모든 모델 호출 실패. 마지막 오류: %s",
-          last_error,
-      )
-
-      raise RuntimeError(
-          f"Gemini API 호출 실패: 모든 모델 사용 불가. "
-          f"마지막 오류: {last_error}"
-      )
+        return call_gemini_json(
+            self.api_key,
+            SYSTEM_PROMPT,
+            prompt,
+            models,
+            temperature=0.75,
+            max_output_tokens=16384,
+            timeout=90,
+            max_retries=max_retries,
+        )
 
     def generate_all(self, post: dict) -> dict:
         """
@@ -504,10 +303,7 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
         # blog_title/blog_url은 Gemini에게 생성을 맡기지 않고 항상 원본 크롤링
         # 값으로 강제 지정합니다. 한글이 포함된 퍼센트 인코딩 URL을 LLM이
         # 텍스트로 재출력하는 과정에서 인코딩 바이트가 미묘하게 손상되는
-        # 사례가 있었습니다(예: "앞두고" %EB%91%90 → "앞둠고" %EB%91%A0로
-        # 변형되어 실제 게시물과 다른, 존재하지 않는 링크가 만들어짐).
-        # setdefault는 Gemini가 이미 값을 채운 경우 그 값을 그대로 쓰기
-        # 때문에 이 손상을 막지 못하므로, 항상 덮어써서 원본을 보장합니다.
+        # 사례가 있었습니다. 항상 덮어써서 원본을 보장합니다.
         result["blog_title"] = title
         result["blog_url"] = url
         result.setdefault("mode", mode)
@@ -524,17 +320,14 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
         if not result.get("tiktok_script"):
             result["tiktok_script"] = result.get("youtube_script", [])
 
-        # tiktok_post 누락 시 안전한 폴백 (x_post → 제목 순, main_marketing.py의
-        # 기존 fallback 체인과 별개로 여기서도 한 번 더 방어)
+        # tiktok_post 누락 시 안전한 폴백
         if not result.get("tiktok_post"):
             result["tiktok_post"] = (
                 result.get("x_post", "")[:100] or title[:80]
             )
 
-        # threads_thread 방어: Gemini가 배열이 아닌 값을 주거나 문자열이 아닌
-        # 항목을 섞어 반환해도 파이프라인이 죽지 않게 정리합니다. 여기서
-        # 정상적인 배열(문자열 2개 이상)이 아니면 비워서, ThreadsPublisher가
-        # 자동으로 threads_post 단일 게시물 방식으로 폴백하도록 둡니다.
+        # threads_thread 방어: 정상적인 배열(문자열 2개 이상)이 아니면 비워서
+        # ThreadsPublisher가 threads_post 단일 게시물 방식으로 폴백하도록 둡니다.
         raw_thread = result.get("threads_thread")
         if isinstance(raw_thread, list):
             cleaned_thread = [str(t).strip() for t in raw_thread if str(t).strip()]
@@ -542,8 +335,7 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
             cleaned_thread = []
         result["threads_thread"] = cleaned_thread if len(cleaned_thread) >= 2 else []
 
-        # instagram_carousel 방어: 항목 형식이 어긋나거나 개수가 부족하면
-        # 비워서 SNSThumbnailGenerator/InstagramPublisher가 자동으로 기존
+        # instagram_carousel 방어: 형식이 어긋나거나 개수가 부족하면 비워서
         # 단일 이미지 방식으로 폴백하도록 둡니다.
         raw_carousel = result.get("instagram_carousel")
         cleaned_carousel = []
@@ -557,10 +349,8 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
                     })
         result["instagram_carousel"] = cleaned_carousel if len(cleaned_carousel) >= 2 else []
 
-        # [신규] 최종 안전망: SNS용으로 새로 생성된 모든 텍스트 필드에서
-        # 이미 교체된 인물의 이름이 남아있으면 자동으로 현재 인물 이름으로
-        # 교정합니다. blog_title/blog_url/mode는 원본 크롤링 값을 그대로
-        # 쓰는 필드라(이미 블로그 생성 단계에서 검증됨) 대상에서 제외합니다.
+        # 최종 안전망: SNS용으로 새로 생성된 모든 텍스트 필드에서 이미 교체된
+        # 인물의 이름이 남아있으면 현재 인물 이름으로 교정합니다.
         official_fixes: list[dict] = []
 
         def _scrub(value):
@@ -579,9 +369,8 @@ blog_title과 blog_url, mode 필드도 반드시 포함해주세요.
                 continue
             result[key] = _scrub(result[key])
 
-        if official_fixes:
-            for fix in official_fixes:
-                logger.warning(fact_reference.format_official_fix_log(fix))
+        for fix in official_fixes:
+            logger.warning(fact_reference.format_official_fix_log(fix))
 
         logger.info(
             f"ContentAdapter 완료: "

@@ -1,56 +1,24 @@
 """
-숏폼 & 틱톡 영상 생성기 v10
+숏폼 & 틱톡 영상 생성기 v11
 ==============================================
-변경사항 (v10 — 영상 배경이 콘텐츠와 무관하게 나오는 문제 해결):
-  - [버그 수정] picsum.photos(완전 무작위 사진 서비스) 제거
-      v9에서 블로그 썸네일 재사용을 중단한 뒤, Cloudflare/Pexels가 모두
-      실패하면 최종 폴백으로 picsum.photos를 썼습니다. 그런데 picsum은
-      검색·키워드 필터링이 아예 불가능한 "무작위" 사진 서비스라서, 나스닥
-      실적 발표 나레이션에 식물 사진이 배경으로 나오는 등 콘텐츠·채널
-      주제와 전혀 무관한 배경이 노출되는 문제가 실사용 중 확인됐습니다.
-      → picsum 호출을 완전히 제거하고, Cloudflare Workers AI와 Pexels가
-        모두 실패하는 경우 _prepare_bg()가 자동 적용하는 브랜드 그라디언트
-        (모드별 파란색/보라색 톤, _make_gradient_bg)로 대체합니다. 최소한
-        "주제와 무관한 이미지"가 나오는 일은 구조적으로 없어집니다.
-  - [개선] Pexels 배경 검색이 keywords 리스트의 첫 번째 키워드만 시도하던
-    것을, 리스트 전체를 순서대로 시도하도록 변경 — 첫 키워드로 검색 결과가
-    0건이어도 곧장 실패 처리하지 않고 다음 키워드로 재시도해, 관련성 있는
-    사진을 찾을 확률을 높였습니다.
+변경사항 (v11 — Gemini/TTS 안정화):
+  - [Gemini] 나레이션 생성을 repo 루트의 gemini_client.py로 통일
+      · API 키를 URL이 아닌 헤더로 전송 (로그 노출 방지)
+      · 429/5xx/MAX_TOKENS/JSON 파싱 실패 시 모델 순차 폴백
+      · 모델 목록은 환경변수 GEMINI_NARRATION_MODELS로 교체 가능
+  - [TTS] edge-tts 호출 횟수 축소 및 안정화
+      · 속도 맞춤: 기존 최대 5단계×음성 3개(15회) → 최대 2회
+      · 호출 간 간격(0.6초) + 백오프 재시도 + 오류 유형 로그(403 안내)
+      · 연속 실패 시 edge-tts를 건너뛰고 무료 gTTS(Google 번역 TTS)로 폴백
+  - [정리] 호출되지 않던 _repeat_video_twice / picsum 함수 제거
+      (틱톡 영상은 반복 재생으로 길이를 채우지 않습니다)
 
-v9 유지:
-  - [버그 수정] 배경에 블로그 제목 글자가 겹쳐 보이는 문제 해결
-      image_generator.py가 블로그 대표 썸네일 중앙에 제목 텍스트를 굽는(overlay)
-      기능이 추가된 이후, 이 영상 생성기가 그 썸네일을 영상 배경 1순위로
-      재사용하면서 슬라이드 자체의 키워드 박스·자막 뒤로 블로그 제목 글자가
-      흐릿하게 겹쳐 보이는 문제가 발생했습니다 (블러가 약해서 배경이 잘
-      보이도록 일부러 설계된 것이 오히려 역효과).
-      → generate()/generate_tiktok() 양쪽 모두 thumbnail_url을 배경으로
-        더 이상 사용하지 않습니다. 대신 Cloudflare Workers AI(FLUX.1-schnell,
-        완전 무료·신용카드 불필요)로 텍스트가 전혀 없는 새 배경을 1순위로
-        생성하고, 실패 시 기존 Pexels 순서로 폴백합니다.
-      - thumbnail_url 매개변수 자체는 호출부 호환을 위해 시그니처에 남겨
-        두었으나, 배경 생성에는 더 이상 쓰이지 않습니다.
+v10 유지: picsum 제거, Pexels 키워드 전체 순차 시도
+v9 유지: 블로그 썸네일을 영상 배경으로 쓰지 않음(제목 텍스트 겹침 방지)
+v8 유지: generate_tiktok() — 틱톡 수익화 조건(1분 이상), 60초 미달 시
+         CTA 1회 → 확장 나레이션 재생성 → 그래도 미달이면 생성 실패 처리
 
-v8 유지:
-  - generate_tiktok(): 틱톡 수익화 조건(1분 이상) 충족 전용 생성 메서드
-      · 시간 제한 없음 (MAX_VIDEO_SEC 미적용)
-      · 고정 속도 +28% (속도 자동 조정 없이 자연스러운 속도 유지)
-      · 모든 세그먼트의 TTS가 끝난 뒤 영상 종료 (음성 잘림 없음)
-      · 블로그 전체 내용을 더 풍부하게 커버하는 8~12개 세그먼트 스크립트
-  - generate_tiktok_with_fallback(): 예외 처리 래퍼
-
-v7 유지:
-  - generate(): 쇼츠/릴스용 — 58초 제한, 속도 자동 조정(+28~75%)
-  - TTS 길이 > budget 시 속도 단계적 상향, 슬라이드 = TTS 길이에 정확히 맞춤
-  - 마지막 슬라이드 음성 잘림 완전 제거
-
-공통:
-  - 블로그 본문 기반 나래이션 스크립트 자동 생성 (Gemini API)
-  - 키워드 강조 박스 + 부연설명 텍스트 오버레이
-  - BGM 없음, TTS 나래이션 단독
-  - 배경 이미지 투명도 절반
-
-TTS: edge-tts ko-KR-InJoonNeural (젊은 남성)
+TTS: edge-tts ko-KR-InJoonNeural(쇼츠) / ko-KR-SunHiNeural(틱톡)
 규격: 1080×1920, 30fps, H.264
 """
 
@@ -63,17 +31,16 @@ import re
 import subprocess
 import tempfile
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-# repo 루트의 fact_reference.py를 가져옵니다. marketing/main_marketing.py가
-# 이 모듈(video_generator.generator)을 임포트하기 전에 sys.path에 repo
+# repo 루트의 fact_reference.py / gemini_client.py를 가져옵니다.
+# marketing/main_marketing.py가 이 모듈을 임포트하기 전에 sys.path에 repo
 # 루트를 이미 추가해두므로(main_marketing.py 상단 참고) 정상 동작합니다.
 import fact_reference
+from gemini_client import call_gemini_json, models_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +50,7 @@ OUTPUT_DIR       = "videos"
 MAX_VIDEO_SEC    = 58.0   # 59초 이하 보장
 
 # ── TTS 속도 단계 (쇼츠/릴스용 — 기본 → 최고속) ─────────────────────────────
-# budget 초과 시 순서대로 시도. 더 빠른 속도로도 budget 안에 못 들어오면
-# 마지막 속도(최고속)로 TTS를 생성하고, 슬라이드 시간을 TTS 길이에 맞춤.
-# 정보 전달 속도를 높이기 위해 기본 시작 속도를 +28% → +34%로 상향.
+# 첫 번째 값이 기본 속도, 마지막 값이 속도 상한입니다.
 TTS_RATE_STEPS = ["+34%", "+45%", "+56%", "+66%", "+75%"]
 TTS_VOICE      = "ko-KR-InJoonNeural"   # 남성 — 쇼츠/릴스용
 TTS_PITCH      = "-2Hz"
@@ -93,14 +58,10 @@ TTS_PITCH      = "-2Hz"
 SLIDE_TAIL_SEC = 0.4
 
 # ── TTS 설정 (틱톡 전용 — 젊고 밝은 여성 목소리, 빠른 속도) ─────────────────
-# 이탈률 개선을 위해 쇼츠보다 더 활기차고 빠른 톤으로 차별화.
-# ko-KR-SunHiNeural: 밝고 또렷한 젊은 여성 음색 (edge-tts 한국어 여성 보이스)
 TTS_VOICE_TIKTOK = "ko-KR-SunHiNeural"
-TTS_RATE_TIKTOK  = "+38%"   # 쇼츠 기본(+28%)보다 빠르게 — 밝고 경쾌한 텐션 유지
-TTS_PITCH_TIKTOK = "+8Hz"   # 톤을 살짝 높여 더 젊고 밝은 느낌
-# TTS 기본 음성이 실패했을 때 순서대로 시도할 대체 음성.
-# 모두 edge-tts 서비스에 의존하므로 서비스 자체가 차단된 경우에는
-# 대체 음성도 실패할 수 있습니다.
+TTS_RATE_TIKTOK  = "+38%"
+TTS_PITCH_TIKTOK = "+8Hz"
+# 기본 음성이 실패했을 때 순서대로 시도할 대체 음성 (모두 edge-tts 서비스 의존)
 TTS_VOICE_FALLBACKS = [
     "ko-KR-SunHiNeural",
     "ko-KR-InJoonNeural",
@@ -141,20 +102,12 @@ PEXELS_KEYWORDS = {
 }
 
 # 틱톡 전용 키워드 — 쇼츠/릴스보다 더 역동적이고 화제성 있는 톤으로 차별화
-# (틱톡은 빠른 스크롤 환경이라 정적인 사무실/야경보다 움직임이 느껴지는
-# 비주얼이 시청 지속률에 유리)
 PEXELS_KEYWORDS_TIKTOK = {
     "morning": ["stock trading screens closeup", "financial data dashboard dynamic", "trading floor energy"],
     "evening": ["stock market chart neon", "trading screens night dynamic", "financial data glow"],
 }
 
 # ── Cloudflare Workers AI (영상 배경 전용 — 완전 무료, 텍스트 없는 배경 생성) ──
-# main.py의 블로그 대표 썸네일(image_generator.py)은 이제 제목 텍스트를 중앙에
-# 굽기 때문에, 그 이미지를 영상 배경으로 재사용하면 슬라이드 자체 텍스트와
-# 겹쳐 보입니다. 그래서 영상 배경은 블로그 썸네일을 아예 참조하지 않고, 항상
-# 텍스트가 없는 새 이미지를 이 모델로 직접 생성합니다. 하루 10,000 뉴런이
-# 매일 자정(UTC) 무료로 초기화되어, 영상 1편당 1회 호출(약 40~60 뉴런)로도
-# 하루 수백 회 여유가 있습니다.
 CF_FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
@@ -192,27 +145,32 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+
 def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Gemini API: 나래이션 스크립트 생성
+# Gemini API: 나래이션 스크립트 생성 (gemini_client 사용)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL   = "gemini-2.5-flash-lite"
-GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+# 나레이션용 모델 순서 (가벼운 모델 우선 → 상위 모델 폴백)
+# 환경변수 GEMINI_NARRATION_MODELS="모델1,모델2"로 코드 수정 없이 교체 가능
+NARRATION_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+]
 
 NARRATION_SYSTEM_INTRO = """당신은 유튜브 쇼츠 나래이션 작가입니다.
 블로그 본문을 읽고, 빠른 속도로 읽어도 55초 이하가 되는 나래이션 스크립트를 작성합니다.
 한국어 발화 속도를 기준으로 세그먼트당 나래이션을 적절히 조절하세요.
 """
 
-# [신규] fact_reference.py의 현재 인물 정보를 그대로 주입합니다. 나레이션은
-# 블로그 본문을 참고해 새로 문장을 만들기 때문에, 블로그에 없는 인물
-# 언급을 나레이션이 자체적으로 추가하면서 낡은 이름(예: 전임 연준 의장)을
-# 쓸 수 있어 여기서도 동일하게 안내합니다.
+# fact_reference.py의 현재 인물 정보를 그대로 주입합니다. 나레이션은 블로그
+# 본문을 참고해 새로 문장을 만들기 때문에, 블로그에 없는 인물 언급을
+# 나레이션이 자체적으로 추가하면서 낡은 이름을 쓸 수 있어 동일하게 안내합니다.
 NARRATION_OFFICIALS_NOTE = (
     "\n" + fact_reference.officials_reference_text()
     + "\n위 인물 정보는 반드시 지켜야 하는 사실입니다. 학습 시점의 기억에 "
@@ -323,10 +281,7 @@ NARRATION_SYSTEM_TIKTOK = (
 def _scrub_segments_officials(segments: list[dict]) -> list[dict]:
     """
     생성된 나레이션 세그먼트에서 이미 교체된 인물의 이름이 남아있으면
-    현재 인물 이름으로 자동 교정합니다 (narration/keyword/description
-    필드 전부 대상). 나레이션은 블로그 본문을 참고해 Gemini가 새로 문장을
-    만들어내는 과정이라, 블로그에는 없던 낡은 인물 이름을 나레이션이
-    자체적으로 추가할 수 있어 여기서도 최종 안전망을 둡니다.
+    현재 인물 이름으로 자동 교정합니다 (narration/keyword/description 필드 전부).
     """
     fixes: list[dict] = []
     for seg in segments:
@@ -338,6 +293,15 @@ def _scrub_segments_officials(segments: list[dict]) -> list[dict]:
     for fix in fixes:
         logger.warning(fact_reference.format_official_fix_log(fix))
     return segments
+
+
+def _validate_segments(obj: dict) -> None:
+    segs = obj.get("segments")
+    if not isinstance(segs, list) or not segs:
+        raise ValueError("segments 배열이 비어 있음")
+    for s in segs:
+        if not isinstance(s, dict) or not str(s.get("narration", "")).strip():
+            raise ValueError("narration이 비어 있는 세그먼트가 있음")
 
 
 def generate_narration_script(
@@ -357,92 +321,23 @@ def generate_narration_script(
         "각 세그먼트 나래이션은 반드시 65음절 이하, 전체 합산 55초 이하가 되어야 합니다."
     )
 
-    for model in [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]:
-        url     = f"{GEMINI_BASE_URL}{model}:generateContent?key={api_key}"
-        payload = {
-            "system_instruction": {"parts": [{"text": NARRATION_SYSTEM}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
-
-        for attempt in range(1, 4):
-            try:
-                req = urllib.request.Request(
-                    url, data=data,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-                # JSON 파싱 (코드블록 방어)
-                if "```" in raw:
-                    for part in raw.split("```"):
-                        part = part.strip()
-                        if part.startswith("json"):
-                            part = part[4:].strip()
-                        try:
-                            parsed = json.loads(part)
-                            segs = parsed.get("segments", [])
-                            if segs:
-                                segs = _scrub_segments_officials(segs)
-                                logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
-                                return segs
-                        except json.JSONDecodeError:
-                            continue
-
-                parsed = json.loads(raw)
-                segs   = parsed.get("segments", [])
-                if segs:
-                    segs = _scrub_segments_officials(segs)
-                    logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
-                    return segs
-
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    logger.warning(
-                        "[Gemini] 모델=%s, HTTP 429. "
-                        "동일 모델 재시도 없이 다음 모델로 전환합니다.",
-                        model,
-                    )
-                    break
-
-                elif e.code in (500, 502, 503, 504):
-                    logger.warning(
-                        "[Gemini] 모델=%s, HTTP %s, 시도=%s/3",
-                        model,
-                        e.code,
-                        attempt,
-                    )
-
-                    if attempt < 3:
-                        time.sleep(min(2 ** attempt, 8))
-                        continue
-
-                    break
-
-                else:
-                    logger.warning(
-                        "[Gemini] API 오류: model=%s, status=%s",
-                        model,
-                        e.code,
-                    )
-                    break
-
-            except Exception as e:
-                logger.warning(f"나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
-                if attempt < 3:
-                    time.sleep(10)
-        # 모델 실패 → 다음 모델로
-
-    logger.warning("나래이션 생성 전체 실패 — 기본 스크립트 사용")
-    return _fallback_script(title, mode)
+    try:
+        parsed = call_gemini_json(
+            api_key,
+            NARRATION_SYSTEM,
+            prompt,
+            models_from_env("GEMINI_NARRATION_MODELS", NARRATION_MODELS),
+            temperature=0.7,
+            max_output_tokens=8192,
+            timeout=60,
+            validate=_validate_segments,
+        )
+        segs = _scrub_segments_officials(parsed["segments"])
+        logger.info(f"나래이션 스크립트 생성 완료: {len(segs)}개")
+        return segs
+    except Exception as e:
+        logger.warning(f"나래이션 생성 전체 실패 — 기본 스크립트 사용: {e}")
+        return _fallback_script(title, mode)
 
 
 def generate_narration_script_tiktok(
@@ -454,12 +349,6 @@ def generate_narration_script_tiktok(
 ) -> tuple[list[dict], list[str]]:
     """
     틱톡용 나래이션 스크립트 생성 (이탈률 개선 버전).
-
-    쇼츠와의 차이:
-      - 세그먼트 5~7개 (기존 8~12개에서 축소 — 늘어지는 영상은 이탈률 상승 원인)
-      - 전체 55~70초 (기존 90초+에서 단축 — 완주율 개선 목적)
-      - 첫 세그먼트 훅 강화 규칙 명시 (인사말 금지, 충격적 수치/반전으로 시작)
-      - 해시태그 4~6개도 함께 생성해 검색 유입 개선
 
     Returns:
         (segments, hashtags) 튜플. 실패 시에도 fallback으로 항상 유효한 값 반환.
@@ -486,7 +375,7 @@ def generate_narration_script_tiktok(
             "(실제 음성 재생은 이보다 빨라지므로 목표를 넉넉히 잡아야 "
             "최종 영상이 60초를 넘습니다)."
         )
-    
+
     prompt = (
         f"블로그 제목: {title}\n"
         f"포스팅 모드: {mode_label} (실제 발행 시각: {post_time_label})\n\n"
@@ -499,111 +388,51 @@ def generate_narration_script_tiktok(
     )
 
     system_prompt = NARRATION_SYSTEM_TIKTOK
-    
     if extended:
-        system_prompt = NARRATION_SYSTEM_TIKTOK + """
-    
-    [확장 나래이션 재생성 모드]
-    현재 영상이 60초에 미달하여 나래이션을 확장하는 단계입니다.
-    
-    - 기존 스크립트의 핵심 주제와 사실관계를 유지하세요.
-    - 단순한 CTA나 좋아요/팔로우 문구를 추가하지 마세요.
-    - 같은 문장을 반복하지 마세요.
-    - 기존 내용을 더 구체적으로 설명하거나 배경, 원인, 영향, 전망을 자연스럽게 보강하세요.
-    - 총 8~9개 세그먼트를 작성하세요.
-    - 각 세그먼트는 충분한 설명을 포함하고, 전체적으로 자연스러운 발화 기준 90~105초를 목표로 하세요.
-    - 정보가 없는 부분을 추측해서 만들어내지 마세요.
-    """
-  
-    for model in [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]:
-        url     = f"{GEMINI_BASE_URL}{model}:generateContent?key={api_key}"
-        payload = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.75,
-                "maxOutputTokens": 3072,
-                "responseMimeType": "application/json",
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
+        system_prompt += """
 
-        for attempt in range(1, 4):
-            try:
-                req = urllib.request.Request(
-                    url, data=data,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+[확장 나래이션 재생성 모드]
+현재 영상이 60초에 미달하여 나래이션을 확장하는 단계입니다.
 
-                parsed = None
-                if "```" in raw:
-                    for part in raw.split("```"):
-                        part = part.strip()
-                        if part.startswith("json"):
-                            part = part[4:].strip()
-                        try:
-                            parsed = json.loads(part)
-                            break
-                        except json.JSONDecodeError:
-                            continue
-                if parsed is None:
-                    parsed = json.loads(raw)
+- 기존 스크립트의 핵심 주제와 사실관계를 유지하세요.
+- 단순한 CTA나 좋아요/팔로우 문구를 추가하지 마세요.
+- 같은 문장을 반복하지 마세요.
+- 기존 내용을 더 구체적으로 설명하거나 배경, 원인, 영향, 전망을 자연스럽게 보강하세요.
+- 총 8~9개 세그먼트를 작성하세요.
+- 각 세그먼트는 충분한 설명을 포함하고, 전체적으로 자연스러운 발화 기준 90~105초를 목표로 하세요.
+- 정보가 없는 부분을 추측해서 만들어내지 마세요.
+"""
 
-                segs = parsed.get("segments", [])
-                tags = parsed.get("hashtags", [])
-                if segs:
-                    segs = _scrub_segments_officials(segs)
-                    logger.info(
-                        f"틱톡 나래이션 스크립트 생성 완료: {len(segs)}개 세그먼트, "
-                        f"해시태그 {len(tags)}개"
-                    )
-                    if not tags:
-                        tags = _fallback_hashtags_tiktok(mode)
-                    return segs, tags
+    try:
+        parsed = call_gemini_json(
+            api_key,
+            system_prompt,
+            prompt,
+            models_from_env("GEMINI_NARRATION_MODELS", NARRATION_MODELS),
+            temperature=0.75,
+            max_output_tokens=8192,
+            timeout=90,
+            validate=_validate_segments,
+        )
+        segs = _scrub_segments_officials(parsed["segments"])
 
-            
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    logger.warning(
-                        "[Gemini] 틱톡 모델=%s, HTTP 429. "
-                        "다음 모델로 전환합니다.",
-                        model,
-                    )
-                    break
+        raw_tags = parsed.get("hashtags", [])
+        tags = (
+            [str(t).lstrip("#").strip() for t in raw_tags if str(t).strip()]
+            if isinstance(raw_tags, list)
+            else []
+        )
+        if not tags:
+            tags = _fallback_hashtags_tiktok(mode)
 
-                elif e.code in (500, 502, 503, 504):
-                    logger.warning(
-                        "[Gemini] 틱톡 모델=%s, HTTP %s, 시도=%s/3",
-                        model,
-                        e.code,
-                        attempt,
-                    )
-
-                    if attempt < 3:
-                        time.sleep(min(2 ** attempt, 8))
-                        continue
-
-                    break
-
-                else:
-                    logger.warning(
-                        "[Gemini] 틱톡 API 오류: model=%s, status=%s",
-                        model,
-                        e.code,
-                    )
-                    break
-
-            except Exception as e:
-                logger.warning(f"틱톡 나래이션 생성 실패 (시도 {attempt}, {model}): {e}")
-                if attempt < 3:
-                    time.sleep(10)
-
-    logger.warning("틱톡 나래이션 생성 전체 실패 — 기본 스크립트 사용")
-    return _fallback_script_tiktok(title, mode), _fallback_hashtags_tiktok(mode)
+        logger.info(
+            f"틱톡 나래이션 스크립트 생성 완료: {len(segs)}개 세그먼트, "
+            f"해시태그 {len(tags)}개"
+        )
+        return segs, tags
+    except Exception as e:
+        logger.warning(f"틱톡 나래이션 생성 전체 실패 — 기본 스크립트 사용: {e}")
+        return _fallback_script_tiktok(title, mode), _fallback_hashtags_tiktok(mode)
 
 
 def _fallback_hashtags_tiktok(mode: str) -> list[str]:
@@ -617,10 +446,6 @@ def _fallback_hashtags_tiktok(mode: str) -> list[str]:
 
 
 # ── 1분 미달 시 덧붙이는 참여 유도(좋아요/팔로우/공유) 마무리 세그먼트 ──────
-# generate_narration_script_tiktok()이 만든 스크립트를 다 읽어도 60초에
-# 못 미치면, 내용을 새로 만들지 않고 이 풀에서 순서대로 골라 이어 붙입니다.
-# 매번 같은 문구가 반복되지 않도록 여러 버전을 준비해 두고 필요한 만큼만
-# 사용합니다 (append_engagement_cta_segments 참고).
 def _engagement_cta_pool(mode: str) -> list[dict]:
     """실제 발행 시각(morning=매일 아침 9시, evening=매일 저녁 9시)에 맞춘
     참여 유도 문구 풀을 반환합니다."""
@@ -640,19 +465,14 @@ def _engagement_cta_pool(mode: str) -> list[dict]:
 def append_engagement_cta_segments(
     segments: list[dict], mode: str, count: int = 1
 ) -> list[dict]:
-    """
-    engagement CTA 세그먼트를 count개만큼 풀에서 순서대로 골라 뒤에 덧붙입니다.
-    같은 스크립트 안에서 중복 문구가 나오지 않도록 이미 쓰인 인덱스를 건너뜁니다.
-    """
+    """engagement CTA 세그먼트를 count개만큼 풀에서 순서대로 골라 뒤에 덧붙입니다."""
     if count <= 0:
         return segments
 
     pool = _engagement_cta_pool(mode)
     extended = list(segments)
-    pool_len = len(pool)
     for i in range(count):
-        cta = dict(pool[i % pool_len])
-        extended.append(cta)
+        extended.append(dict(pool[i % len(pool)]))
     return extended
 
 
@@ -719,112 +539,81 @@ def _fallback_script_tiktok(title: str, mode: str) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TTS: 속도 자동 조정 (핵심 변경 — v7)
+# TTS (v11 — 호출 수 축소 + 백오프 + 연속 실패 시 gTTS 무료 폴백)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_TTS_PACING_SEC = 0.6        # 호출 간 최소 간격 (Microsoft 속도 제한 완화)
+_EDGE_FAIL_LIMIT = 2         # 연속 완전 실패가 이 횟수에 도달하면 edge-tts 건너뜀
+_EDGE_FAIL_STREAK = 0
+
+
+def _rate_to_factor(rate: str) -> float:
+    m = re.fullmatch(r"\s*([+-]\d+)%\s*", rate or "")
+    return 1 + int(m.group(1)) / 100 if m else 1.0
+
+
 async def _tts_async(text: str, path: str, rate: str, voice: str = TTS_VOICE, pitch: str = TTS_PITCH):
-    """지정된 속도/보이스/피치로 TTS 생성."""
     import edge_tts
     comm = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-    await comm.save(path)
+    await asyncio.wait_for(comm.save(path), timeout=45)
 
 
 def _generate_tts_with_rate(
     text: str, path: str, rate: str,
-    voice: str = TTS_VOICE, pitch: str = TTS_PITCH,
+    voice: str = TTS_VOICE, pitch: str = TTS_PITCH, retries: int = 2,
 ) -> bool:
-    """지정 속도/보이스/피치로 TTS 파일 생성. 성공 여부 반환."""
-    try:
-        asyncio.run(_tts_async(text, path, rate, voice, pitch))
-        ok = Path(path).exists() and Path(path).stat().st_size > 500
-        if not ok:
-            logger.warning(f"TTS 파일 생성 실패 또는 너무 작음: {path}")
-        return ok
-    except ImportError:
-        logger.error("edge-tts 미설치 — pip install edge-tts 필요")
-        return False
-    except Exception as e:
-        logger.error(f"TTS 생성 오류 (voice={voice}, rate={rate}): {e}")
-        return False
-
-def _generate_tts_with_voice_fallback(
-    text: str,
-    path: str,
-    rate: str,
-    primary_voice: str,
-    pitch: str,
-) -> bool:
-    """
-    동일한 속도에서 여러 음성을 순서대로 시도합니다.
-
-    403 등 서비스 오류가 발생하면 속도만 바꾸어 반복 호출하는 대신
-    다음 음성으로 전환합니다.
-
-    모든 음성이 실패하면 False를 반환합니다.
-    """
-    voices = list(
-        dict.fromkeys(
-            [primary_voice] + TTS_VOICE_FALLBACKS
-        )
-    )
-
-    last_error_voice = None
-
-    for voice in voices:
+    """edge-tts로 TTS 생성. 오류 유형을 구분해 로그에 남기고 백오프 재시도."""
+    for attempt in range(1, retries + 1):
         try:
-            # 이전 시도에서 불완전한 파일이 남았다면 제거합니다.
-            candidate = Path(path)
-
-            if candidate.exists():
-                candidate.unlink()
-
-            ok = _generate_tts_with_rate(
-                text,
-                str(candidate),
-                rate,
-                voice=voice,
-                pitch=pitch,
-            )
-
-            if ok:
-                duration = _audio_duration(str(candidate))
-
-                if duration > 0:
-                    logger.info(
-                        "[TTS] 생성 성공: voice=%s, rate=%s, duration=%.2fs",
-                        voice,
-                        rate,
-                        duration,
-                    )
-                    return True
-
-                logger.warning(
-                    "[TTS] 파일 길이 확인 실패: voice=%s",
-                    voice,
-                )
-
-            last_error_voice = voice
-
-            logger.warning(
-                "[TTS] 음성 생성 실패: voice=%s. 다음 음성을 시도합니다.",
-                voice,
-            )
-
+            asyncio.run(_tts_async(text, path, rate, voice, pitch))
+            if Path(path).exists() and Path(path).stat().st_size > 500:
+                time.sleep(_TTS_PACING_SEC)
+                return True
+            logger.warning(f"[TTS] 파일이 비었거나 너무 작음: voice={voice}")
+        except ImportError:
+            logger.error("[TTS] edge-tts 미설치 — pip install 'edge-tts>=7.2.7'")
+            return False
         except Exception as e:
-            last_error_voice = voice
-
+            msg = str(e)
             logger.warning(
-                "[TTS] 음성 전환 중 오류: voice=%s, error=%s",
-                voice,
-                e,
+                f"[TTS] edge-tts 실패 voice={voice} rate={rate} "
+                f"({attempt}/{retries}): {type(e).__name__}: {msg[:200]}"
             )
-
-    logger.error(
-        "[TTS] 모든 대체 음성 생성 실패: 마지막 음성=%s",
-        last_error_voice,
-    )
-
+            if "403" in msg:
+                logger.warning(
+                    "[TTS] 403: edge-tts 버전이 낮거나(7.2.7 이상 필요) "
+                    "Microsoft 측 요청 제한일 수 있습니다."
+                )
+        if attempt < retries:
+            time.sleep(2 * attempt)
     return False
+
+
+def _generate_tts_gtts(text: str, path: str, rate: str) -> bool:
+    """edge-tts 장애 시 무료 폴백: Google 번역 TTS + ffmpeg atempo로 속도 조정."""
+    try:
+        from gtts import gTTS
+    except ImportError:
+        logger.warning("[TTS] gTTS 미설치 — 폴백 불가 (pip install gTTS)")
+        return False
+
+    raw = path + ".gtts.mp3"
+    try:
+        gTTS(text=text, lang="ko").save(raw)
+        factor = min(2.0, max(0.5, _rate_to_factor(rate)))
+        _run(["ffmpeg", "-y", "-i", raw, "-filter:a", f"atempo={factor:.3f}", "-vn", path])
+        ok = Path(path).exists() and Path(path).stat().st_size > 500
+        if ok:
+            logger.warning("[TTS] gTTS 폴백 사용 (음색이 다른 세그먼트와 다를 수 있음)")
+        return ok
+    except Exception as e:
+        logger.warning(f"[TTS] gTTS 폴백 실패: {type(e).__name__}: {str(e)[:200]}")
+        return False
+    finally:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _audio_duration(path: str) -> float:
@@ -840,6 +629,48 @@ def _audio_duration(path: str) -> float:
         return 0.0
 
 
+def _generate_tts_with_voice_fallback(
+    text: str, path: str, rate: str, primary_voice: str, pitch: str,
+) -> bool:
+    """edge-tts(음성 순차 폴백) → 실패 시 gTTS. 연속 실패 시 edge-tts 건너뜀."""
+    global _EDGE_FAIL_STREAK
+
+    text = (text or "").strip()
+    if not text:
+        logger.warning("[TTS] 빈 텍스트 — 건너뜀")
+        return False
+
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    if _EDGE_FAIL_STREAK < _EDGE_FAIL_LIMIT:
+        voices = list(dict.fromkeys([primary_voice] + TTS_VOICE_FALLBACKS))
+        for voice in voices:
+            retries = 2 if voice == primary_voice else 1
+            if _generate_tts_with_rate(text, path, rate, voice, pitch, retries=retries):
+                if _audio_duration(path) > 0:
+                    _EDGE_FAIL_STREAK = 0
+                    logger.info(f"[TTS] 생성 성공: voice={voice}, rate={rate}")
+                    return True
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        _EDGE_FAIL_STREAK += 1
+        logger.warning(
+            f"[TTS] edge-tts 전체 실패 (연속 {_EDGE_FAIL_STREAK}/{_EDGE_FAIL_LIMIT})"
+        )
+    else:
+        logger.info("[TTS] edge-tts 연속 실패로 이번 실행에서는 건너뛰고 gTTS 사용")
+
+    if _generate_tts_gtts(text, path, rate) and _audio_duration(path) > 0:
+        return True
+
+    logger.error("[TTS] 모든 TTS 수단 실패 — 해당 세그먼트는 무음 처리됩니다.")
+    return False
+
 
 def _fit_tts_to_budget(
     text: str,
@@ -849,95 +680,41 @@ def _fit_tts_to_budget(
     seg_idx: int,
 ) -> tuple[str | None, float, str]:
     """
-    TTS 생성 후 허용 시간 안에 들어오는 가장 적합한 파일을 선택합니다.
-
-    반환값:
-        (TTS 파일 경로 또는 None, 재생 시간, 사용한 rate)
-
-    모든 음성 및 속도 조합이 실패하면 경로 None을 반환합니다.
+    기본 속도로 1회 생성 → 예산 초과 시 길이 비율로 필요한 속도를 계산해 1회만
+    재생성합니다 (기존: 최대 5단계 × 음성 3개 = 15회 호출 → 최대 2회).
+    반환: (경로 또는 None, 재생 시간, 사용 rate)
     """
-    best_path: str | None = None
-    best_dur = 0.0
-    best_rate = TTS_RATE_STEPS[0]
+    import math
 
-    for rate in TTS_RATE_STEPS:
-        rate_name = rate.replace("+", "p").replace("%", "pct")
-        candidate_path = str(
-            tmp_dir / f"tts_{seg_idx:02d}_{rate_name}.mp3"
-        )
+    base_rate = TTS_RATE_STEPS[0]
+    path1 = str(tmp_dir / f"tts_{seg_idx:02d}_base.mp3")
 
-        # 이전 실행에서 불완전한 파일이 남아 있으면 제거
-        candidate = Path(candidate_path)
-        try:
-            if candidate.exists():
-                candidate.unlink()
-        except OSError as e:
-            logger.warning(
-                "[TTS] 기존 파일 삭제 실패: %s, error=%s",
-                candidate_path,
-                e,
-            )
-            continue
+    if not _generate_tts_with_voice_fallback(text, path1, base_rate, TTS_VOICE, TTS_PITCH):
+        return None, 0.0, base_rate
 
-        # 속도별로 시도하되 각 속도에서 여러 음성을 순차 시도
-        ok = _generate_tts_with_voice_fallback(
-            text=text,
-            path=candidate_path,
-            rate=rate,
-            primary_voice=TTS_VOICE,
-            pitch=TTS_PITCH,
-        )
+    dur = _audio_duration(path1)
+    if dur <= 0:
+        return None, 0.0, base_rate
+    if dur <= budget_sec:
+        return path1, dur, base_rate
 
-        if not ok:
-            logger.warning(
-                "[TTS] 모든 음성 생성 실패: rate=%s, seg=%s",
-                rate,
-                seg_idx,
-            )
-            continue
+    need = _rate_to_factor(base_rate) * dur / max(budget_sec * 0.97, 0.5)
+    target = min(need, _rate_to_factor(TTS_RATE_STEPS[-1]))
+    rate2 = f"+{int(math.ceil((target - 1) * 100))}%"
+    path2 = str(tmp_dir / f"tts_{seg_idx:02d}_fast.mp3")
 
-        dur = _audio_duration(candidate_path)
+    if _generate_tts_with_voice_fallback(text, path2, rate2, TTS_VOICE, TTS_PITCH):
+        dur2 = _audio_duration(path2)
+        if 0 < dur2 < dur:
+            if dur2 > budget_sec:
+                logger.warning(
+                    f"[TTS] 최고 속도에서도 예산 초과: seg={seg_idx}, "
+                    f"{dur2:.2f}s > {budget_sec:.2f}s"
+                )
+            return path2, dur2, rate2
 
-        if dur <= 0:
-            logger.warning(
-                "[TTS] 오디오 길이 확인 실패: path=%s",
-                candidate_path,
-            )
-            continue
-
-        # 허용 시간 이내라면 바로 사용
-        if dur <= budget_sec:
-            logger.info(
-                "[TTS] 시간 예산 충족: seg=%s, rate=%s, duration=%.2fs",
-                seg_idx,
-                rate,
-                dur,
-            )
-            return candidate_path, dur, rate
-
-        # 예산 초과 파일 중 가장 짧은 파일을 보관
-        if best_path is None or dur < best_dur:
-            best_path = candidate_path
-            best_dur = dur
-            best_rate = rate
-
-    if best_path is not None:
-        logger.warning(
-            "[TTS] 예산 내 파일 없음. 가장 짧은 음성을 사용합니다: "
-            "seg=%s, duration=%.2fs, budget=%.2fs",
-            seg_idx,
-            best_dur,
-            budget_sec,
-        )
-        return best_path, best_dur, best_rate
-
-    logger.error(
-        "[TTS] 모든 음성 및 속도 시도 실패: seg=%s. "
-        "호출부에서 무음 처리 여부를 결정해야 합니다.",
-        seg_idx,
-    )
-    return None, 0.0, best_rate
-
+    logger.warning(f"[TTS] 속도 조정 실패, 기본 속도 음성 사용: seg={seg_idx}, {dur:.2f}s")
+    return path1, dur, base_rate
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1046,11 +823,8 @@ def _draw_outlined(draw, pos, text, font, fill, outline=(0, 0, 0), ow=3):
 def _text_size(draw, text, font) -> tuple[int, int, int]:
     """
     텍스트의 (너비, 높이, 상단 오프셋)을 반환합니다.
-    상단 오프셋(bbox[1])은 폰트마다 다른 글리프 상단 여백으로, 이 값을
-    무시하고 y좌표만으로 배치하면 텍스트가 박스 안에서 아래로 치우쳐
-    보이는 원인이 됩니다 (예: 도형 안 키워드 텍스트가 세로 중앙이 아니라
-    아래쪽에 쏠려 보이는 현상). 세로 중앙 정렬 시 이 오프셋을 반드시
-    빼줘야 실제 글리프가 박스 정중앙에 오게 됩니다.
+    상단 오프셋(bbox[1])은 폰트마다 다른 글리프 상단 여백으로, 세로 중앙 정렬 시
+    이 오프셋을 반드시 빼줘야 실제 글리프가 박스 정중앙에 옵니다.
     """
     bbox = draw.textbbox((0, 0), text, font=font)
     width  = bbox[2] - bbox[0]
@@ -1064,10 +838,7 @@ def _draw_text_v_centered(
     box_top: int, box_height: int, center_x: int,
     outline: tuple | None = None, ow: int = 2,
 ) -> None:
-    """
-    주어진 박스 영역(box_top ~ box_top+box_height) 안에서 텍스트를 정확히
-    세로 중앙 정렬하고, 가로로는 center_x를 기준으로 가운데 정렬합니다.
-    """
+    """박스 영역 안에서 텍스트를 세로 중앙, center_x 기준 가로 중앙 정렬합니다."""
     width, height, top_offset = _text_size(draw, text, font)
     x = center_x - width // 2
     y = box_top + (box_height - height) // 2 - top_offset
@@ -1094,16 +865,11 @@ def _make_slide(
     """
     슬라이드 이미지 생성:
     - 상단: 진행 바 + 슬라이드 번호 + (속도 가속 배지, rate가 기본이 아닐 때만)
-    - 중앙: 키워드 강조 박스 (크고 눈에 띄게)
-    - 키워드 아래: 부연설명 텍스트 (반투명 배경)
-    - 나래이션 자막: safe_bottom_zone=False → 화면 최하단
-                     safe_bottom_zone=True  → 화면 하단 22% 지점 (TikTok 자체
-                     캡션·프로필·버튼 UI가 차지하는 하단 영역과 겹치지 않도록
-                     위로 이동. 틱톡 앱은 계정명·캡션·해시태그를 화면 하단
-                     ~18~22% 구간에 렌더링하므로, 우리 자막이 그 위쪽에서
-                     끝나야 서로 겹치지 않음)
-    - safe_bottom_zone=True일 때만: 나래이션 자막 아래 해시태그 배지 표시
-    - 최하단(safe_bottom_zone=False일 때만): 워터마크
+    - 중앙: 키워드 강조 박스 / 키워드 아래: 부연설명
+    - 나래이션 자막: safe_bottom_zone=False → 화면 최하단,
+                     True → TikTok UI(하단 ~20%)를 피해 중하단
+    - safe_bottom_zone=True일 때만: 나래이션 자막 아래 해시태그 표시
+    - safe_bottom_zone=False일 때만: 최하단 워터마크
     """
     W, H   = VIDEO_W, VIDEO_H
     img    = bg.copy()
@@ -1116,7 +882,6 @@ def _make_slide(
     CX        = W // 2
     WRAP_PX   = W - 80
 
-    # 폰트
     f_badge    = _load_font(34, bold=True)
     f_keyword  = _load_font(108, bold=True)
     f_desc     = _load_font(50, bold=False)
@@ -1192,8 +957,6 @@ def _make_slide(
     draw.rectangle([(CX - 130, line_y), (CX + 130, line_y + 6)], fill=(*highlight, 220))
 
     # ── 부연설명 (키워드 아래) ────────────────────────────────────────────────
-    # 자동 줄바꿈 폭을 화면 폭의 약 78%로 좁혀, 긴 설명도 자연스럽게
-    # 2~3줄로 나뉘어 시각적으로 편안하게 읽히도록 함
     desc_clean  = _strip_emoji(description)
     desc_wrap_px = int(WRAP_PX * 0.78)
     desc_lines  = _pixel_wrap(desc_clean, f_desc, desc_wrap_px)
@@ -1220,12 +983,11 @@ def _make_slide(
     narr_lines  = _pixel_wrap(narr_clean, f_narr, WRAP_PX - 40)[:4]
     narr_line_h = 55
     narr_total  = len(narr_lines) * narr_line_h + 36
-    narr_left_x = 48  # 왼쪽 정렬 시작 x좌표 (배경 패딩 고려)
+    narr_left_x = 48
 
     if safe_bottom_zone:
-        # 틱톡 모드: TikTok 자체 UI(계정명·캡션·좋아요/공유 버튼)가 차지하는
-        # 하단 ~20% 영역을 피해서, 자막 블록의 "아래쪽 끝"이 H*0.76 지점에
-        # 오도록 배치 (화면 최하단이 아니라 중하단에서 자막이 끝남)
+        # 틱톡 모드: TikTok 자체 UI가 차지하는 하단 ~20% 영역을 피해서
+        # 자막 블록의 "아래쪽 끝"이 H*0.76 지점에 오도록 배치
         narr_y = int(H * 0.76) - narr_total
     else:
         narr_y = H - narr_total - 54
@@ -1238,12 +1000,11 @@ def _make_slide(
 
     ny = narr_y + 6
     for line in narr_lines:
-        # 나래이션은 가독성을 위해 왼쪽 정렬 (기존 가운데 정렬에서 변경)
         _draw_outlined(draw, (narr_left_x, ny), line, f_narr, (255, 255, 255), ow=2)
         ny += narr_line_h
 
     if safe_bottom_zone:
-        # ── 해시태그 배지 (자막 바로 아래, 여전히 TikTok UI 영역보다 위) ────
+        # 해시태그 (자막 바로 아래, 여전히 TikTok UI 영역보다 위)
         if hashtags:
             tag_text = "  ".join(f"#{t}" for t in hashtags[:4])
             tb = draw.textbbox((0, 0), tag_text, font=f_tag)
@@ -1253,10 +1014,8 @@ def _make_slide(
                 draw, (CX - tw // 2, tag_y), tag_text, f_tag,
                 (*highlight, 255), outline=(0, 0, 0), ow=2
             )
-        # 틱톡 모드에서는 하단 20%를 완전히 비워두므로 워터마크 생략
-        # (TikTok 자체 UI와 겹칠 수 있는 최하단 텍스트를 추가하지 않음)
     else:
-        # ── 워터마크 (쇼츠/릴스 모드에서만 최하단에 표시) ────────────────────
+        # 워터마크 (쇼츠/릴스 모드에서만 최하단에 표시)
         wm  = "seedsup.tistory.com"
         wbb = draw.textbbox((0, 0), wm, font=f_wm)
         ww  = wbb[2] - wbb[0]
@@ -1266,8 +1025,8 @@ def _make_slide(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 배경 이미지 확보 (Cloudflare Workers AI / Pexels — 관련성 없는 무작위
-# 사진(picsum)은 v10에서 제거, 실패 시 브랜드 그라디언트로 대체)
+# 배경 이미지 확보 (Cloudflare Workers AI / Pexels / Pixabay —
+# 모두 실패하면 _prepare_bg()가 브랜드 그라디언트로 대체)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _download_bg_cloudflare(
@@ -1277,16 +1036,7 @@ def _download_bg_cloudflare(
     """
     Cloudflare Workers AI(FLUX.1-schnell)로 영상 배경을 새로 생성합니다.
     무료 한도(하루 10,000 뉴런, 매일 자정 UTC 초기화) 안에서 신용카드 등록
-    없이 사용 가능합니다.
-
-    블로그 대표 썸네일(image_generator.py)은 중앙에 제목 텍스트를 굽기 때문에,
-    그 이미지를 영상 배경으로 재사용하면 슬라이드 자체의 키워드 박스·자막과
-    겹쳐 보이는 문제가 있었습니다 (v9에서 제거). 그래서 영상 배경은 항상
-    텍스트가 전혀 없는 이 함수의 결과물을 우선 사용합니다.
-
-    CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN이 없으면 조용히 실패(False)
-    반환 — 호출부가 Pexels로 자동 폴백하고, 그마저 실패하면 브랜드
-    그라디언트를 사용합니다 (v10 — 콘텐츠와 무관한 사진이 나오는 것을 방지).
+    없이 사용 가능합니다. 키가 없으면 조용히 False를 반환합니다.
     """
     if not cf_account_id or not cf_api_token:
         return False
@@ -1295,9 +1045,8 @@ def _download_bg_cloudflare(
     suffix = FLUX_SUFFIX_VIDEO.get(mode, FLUX_SUFFIX_VIDEO["morning"])
     full_prompt = f"{prompt}{suffix}"
 
-    # 주의: flux-1-schnell의 공식 입력 스키마는 prompt(필수)와 steps(기본 4,
-    # 최대 8)만 받습니다 — width/height는 지원하지 않으므로 요청하지 않고,
-    # _prepare_bg()가 어떤 원본 비율이 와도 1080x1920으로 알아서 크롭합니다.
+    # flux-1-schnell의 공식 입력 스키마는 prompt(필수)와 steps(기본 4, 최대 8)만
+    # 받습니다 — width/height/seed는 보내면 400으로 거부됩니다.
     url = f"{CF_API_BASE}/{cf_account_id}/ai/run/{CF_FLUX_MODEL}"
     payload = {"prompt": full_prompt, "steps": 8}
 
@@ -1318,8 +1067,6 @@ def _download_bg_cloudflare(
             )
             return False
 
-        # 응답이 JSON(+base64)이 아니라 raw 이미지 바이너리로 올 가능성도
-        # 방어적으로 함께 처리합니다.
         content_type = resp.headers.get("Content-Type", "")
         if content_type.startswith("image/"):
             img_bytes = resp.content
@@ -1345,12 +1092,7 @@ def _download_bg_cloudflare(
 
 
 def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> bool:
-    """
-    Pexels에서 영상 배경 사진을 찾습니다. keywords 리스트를 순서대로 모두
-    시도합니다 — 첫 번째 키워드로 검색 결과가 없으면(0건) 그냥 실패 처리하지
-    않고 다음 키워드로 계속 시도해, 콘텐츠와 무관한 배경으로 빠지는 것을
-    최대한 막습니다.
-    """
+    """Pexels에서 영상 배경 사진을 찾습니다. keywords를 순서대로 모두 시도합니다."""
     if not pexels_key:
         return False
 
@@ -1383,11 +1125,10 @@ def _download_bg_pexels(keywords: list[str], dest: Path, pexels_key: str) -> boo
 
     logger.warning(f"Pexels: 모든 키워드 시도 실패 {queries}")
     return False
-  
+
 
 def _download_bg_pixabay(keywords: list[str], dest: Path, pixabay_key: str) -> bool:
-    """Pexels 실패 시 마지막으로 시도하는 실사진 소스. 브랜드 그라디언트로
-    넘어가기 전, 콘텐츠와 관련 있는 이미지를 한 번 더 찾아봅니다."""
+    """Pexels 실패 시 마지막으로 시도하는 실사진 소스."""
     if not pixabay_key:
         return False
     queries = keywords if keywords else ["finance"]
@@ -1419,31 +1160,6 @@ def _download_bg_pixabay(keywords: list[str], dest: Path, pixabay_key: str) -> b
             continue
     logger.warning(f"Pixabay: 모든 키워드 시도 실패 {queries}")
     return False
-
-
-def _download_bg_picsum_DEPRECATED_unused(dest: Path, seed: int = 0) -> bool:
-    """
-    [v10에서 사용 중단] picsum.photos는 검색/키워드 필터링이 전혀 불가능한
-    "완전 무작위" 스톡사진 서비스입니다 (seed 번호로 아무 사진이나 반환 —
-    나스닥 관련 영상에 식물·동물·풍경 사진이 나올 수 있음). 나레이션·채널
-    주제와 무관한 배경이 나온다는 실사용 리포트가 있어, 이 함수는 더 이상
-    generate()/generate_tiktok() 어디에서도 호출되지 않습니다. 대신 Cloudflare
-    Workers AI와 Pexels가 모두 실패하면 _prepare_bg()가 자동으로 적용하는
-    브랜드 그라디언트(_make_gradient_bg, 모드별 파란색/보라색 톤)로 대체됩니다
-    — 최소한 콘텐츠와 "무관한" 이미지가 나오는 일은 없습니다.
-    """
-    try:
-        url  = f"https://picsum.photos/seed/{seed}/1080/1920"
-        resp = requests.get(url, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        if len(resp.content) < 10_000:
-            return False
-        dest.write_bytes(resp.content)
-        Image.open(dest).verify()
-        return True
-    except Exception as e:
-        logger.warning(f"picsum 실패: {e}")
-        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1479,22 +1195,6 @@ def _concat_clips(clip_paths: list[str], out_path: str):
     finally:
         os.unlink(lst)
 
-def _repeat_video_twice(video_path: str, out_path: str):
-    """
-    완성된 영상을 통째로 2회 반복한다.
-
-    영상과 오디오를 함께 반복하므로,
-    최종적으로 동일한 영상과 나래이션이 2회 재생된다.
-    """
-    _run([
-        "ffmpeg",
-        "-y",
-        "-stream_loop", "1",
-        "-i", video_path,
-        "-c", "copy",
-        "-movflags", "+faststart",
-        out_path,
-    ])
 
 def _merge_audio_to_video(video: str, tts_segments: list[dict], total_dur: float, out: str):
     """
@@ -1556,8 +1256,7 @@ class VideoGenerator:
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "").strip()
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        # 영상 배경 전용 Cloudflare Workers AI (블로그 썸네일과는 별개로
-        # 텍스트 없는 새 배경을 생성하는 데 사용 — v9)
+        # 영상 배경 전용 Cloudflare Workers AI (텍스트 없는 새 배경 생성)
         self.cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
         self.cf_api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         self.last_tiktok_hashtags: list[str] = []  # generate_tiktok() 호출 후 채워짐
@@ -1592,31 +1291,19 @@ class VideoGenerator:
 
         logger.info(f"나래이션 세그먼트: {len(narration_segments)}개")
 
-        with tempfile.TemporaryDirectory(prefix="shorts_v9_") as tmp_s:
+        with tempfile.TemporaryDirectory(prefix="shorts_v11_") as tmp_s:
             tmp = Path(tmp_s)
 
-            # 2. 배경 이미지 확보
-            # 주의(v9): 티스토리 대표 썸네일(thumbnail_url)은 image_generator.py가
-            # 중앙에 블로그 제목 텍스트를 굽기 때문에, 그 이미지를 영상 배경으로
-            # 재사용하면 여기서 그리는 키워드 박스·자막과 겹쳐 부조화스럽게
-            # 보입니다 (실제 리포트된 버그). 그래서 더 이상 thumbnail_url을
-            # 배경으로 쓰지 않고, 항상 텍스트 없는 새 이미지를 생성/수집합니다:
-            #   1순위: Cloudflare Workers AI (완전 무료, bg_keywords 기반 생성)
-            #   2순위: Pexels (bg_keywords 전체를 순서대로 검색)
-            # [v10] 기존 3순위였던 picsum.photos는 제거했습니다 — picsum은
-            # 검색/키워드 필터링이 아예 불가능한 "완전 무작위" 사진 서비스라
-            # 나스닥 시황 나레이션에 식물·동물 사진이 나오는 등 콘텐츠와 전혀
-            # 무관한 배경이 나올 수 있다는 리포트가 있었습니다. 1·2순위가 모두
-            # 실패하면(예: 두 API 키 모두 미설정) 무관한 사진 대신 차라리
-            # _prepare_bg()의 브랜드 그라디언트(모드별 파란색/보라색 톤)를
-            # 그대로 쓰는 편이 콘텐츠 집중도를 해치지 않습니다.
+            # 2. 배경 이미지 확보 (blog thumbnail_url은 제목 텍스트가 박혀 있어 사용 안 함)
+            #   1순위: Cloudflare Workers AI → 2순위: Pexels → 3순위: Pixabay
+            #   모두 실패하면 _prepare_bg()의 브랜드 그라디언트 사용
             bg_path = tmp / "bg.jpg"
             bg_ok   = _download_bg_cloudflare(
                 kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
             )
             if not bg_ok:
                 bg_ok = _download_bg_pexels(kws, bg_path, self.pexels_key)
-            if not bg_ok:                                   # ← 신규
+            if not bg_ok:
                 bg_ok = _download_bg_pixabay(kws, bg_path, self.pixabay_key)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
@@ -1644,8 +1331,6 @@ class VideoGenerator:
                     break
 
                 # 이 세그먼트에 할당할 TTS 최대 허용 시간
-                # tail(여유) 포함 슬라이드 최대 = remaining 전체
-                # TTS budget = remaining - SLIDE_TAIL_SEC
                 tts_budget = remaining - SLIDE_TAIL_SEC
 
                 logger.info(
@@ -1653,7 +1338,7 @@ class VideoGenerator:
                     f"budget={tts_budget:.2f}s | {narration[:30]}..."
                 )
 
-                # TTS 생성 (속도 자동 조정 — v7 핵심)
+                # TTS 생성 (속도 자동 조정)
                 tts_path, tts_dur, used_rate = _fit_tts_to_budget(
                     narration,
                     str(tmp / f"tts_{i:02d}.mp3"),
@@ -1662,21 +1347,15 @@ class VideoGenerator:
                     i,
                 )
 
-                
                 if tts_path is None:
                     logger.error(
-                        "[TTS] 세그먼트 %s 생성 실패 — 무음 슬라이드로 처리합니다.",
-                        i,
+                        "[TTS] 세그먼트 %s 생성 실패 — 무음 슬라이드로 처리합니다.", i,
                     )
-                    # TTS가 없더라도 슬라이드는 표시할 수 있도록 시간을 확보합니다.
                     tts_dur = min(2.5, tts_budget)
 
-
-                # 슬라이드 표시 시간 = TTS 실제 길이 + tail
-                # (remaining을 넘지 않도록 클리핑)
+                # 슬라이드 표시 시간 = TTS 실제 길이 + tail (remaining을 넘지 않도록)
                 slide_dur = min(tts_dur + SLIDE_TAIL_SEC, remaining)
 
-                # 슬라이드 이미지 생성 (사용된 속도를 배지로 전달)
                 slide_img = _make_slide(
                     narration, keyword, description,
                     theme, i, total, bg_img,
@@ -1686,14 +1365,11 @@ class VideoGenerator:
                 img_path  = str(tmp / f"slide_{i:02d}.png")
                 slide_img.save(img_path, "PNG", optimize=False)
 
-                # 이미지 → MP4 클립 (슬라이드 표시 시간)
                 clip_path = str(tmp / f"clip_{i:02d}.mp4")
                 _image_to_clip(img_path, slide_dur, clip_path)
                 slide_clips.append(clip_path)
 
                 # TTS 오디오 배치 (슬라이드 시작 후 0.15초 딜레이)
-                # tts_path가 None이면 모든 속도 시도가 실패한 것이므로
-                # (실제 파일 없음) tts_segments에 추가하지 않고 무음 슬라이드로 둠
                 if tts_path:
                     tts_segments.append({
                         "path":  tts_path,
@@ -1761,38 +1437,23 @@ class VideoGenerator:
         틱톡 수익화 조건(1분 이상) 충족 전용 영상 생성 (이탈률 개선 버전).
 
         쇼츠(generate)와의 차이:
-          - MAX_VIDEO_SEC 제한 없음 — 세그먼트 수/TTS 길이에 따라 자연스럽게 결정
-          - 밝고 빠른 젊은 여성 목소리(TTS_VOICE_TIKTOK, +38%) — 쇼츠와 차별화된
-            텐션으로 이탈률 개선
-          - 세그먼트 5~7개, 전체 55~70초 (기존 8~12개/90초+에서 축소 —
-            늘어지는 러닝타임 자체가 이탈의 주요 원인이었음)
-          - 나래이션 자막을 화면 하단 안전 영역(safe_bottom_zone)에 배치해
-            TikTok 자체 캡션·계정명 UI와 겹치지 않도록 함
-          - 세그먼트 간 TTS 이어붙임 gap을 최소화(TTS_GAP_SEC_TIKTOK)해
-            음성 끊김 체감 완화
-          - 해시태그를 화면에도 표시하고, 대시보드/발행용 콘텐츠에도 반환
+          - MAX_VIDEO_SEC 제한 없음
+          - 밝고 빠른 젊은 여성 목소리(TTS_VOICE_TIKTOK, +38%)
+          - 나래이션 자막을 하단 안전 영역(safe_bottom_zone)에 배치
+          - 해시태그를 화면에도 표시하고 발행용 콘텐츠에도 반환
           - [1분 미달 방지]
             1차 나래이션이 60초 미만이면 참여 유도 CTA를 1개만 추가합니다.
-            CTA 1개를 추가한 뒤에도 60초 미만이면 CTA를 반복하지 않고,
-            기존 블로그 내용을 유지하면서 더 긴 나래이션을 Gemini로 재생성합니다.
-            확장 나래이션으로 다시 영상을 생성한 뒤에도 60초 미만이면
-            영상 반복으로 길이를 채우지 않고 생성 실패로 처리합니다.
-            최종 영상은 60초 이상인 경우에만 반환합니다.
-            동일 CTA를 여러 번 반복하지 않는 것을 최우선으로 합니다.
-            빠른 여성 목소리(+38%)는 같은 텍스트도 남성 기본 속도보다 짧게
-            끝나므로, 스크립트 생성만으로는 60초를 못 채우는 경우가 있어
-            이 런타임 보강 단계가 최종 안전장치 역할을 합니다.
-          - [v9→v10] 배경도 generate()와 동일하게 thumbnail_url을 쓰지 않고
-            Pexels(1순위, 더 역동적인 톤, 키워드 전체 순차 시도) → Cloudflare
-            Workers AI(2순위) 순서로 텍스트 없는 이미지만 사용합니다. 둘 다
-            실패하면(v10) 무관한 무작위 사진 대신 브랜드 그라디언트를 씁니다.
+            그래도 미달이면 CTA를 반복하지 않고 기존 내용을 유지한 채 더 긴
+            나래이션을 Gemini로 재생성합니다. 확장 후에도 60초 미만이면
+            영상을 반복해 길이를 채우지 않고 생성 실패로 처리합니다.
+          - 배경: Pexels(역동적 톤) → Cloudflare Workers AI → Pixabay →
+            브랜드 그라디언트 (블로그 썸네일은 제목 텍스트가 있어 사용 안 함)
         """
         theme = THEMES.get(mode, THEMES["morning"])
-        # bg_keywords가 명시적으로 전달되지 않았으면 틱톡 전용(더 역동적인) 키워드 사용
         kws   = bg_keywords or PEXELS_KEYWORDS_TIKTOK.get(mode, PEXELS_KEYWORDS_TIKTOK["morning"])
         out   = os.path.join(self.output_dir, filename)
 
-        # 1. 틱톡 전용 나래이션 스크립트 생성 (5~7개 세그먼트 + 해시태그)
+        # 1. 틱톡 전용 나래이션 스크립트 생성 (6~7개 세그먼트 + 해시태그)
         logger.info("틱톡 나래이션 스크립트 생성 중 (Gemini API)...")
         if blog_content and self.gemini_key:
             narration_segments, hashtags = generate_narration_script_tiktok(
@@ -1807,9 +1468,7 @@ class VideoGenerator:
         if not hashtags:
             hashtags = _fallback_hashtags_tiktok(mode)
 
-        # 이탈률 방지를 위해 세그먼트 수를 강제로도 상한선 적용 (최대 7개).
-        # 단, 이 상한은 "본편" 세그먼트에만 적용 — 60초 미달 시 뒤에 붙는
-        # 참여 유도 CTA 세그먼트는 이 개수에 포함되지 않습니다.
+        # 세그먼트 수 상한 (본편 기준, 이후 붙는 참여 유도 CTA는 포함되지 않음)
         if len(narration_segments) > 9:
             logger.warning(
                 f"틱톡 세그먼트 {len(narration_segments)}개 → 9개로 축소"
@@ -1820,20 +1479,12 @@ class VideoGenerator:
             f"틱톡 나래이션 세그먼트: {len(narration_segments)}개, "
             f"해시태그: {hashtags}"
         )
-        self.last_tiktok_hashtags = hashtags  # 발행 파이프라인에서 참조 가능하도록 보관
+        self.last_tiktok_hashtags = hashtags
 
-        with tempfile.TemporaryDirectory(prefix="tiktok_v9_") as tmp_s:
+        with tempfile.TemporaryDirectory(prefix="tiktok_v11_") as tmp_s:
             tmp = Path(tmp_s)
 
-            # 2. 배경 이미지 확보 (v9: thumbnail_url 재사용 제거)
-            # 쇼츠와 차별화 — 틱톡은 역동적인 Pexels 배경을 1순위로 시도하고,
-            # 실패 시 Cloudflare Workers AI(텍스트 없는 새 이미지)로 폴백합니다.
-            # 블로그 대표 썸네일은 제목 텍스트가 박혀 있어 더 이상 후보에
-            # 넣지 않습니다. [v10] 기존 최종 폴백이던 picsum.photos(완전
-            # 무작위 사진, 키워드 필터링 불가)도 제거했습니다 — 나스닥 시황
-            # 나레이션에 식물·동물 사진이 나오는 등 콘텐츠와 무관한 배경이
-            # 나올 수 있어, 두 소스가 모두 실패하면 차라리 _prepare_bg()의
-            # 브랜드 그라디언트를 그대로 씁니다.
+            # 2. 배경 이미지 확보
             bg_path = tmp / "bg.jpg"
             bg_ok   = _download_bg_pexels(kws, bg_path, self.pexels_key)
 
@@ -1841,7 +1492,7 @@ class VideoGenerator:
                 bg_ok = _download_bg_cloudflare(
                     kws, mode, bg_path, self.cf_account_id, self.cf_api_token,
                 )
-            if not bg_ok:                                   # ← 신규
+            if not bg_ok:
                 bg_ok = _download_bg_pixabay(kws, bg_path, self.pixabay_key)
 
             bg_img = _prepare_bg(bg_path if bg_ok else None, theme["overlay"], mode)
@@ -1858,7 +1509,6 @@ class VideoGenerator:
 
             while True:
                 total = len(all_segments)
-                # 아직 렌더링하지 않은 세그먼트만 순서대로 처리
                 for i in range(rendered_count + 1, total + 1):
                     seg = all_segments[i - 1]
                     narration   = _strip_emoji(seg.get("narration", ""))
@@ -1866,13 +1516,10 @@ class VideoGenerator:
                     description = _strip_emoji(seg.get("description", ""))
 
                     is_hook = (i == 1)
-                    # 해시태그/CTA 배너는 "현재 라운드의 마지막"이 아니라 "이후에
-                    # CTA가 더 붙을 가능성이 있는지"를 감안해서 판단해야 합니다.
-                    # cta_rounds가 이미 MAX_CTA_ROUNDS에 도달했거나 이번 세그먼트
-                    # 렌더링 후 60초를 넘길 게 확실하지 않다면, 안전하게 "60초를
-                    # 넘긴 이후에 마지막으로 렌더링되는 세그먼트에만" 표시되도록
-                    # 실제 최종 여부는 라운드 종료 후 별도 후처리로 확정합니다.
-                    is_cta  = False  # 아래 최종 후처리 단계에서 마지막 슬라이드에만 다시 그림
+                    # 몇 개의 세그먼트가 추가될지 미리 알 수 없으므로 여기서는
+                    # 모두 is_cta=False로 그리고, 최종 마지막 슬라이드만 아래에서
+                    # 해시태그·CTA 배너와 함께 다시 그립니다.
+                    is_cta  = False
 
                     logger.info(
                         f"[틱톡] 슬라이드 {i}/{total}: [{keyword}] "
@@ -1895,37 +1542,30 @@ class VideoGenerator:
 
                         if tts_dur <= 0:
                             logger.error(
-                                "[틱톡] 슬라이드 %s TTS 파일의 길이를 확인할 수 없습니다.",
-                                i,
+                                "[틱톡] 슬라이드 %s TTS 파일의 길이를 확인할 수 없습니다.", i,
                             )
                             tts_ok = False
 
                     if not tts_ok:
                         logger.error(
-                            "[틱톡] 슬라이드 %s TTS 생성 실패. "
-                            "해당 슬라이드는 무음으로 처리됩니다.",
-                            i,
+                            "[틱톡] 슬라이드 %s TTS 생성 실패. 해당 슬라이드는 무음으로 처리됩니다.", i,
                         )
-
                         tts_dur = 4.0
 
-                    # 슬라이드 표시 시간 = TTS 길이 + 최소 여유(gap).
+                    # 슬라이드 표시 시간 = TTS 길이 + 최소 여유(gap)
                     slide_dur = tts_dur + TTS_GAP_SEC_TIKTOK
 
-                    # 슬라이드 이미지 생성 (safe_bottom_zone=True — TikTok UI 회피,
-                    # 마지막 세그먼트에서만 해시태그 표시)
                     slide_img = _make_slide(
                         narration, keyword, description,
                         theme, i, total, bg_img,
                         is_hook, is_cta,
-                        tts_rate=TTS_RATE_STEPS[0],  # 속도 배지 로직 재사용 안 함(항상 미표시)
+                        tts_rate=TTS_RATE_STEPS[0],
                         safe_bottom_zone=True,
-                        hashtags=hashtags if is_cta else None,
+                        hashtags=None,
                     )
                     img_path  = str(tmp / f"slide_{i:02d}.png")
                     slide_img.save(img_path, "PNG", optimize=False)
 
-                    # 이미지 → MP4 클립
                     clip_path = str(tmp / f"clip_{i:02d}.mp4")
                     _image_to_clip(img_path, slide_dur, clip_path)
                     slide_clips.append(clip_path)
@@ -1948,34 +1588,31 @@ class VideoGenerator:
 
                 if current_time >= 60.0:
                     break
-                
+
                 # CTA는 딱 한 번만 추가한다.
                 if cta_rounds == 0:
                     cta_rounds = 1
-                
+
                     logger.warning(
                         f"[틱톡] 현재 {current_time:.2f}초로 1분 미달 — "
                         "참여 유도 CTA 1개만 추가합니다."
                     )
-                
+
                     all_segments = append_engagement_cta_segments(
-                        all_segments,
-                        mode,
-                        count=1,
+                        all_segments, mode, count=1,
                     )
-                
                     continue
-                
+
                 # CTA 1개를 추가했는데도 60초 미달이면
                 # CTA를 또 추가하지 않고, 전체 나래이션을 길게 재생성한다.
                 if not extended_narration_used:
                     extended_narration_used = True
-                
+
                     logger.warning(
                         f"[틱톡] CTA 1회 추가 후에도 {current_time:.2f}초로 1분 미달 — "
                         "나래이션 확장 재생성을 시작합니다."
                     )
-                
+
                     extended_segments, extended_hashtags = generate_narration_script_tiktok(
                         blog_content,
                         blog_title,
@@ -1983,21 +1620,21 @@ class VideoGenerator:
                         self.gemini_key,
                         extended=True,
                     )
-                
+
                     if extended_segments:
                         narration_segments = extended_segments
-                
+
                         if extended_hashtags:
                             hashtags = extended_hashtags
                             self.last_tiktok_hashtags = hashtags
-                
+
                         logger.info(
                             f"[틱톡] 확장 나래이션 재생성 완료: "
                             f"{len(narration_segments)}개 세그먼트"
                         )
-                
+
                         all_segments = list(narration_segments)
-                
+
                         # 기존 렌더링 결과를 모두 폐기하고 처음부터 다시 렌더링
                         slide_clips = []
                         slide_durs = []
@@ -2005,37 +1642,31 @@ class VideoGenerator:
                         current_time = 0.0
                         rendered_count = 0
                         cta_rounds = 0
-                
+
                         continue
-                
+
                     logger.warning(
                         "[틱톡] 확장 나래이션 재생성 실패 — 기존 영상으로 진행합니다."
                     )
-                
+
                 break
 
             if not slide_clips:
                 raise RuntimeError("[틱톡] 생성된 슬라이드 클립이 없습니다.")
 
-            # TTS 생성 성공률 검사
+            # TTS 생성 성공률 검사 — 음성 없는 영상이 정상 결과물로 취급되는 것을 방지
             total_segments = len(all_segments)
             successful_tts = len(tts_segments)
 
             tts_success_rate = (
-                successful_tts / total_segments
-                if total_segments > 0
-                else 0.0
+                successful_tts / total_segments if total_segments > 0 else 0.0
             )
 
             logger.info(
                 "[틱톡] TTS 성공률: %s/%s (%.1f%%)",
-                successful_tts,
-                total_segments,
-                tts_success_rate * 100,
+                successful_tts, total_segments, tts_success_rate * 100,
             )
 
-            # 음성 없는 영상이 정상 결과물로 취급되는 것을 방지합니다.
-            # 성공률이 70% 미만이면 생성 실패로 처리합니다.
             if total_segments == 0 or tts_success_rate < 0.70:
                 raise RuntimeError(
                     "[틱톡] TTS 생성 성공률 부족: "
@@ -2044,12 +1675,8 @@ class VideoGenerator:
                     "음성 서비스 상태를 확인한 후 다시 실행하세요."
                 )
 
-            # ── 최종 마지막 슬라이드만 is_cta=True로 다시 렌더링 ───────────────
-            # 위 루프에서는 몇 개의 세그먼트가 추가될지 미리 알 수 없어 모든
-            # 세그먼트를 is_cta=False로 그렸습니다. 이제 전체 세그먼트 수가
-            # 확정됐으므로, 실제 마지막 슬라이드(해시태그·CTA 배너가 보여야
-            # 하는 화면)만 다시 그려서 해당 클립 하나만 교체합니다. TTS는
-            # 이미 생성된 것을 재사용하므로 음성/타이밍에는 영향이 없습니다.
+            # ── 최종 마지막 슬라이드만 is_cta=True + 해시태그로 다시 렌더링 ────
+            # TTS는 이미 생성된 것을 재사용하므로 음성/타이밍에는 영향이 없습니다.
             final_total = len(all_segments)
             final_seg   = all_segments[-1]
             final_narration   = _strip_emoji(final_seg.get("narration", ""))
@@ -2067,15 +1694,8 @@ class VideoGenerator:
             final_img_path  = str(tmp / f"slide_{final_total:02d}_final.png")
             final_slide_img.save(final_img_path, "PNG", optimize=False)
 
-            # 마지막 클립의 재생 시간은 렌더링 당시 계산된 slide_durs[-1]을
-            # 그대로 재사용합니다 (이미지만 교체, 음성 타이밍은 원래 값 유지).
-            #
-            # 주의: 이전 버전은 tts_segments[-1]에서 길이를 다시 구했는데,
-            # 만약 실제 마지막 세그먼트의 TTS 생성이 실패했다면(tts_ok=False)
-            # 그 세그먼트는 tts_segments에 추가되지 않으므로 tts_segments[-1]이
-            # 그 이전(성공한) 세그먼트를 가리키게 되어 재생 시간이 실제 마지막
-            # 슬라이드와 어긋나는 버그가 있었습니다. slide_durs는 성공/실패와
-            # 무관하게 매 세그먼트마다 항상 추가되므로 이 문제가 없습니다.
+            # 마지막 클립의 재생 시간은 렌더링 당시 계산된 slide_durs[-1]을 재사용
+            # (TTS 성공/실패와 무관하게 세그먼트마다 항상 추가되므로 안전)
             last_slide_dur = slide_durs[-1] if slide_durs else 4.0 + TTS_GAP_SEC_TIKTOK
             final_clip_path = str(tmp / f"clip_{final_total:02d}_final.mp4")
             _image_to_clip(final_img_path, last_slide_dur, final_clip_path)
@@ -2089,19 +1709,8 @@ class VideoGenerator:
                 f"— {'✅ 1분 초과' if total_duration >= 60 else '⚠️ 1분 미달'}"
             )
 
-            # 4. 클립 합치기
-            silent_video = str(tmp / "silent.mp4")
-            _concat_clips(slide_clips, silent_video)
-
-            # 5. 오디오 합성 (TTS만, BGM 없음)
-            _merge_audio_to_video(
-                silent_video,
-                tts_segments,
-                total_duration,
-                out,
-            )
-            
             # 최종 길이 검증: 영상을 복제해 길이를 채우지 않습니다.
+            # (렌더링 비용을 아끼기 위해 합성 전에 먼저 검사)
             if total_duration < 60.0:
                 raise RuntimeError(
                     "[틱톡] 영상 길이 부족: "
@@ -2110,14 +1719,15 @@ class VideoGenerator:
                     "60초를 충족하지 못해 결과물을 반환하지 않습니다."
                 )
 
-            logger.info(
-                "[틱톡] 최종 길이 검증 통과: %.2f초",
-                total_duration,
-            )
+            # 4. 클립 합치기
+            silent_video = str(tmp / "silent.mp4")
+            _concat_clips(slide_clips, silent_video)
 
-            logger.info(
-                f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)"
-            )
+            # 5. 오디오 합성 (TTS만, BGM 없음)
+            _merge_audio_to_video(silent_video, tts_segments, total_duration, out)
+
+            logger.info(f"[틱톡] 최종 길이 검증 통과: {total_duration:.2f}초")
+            logger.info(f"[틱톡] 영상 완료: {out} ({total_duration:.2f}초)")
 
             return out
 
