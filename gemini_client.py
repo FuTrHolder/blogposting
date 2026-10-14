@@ -140,6 +140,14 @@ def call_gemini_text(
                         continue
                     break
 
+                actual_model = data.get("modelVersion") or ""
+                if actual_model and model not in actual_model:
+                    logger.warning(
+                        f"[Gemini] 요청 모델({model})과 실제 응답 모델({actual_model})이 다릅니다 (리디렉션 가능성)"
+                    )
+                else:
+                    logger.info(f"[Gemini] 응답 모델: {actual_model or '(미제공)'}")
+                    
                 cands = data.get("candidates") or []
                 if not cands:
                     last_error = f"{model}: candidates 없음 ({data.get('promptFeedback')})"

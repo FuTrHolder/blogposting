@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 # 환경변수 GEMINI_MODELS="모델1,모델2,..."로 코드 수정 없이 교체 가능
 GEMINI_MODELS = [
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 

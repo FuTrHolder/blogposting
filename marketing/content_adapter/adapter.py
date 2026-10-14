@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 # 환경변수 GEMINI_MODELS="모델1,모델2,..."로 코드 수정 없이 교체 가능
 GEMINI_MODELS = [
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 SYSTEM_PROMPT_INTRO = """당신은 미국 증시 시황 블로그(seedsup.tistory.com)의 SNS 마케팅 전문가입니다.
