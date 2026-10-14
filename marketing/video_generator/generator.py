@@ -157,9 +157,9 @@ def _strip_emoji(text: str) -> str:
 # 나레이션용 모델 순서 (가벼운 모델 우선 → 상위 모델 폴백)
 # 환경변수 GEMINI_NARRATION_MODELS="모델1,모델2"로 코드 수정 없이 교체 가능
 NARRATION_MODELS = [
-    "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 NARRATION_SYSTEM_INTRO = """당신은 유튜브 쇼츠 나래이션 작가입니다.
