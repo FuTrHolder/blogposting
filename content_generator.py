@@ -7,6 +7,8 @@ Google Gemini API를 사용해 3,000자 내외의 한글 블로그 포스팅을 
   evening : 전일 정규장 리뷰 + 애프터마켓~프리장 이슈 + 당일 경제지표/실적
 
 v2: Gemini 호출을 gemini_client.py로 통일 (API 키 헤더 전송, 429/5xx/MAX_TOKENS 통합 처리)
+v3: 첫 문단 = 핵심 요약 규칙 추가(목록 카드/검색 미리보기용), 인사말 자동 제거 안전망,
+    목차는 첫 문단 다음에 삽입하고 '목차' 라벨 텍스트는 제거(목차 기능은 그대로 유지)
 """
 
 import json
@@ -41,9 +43,11 @@ FALLBACK_IMAGE_PROMPT = {
 
 
 # ── 목차(TOC) 플레이스홀더 ──────────────────────────────────────────────────
+# '목차' 라벨 텍스트(<p>목차</p>)는 제거했습니다. 티스토리 목록 카드/검색 결과의
+# 요약 문구가 본문 앞부분 텍스트를 가져오기 때문에, 라벨이 있으면 요약이 "목차 ..."로
+# 시작하는 문제가 있었습니다. 목차 기능(스킨의 jquery.toc가 #toc를 채움)은 그대로입니다.
 TOC_HTML_SNIPPET = (
     '<div class="index_toc">\n'
-    '<p data-ke-size="size16">목차</p>\n'
     '<ul id="toc" style="list-style-type: disc;" '
     'data-ke-list-type="disc"></ul>\n'
     '</div>'
@@ -55,6 +59,12 @@ DISCLAIMER_HTML = (
     '<blockquote data-ke-style="style3">'
     '<p>본 콘텐츠는 공개된 정보를 바탕으로 작성된 참고 자료이며, 어떠한 투자 권유도 포함하지 않습니다. 투자 판단 및 그에 따른 손익에 대한 책임은 전적으로 투자자 본인에게 귀속됩니다.</p>'
     '</blockquote>'
+)
+
+
+# ── 첫 문단 인사말 제거용 패턴 ───────────────────────────────────────────────
+_GREETING_RE = re.compile(
+    r"^\s*(?:독자\s*여러분[,，]?\s*)?(?:안녕하세요|안녕하십니까)[!.,，\s]*"
 )
 
 
@@ -127,8 +137,8 @@ HTML 형식 규칙 (반드시 준수)
 단, 면책조항의 <blockquote>에는 반드시
 data-ke-style="style3"을 사용합니다.
 
-⑪ 본문 최상단에 목차 마크업이 코드에서 자동 삽입됩니다.
-직접 "목차" 또는 <ul id="toc">를 작성하지 마세요.
+⑪ 첫 문단(핵심 요약) 바로 다음에 목차 마크업이 코드에서 자동 삽입됩니다.
+직접 "목차"라는 텍스트나 <ul id="toc">를 작성하지 마세요.
 
 ────────────────────────────────────────
 """
@@ -163,6 +173,29 @@ _TIME_FORMAT_RULE = """
 "4월 1일 오후 9시 30분(KST) [미국 오전 8시 30분 ET]"
 
 ⑥ 애프터마켓·프리마켓 시간대도 KST 기준으로 작성합니다.
+
+────────────────────────────────────────
+"""
+
+
+# ── 첫 문단(핵심 요약) 규칙 ─────────────────────────────────────────────────
+_SUMMARY_RULE = """
+────────────────────────────────────────
+첫 문단 규칙 (반드시 준수)
+────────────────────────────────────────
+본문의 첫 번째 요소는 반드시 <p> 한 개이며, 글 전체의 핵심 요약이어야 합니다.
+이 문단은 블로그 목록 카드와 검색 결과의 미리보기 문구로 그대로 사용됩니다.
+
+① "안녕하세요", "독자 여러분", "오늘은 ~를 살펴보겠습니다" 같은
+   인사말·도입 멘트로 시작하지 않습니다.
+② 80~140자 이내, 문장 2개 이내로 작성합니다.
+③ morning: 제공된 데이터의 주요 지수 등락률 2개 이상 + 시장을 움직인 핵심 이슈 1개.
+   evening: 현재 프리마켓/선물 방향 + 오늘 밤 가장 중요한 발표 일정 1개
+   (제공된 사실 데이터에 있는 항목만, D+0 규칙 준수).
+④ 수치는 반드시 제공된 데이터에 있는 값만 사용하고 추정하지 않습니다.
+⑤ 이 요약 문단 안에서는 <strong> 외의 태그를 쓰지 않습니다.
+   <blockquote>는 면책조항 전용입니다.
+⑥ 필요한 서론이 있다면 요약 문단 다음의 별도 <p>에 작성합니다.
 
 ────────────────────────────────────────
 """
@@ -227,7 +260,7 @@ SYSTEM_MORNING = (
 - 투자 권유가 아닌 정보 제공 목적 유지
 
 구조:
-1. 서론
+1. 서론 (핵심 요약 문단으로 시작, 인사말 금지)
 2. <h2>주요 지수 마감 결과</h2>
 3. <h2>어제의 핵심 뉴스 & 시장 반응</h2>
 4. <h2>섹터별 마감 흐름</h2>
@@ -237,6 +270,7 @@ SYSTEM_MORNING = (
 
 마지막에는 반드시 면책조항을 작성합니다.
 """
+    + _SUMMARY_RULE
     + _HTML_FORMAT_RULE
     + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
@@ -265,9 +299,12 @@ SYSTEM_EVENING = (
 - D+0이 아닌 경제지표나 실적을 오늘 발표 예정이라고 표현하지 않습니다.
 - 제공된 사실 데이터에 없는 기업의 실적 발표일을 추측하지 않습니다.
 - 투자 권유가 아닌 정보 제공 목적을 유지합니다.
+- 본문의 첫 문단은 위 순서와 별개로 글 전체의 핵심 요약(아래 [첫 문단 규칙])이며,
+  인사말 없이 시작합니다.
 
 마지막에는 반드시 면책조항을 작성합니다.
 """
+    + _SUMMARY_RULE
     + _HTML_FORMAT_RULE
     + _TIME_FORMAT_RULE
     + _TITLE_STRATEGY
@@ -545,6 +582,9 @@ class ContentGenerator:
 
                 post = self._normalize_disclaimer(post)
 
+                # 첫 문단이 인사말로 시작하면 인사말만 제거 (목록 카드/검색 미리보기용 요약 보호)
+                post = self._strip_leading_greeting(post)
+
                 # 팩트체크/후처리 이후에도 본문이 비어 있거나 잘렸으면
                 # 절대 발행하지 않음
                 final_content = (post.get("content", "") or "").strip()
@@ -685,6 +725,39 @@ class ContentGenerator:
         return self._normalize_disclaimer(post2)
 
     @staticmethod
+    def _strip_leading_greeting(post: dict) -> dict:
+        """
+        첫 <p>가 인사말("안녕하세요", "독자 여러분, 안녕하세요" 등)로 시작하면
+        인사말 부분만 제거합니다. 인사말을 제거하고 남는 텍스트가 30자 미만이면
+        (문장을 망가뜨릴 수 있으므로) 아무것도 바꾸지 않습니다.
+        """
+        content = post.get("content", "") or ""
+
+        m = re.match(
+            r"(\s*<p\b[^>]*>)(.*?)(</p>)",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if not m:
+            return post
+
+        inner = m.group(2)
+        new_inner = _GREETING_RE.sub("", inner, count=1)
+
+        if new_inner == inner:
+            return post
+
+        if len(re.sub(r"<[^>]+>", "", new_inner).strip()) < 30:
+            return post
+
+        post = dict(post)
+        post["content"] = (
+            m.group(1) + new_inner.lstrip() + m.group(3) + content[m.end():]
+        )
+        logger.warning("첫 문단의 인사말을 자동 제거했습니다.")
+        return post
+
+    @staticmethod
     def _normalize_disclaimer(post: dict) -> dict:
         """
         면책조항의 티스토리 HTML 형식을 최종 단계에서 강제합니다.
@@ -734,7 +807,13 @@ class ContentGenerator:
 
     @staticmethod
     def _prepend_toc(post: dict) -> dict:
-        """본문 최상단에 티스토리 목차를 삽입합니다."""
+        """
+        첫 <p>(핵심 요약) 바로 다음에 티스토리 목차를 삽입합니다.
+
+        - '목차' 라벨 텍스트는 넣지 않습니다(TOC_HTML_SNIPPET 참고).
+        - 본문이 <p>로 시작하지 않으면 기존처럼 맨 앞에 삽입합니다.
+        - 목차 기능(#toc)은 그대로이며, 스킨의 jquery.toc가 h2/h3으로 채웁니다.
+        """
         post = dict(post)
 
         content = post.get("content", "") or ""
@@ -742,7 +821,17 @@ class ContentGenerator:
         if 'id="toc"' in content:
             return post
 
-        post["content"] = f"{TOC_HTML_SNIPPET}\n{content}"
+        stripped = content.lstrip()
+        m = re.search(r"</p>", stripped, flags=re.IGNORECASE)
+
+        if stripped[:2].lower() == "<p" and m:
+            idx = m.end()
+            post["content"] = (
+                f"{stripped[:idx]}\n{TOC_HTML_SNIPPET}\n{stripped[idx:].lstrip()}"
+            )
+        else:
+            post["content"] = f"{TOC_HTML_SNIPPET}\n{content}"
+
         return post
 
     @staticmethod
