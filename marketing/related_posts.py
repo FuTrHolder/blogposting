@@ -13,11 +13,40 @@ Gemini 호출 없음.
 import html
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
 
+KST = timezone(timedelta(hours=9))
+
+
+def _kst_date(post: dict):
+    dt = _published_datetime(post.get("published", ""))
+    return dt.astimezone(KST).date() if dt else None
+
+
+def _find_counterpart(scored: list[dict], current_mode: str, today_kst):
+    """오전↔저녁 짝 글을 찾습니다. 없으면 None."""
+    if current_mode not in ("morning", "evening") or today_kst is None:
+        return None
+    want = "morning" if current_mode == "evening" else "evening"
+
+    best, best_dt = None, None
+    for item in scored:
+        if item.get("mode") != want:
+            continue
+        d = _kst_date(item)
+        dt = _published_datetime(item.get("published", ""))
+        if d is None or dt is None:
+            continue
+        if current_mode == "evening" and d != today_kst:
+            continue
+        if current_mode == "morning" and not (0 < (today_kst - d).days <= 3):
+            continue
+        if best is None or dt > best_dt:
+            best, best_dt = item, dt
+    return best
 
 # 너무 일반적인 단어는 관련성 점수에서 제외합니다.
 _STOPWORDS = {
@@ -483,7 +512,19 @@ def select_related_posts(
         reverse=True,
     )
 
-    selected = scored[:limit]
+    counterpart = _find_counterpart(scored, current_mode, today_kst)
+    selected: list[dict] = []
+    if counterpart is not None:
+        counterpart["_pair"] = True
+        selected.append(counterpart)
+        logger.info(f"같은 흐름의 짝 글 우선 포함: {counterpart.get('title', '')}")
+    for item in scored:
+        if len(selected) >= limit:
+            break
+        if counterpart is not None and item.get("url") == counterpart.get("url"):
+            continue
+        selected.append(item)
+    selected = selected[:limit]
 
     logger.info(
         "연관 포스트 선정 결과:"
