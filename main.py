@@ -217,9 +217,7 @@ def compute_reference_times(
     }
 
 
-def add_related_posts(
-    post: dict,
-) -> dict:
+def add_related_posts(post: dict, mode: str = "", today_kst=None) -> dict:
     """
     생성된 원고에 관련 포스트 3개를 붙입니다.
 
@@ -299,6 +297,8 @@ def add_related_posts(
                 for candidate in candidates
             ],
             limit=3,
+            current_mode=mode,
+            today_kst=today_kst,
         )
 
         if not related_posts:
@@ -540,9 +540,7 @@ def main():
         "원고 하단 삽입 중..."
     )
 
-    post = add_related_posts(
-        post
-    )
+    post = add_related_posts(post, mode=mode, today_kst=now_kst.date())
 
     logger.info(
         f"  → 최종 원고 글자 수: "
