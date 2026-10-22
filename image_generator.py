@@ -686,21 +686,26 @@ class ImageGenerator:
         img = Image.alpha_composite(img, band)
         draw = ImageDraw.Draw(img)
 
-        font_size = int(H * 0.11)
-        max_px = int(W * 0.86)
+        font_size = int(H * 0.10)
+        max_px = int(W * 0.70)          # 0.86 → 0.70 : 좌우 크롭에도 글자가 덜 잘리게
+        min_size = int(H * 0.055)
+        target = display_title.replace(" ", "")
+
+        def _fits(ls: list) -> bool:
+            return "".join(ls).replace(" ", "") == target
+
         font = _load_title_font(font_size)
-        lines = _wrap_title(draw, display_title, font, max_px, max_lines=3)
+        lines = _wrap_title(draw, display_title, font, max_px, max_lines=2)
 
-        # 3줄로도 안 들어가면 폰트를 줄여가며 재시도 (최소 크기까지)
-        min_size = int(H * 0.06)
-        while len(lines) >= 3 and font_size > min_size:
-            font_size -= 6
+        # 2줄에 다 안 들어가면 글자 크기를 줄여가며 재시도
+        while not _fits(lines) and font_size > min_size:
+            font_size -= 4
             font = _load_title_font(font_size)
-            lines = _wrap_title(draw, display_title, font, max_px, max_lines=3)
+            lines = _wrap_title(draw, display_title, font, max_px, max_lines=2)
 
-        line_h = int(font_size * 1.28)
-        total_h = line_h * len(lines)
-        start_y = H // 2 - total_h // 2
+        # 최소 크기에서도 안 들어가면 3줄 허용
+        if not _fits(lines):
+            lines = _wrap_title(draw, display_title, font, max_px, max_lines=3)
 
         # 제목 위 짧은 포인트 라인
         draw.rectangle(
