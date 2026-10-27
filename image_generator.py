@@ -38,6 +38,30 @@ v4 추가 기능 — 썸네일 중앙 제목 오버레이:
     추가되어 있어야 하며, 폰트가 없으면 이 기능은 예외 없이 조용히
     건너뛰고 원본 이미지를 그대로 사용합니다 (파이프라인 중단 방지).
 
+v4.1 수정:
+  - [버그 수정] 제목 오버레이의 줄 높이(line_h)와 시작 y좌표(start_y)가
+    정의되지 않아 NameError가 발생하고, 이 예외가 _finalize()에서 조용히
+    삼켜져 "제목 없는 썸네일"이 생성되던 문제를 수정했습니다.
+  - 제목 폭을 이미지 폭의 70%로 제한하고(좌우 크롭에도 글자가 덜 잘리게),
+    2줄에 안 들어가면 글자 크기를 줄인 뒤 3줄까지 허용합니다.
+  - 오버레이 실패 로그에 예외 종류를 함께 남깁니다.
+
+v4.2 보강:
+  - 한글 폰트 경로를 고정 2곳이 아니라 시스템 전체에서 탐색(glob)합니다.
+    (러너 이미지에 따라 Noto CJK 설치 경로가 달라져도 오버레이가 조용히
+    건너뛰어지지 않게 하기 위함)
+  - 오버레이가 어떤 이유로든 실패하면 전체 traceback을 로그에 남기고,
+    단순 중앙 텍스트 오버레이로 한 번 더 시도합니다.
+  - 오버레이 성공 시 어떤 폰트/몇 줄로 그렸는지 로그에 남깁니다.
+
+v4.3 (2026-10-27 실행 로그 반영):
+  - Cloudflare Workers AI가 60초 read timeout으로 실패해 곧바로 HF→Pexels로
+    내려가던 문제: 연결 10초/응답 120초로 늘리고, 타임아웃·429·5xx는 1회 더
+    재시도합니다(재시도는 steps=4로 가볍게 — FLUX.1-schnell 기본값).
+  - HF 폴백의 낭비 제거: 402(크레딧 소진)가 나오면 나머지 provider를 시도하지
+    않고 바로 다음 소스로 넘어가며, 'not supported by provider' 오류는
+    재시도(5초 대기×2)하지 않고 즉시 다음으로 넘어갑니다.
+
 mode:
   morning : 마감 후 조용한 월스트리트 분위기 (차분·분석적)
   evening : 개장 전 활기찬 트레이딩 분위기 (긴장·역동적)
@@ -148,6 +172,47 @@ OUTPUT_DIR = "images"
 _FONT_BLACK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc"
 _FONT_BOLD = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 
+# 고정 경로에 폰트가 없을 때 시스템 전체에서 찾아볼 패턴 (우선순위 순)
+_FONT_GLOB_PATTERNS = [
+    "/usr/share/fonts/**/NotoSansCJK*Black*",
+    "/usr/share/fonts/**/NotoSansCJK*Bold*",
+    "/usr/share/fonts/**/NotoSansCJK*Medium*",
+    "/usr/share/fonts/**/NotoSansCJK*Regular*",
+    "/usr/share/fonts/**/NotoSansKR*",
+    "/usr/share/fonts/**/NanumGothic*Bold*",
+    "/usr/share/fonts/**/NanumGothic*",
+    "/usr/share/fonts/**/*CJK*",
+]
+_font_candidates_cache: list | None = None
+
+
+def _title_font_candidates() -> list:
+    """한글을 그릴 수 있는 폰트 파일 후보를 우선순위 순으로 반환합니다."""
+    global _font_candidates_cache
+    if _font_candidates_cache is not None:
+        return _font_candidates_cache
+
+    import glob
+
+    found: list = []
+    for path in (_FONT_BLACK, _FONT_BOLD):
+        if os.path.exists(path) and path not in found:
+            found.append(path)
+    for pattern in _FONT_GLOB_PATTERNS:
+        try:
+            for path in sorted(glob.glob(pattern, recursive=True)):
+                if (
+                    os.path.isfile(path)
+                    and path.lower().endswith((".ttc", ".otf", ".ttf"))
+                    and path not in found
+                ):
+                    found.append(path)
+        except Exception:
+            continue
+
+    _font_candidates_cache = found
+    return found
+
 
 def _crop_fit(img: Image.Image, W: int, H: int) -> Image.Image:
     """중앙 기준으로 크롭한 뒤 목표 크기로 리사이즈합니다. Cloudflare Workers AI
@@ -218,13 +283,15 @@ def _add_watermark(file_path: str, source: str) -> None:
 # ── 썸네일 제목 오버레이 헬퍼 ─────────────────────────────────────────────────
 
 def _load_title_font(size: int) -> ImageFont.FreeTypeFont | None:
-    """Noto Sans CJK 폰트를 로드합니다. 시스템에 폰트가 없으면 None을 반환해
+    """한글 지원 폰트를 로드합니다. 시스템에 폰트가 없으면 None을 반환해
     호출부가 오버레이 자체를 건너뛰도록 합니다 (한글이 깨진 채로 그려지는
     것을 방지 — PIL 기본 폰트는 한글을 지원하지 않습니다)."""
-    for path in (_FONT_BLACK, _FONT_BOLD):
-        if os.path.exists(path):
+    for path in _title_font_candidates():
+        try:
+            return ImageFont.truetype(path, size, index=0)
+        except Exception:
             try:
-                return ImageFont.truetype(path, size, index=0)
+                return ImageFont.truetype(path, size)
             except Exception:
                 continue
     return None
@@ -264,6 +331,7 @@ class ImageGenerator:
         self.pexels_key = os.environ.get("PEXELS_API_KEY", "")
         self.pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
         self.last_image_source = ""
+        self._hf_payment_required = False
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     def get_attribution_text(self) -> str:
@@ -330,8 +398,52 @@ class ImageGenerator:
         try:
             self._apply_title_overlay(file_path, title, mode)
         except Exception as e:
-            logger.warning(f"썸네일 제목 오버레이 실패 (원본 이미지 유지): {e}")
+            logger.warning(
+                f"썸네일 제목 오버레이 실패 → 단순 중앙 텍스트로 재시도합니다: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            try:
+                self._apply_simple_title_overlay(file_path, title)
+            except Exception as e2:
+                logger.warning(
+                    f"단순 오버레이도 실패 (원본 이미지 유지): "
+                    f"{type(e2).__name__}: {e2}",
+                    exc_info=True,
+                )
         return file_path
+
+    # ── 제목 표시용 문자열 정제 (날짜/접두어 제거) ──────────────────────────
+    @staticmethod
+    def _display_title(title: str) -> str:
+        clean_title = _clean_text(title)
+        stripped = re.sub(r"^\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", clean_title)
+        stripped = re.sub(r"^미국\s*증시\s*[:：]?\s*", "", stripped).strip()
+        return stripped or clean_title
+
+    # ── 예비 오버레이: 밴드/장식 없이 가운데에 제목만 (메인 오버레이 실패 시) ─
+    def _apply_simple_title_overlay(self, file_path: str, title: str) -> None:
+        display_title = self._display_title(title)
+        if not display_title or not _title_font_candidates():
+            logger.warning("예비 오버레이 불가: 제목이 비었거나 한글 폰트를 찾지 못했습니다.")
+            return
+
+        img = Image.open(file_path).convert("RGB")
+        W, H = img.size
+        draw = ImageDraw.Draw(img)
+
+        font_size = int(H * 0.08)
+        font = _load_title_font(font_size)
+        lines = _wrap_title(draw, display_title, font, int(W * 0.70), max_lines=3)
+        line_h = int(font_size * 1.28)
+        y = H // 2 - (line_h * len(lines)) // 2
+        for line in lines:
+            lw = draw.textbbox((0, 0), line, font=font)[2]
+            _draw_title_outlined(draw, (W // 2 - lw // 2, y), line, font)
+            y += line_h
+
+        img.save(file_path, "JPEG", quality=92, optimize=True)
+        logger.info(f"썸네일 제목 예비 오버레이 적용 완료: {file_path}")
 
     # ── Cloudflare Workers AI (신규 1순위) ───────────────────────────────────
     def _generate_cloudflare(self, prompt: str, filename: str, mode: str) -> str | None:
@@ -357,58 +469,82 @@ class ImageGenerator:
         # 엄격히 검증합니다. 그래서 seed는 절대 페이로드에 넣지 않습니다
         # (매일 같은 이미지를 재현하는 기능은 이 모델에서는 포기).
         url = f"{CF_API_BASE}/{self.cf_account_id}/ai/run/{CF_FLUX_MODEL}"
-        payload = {
-            "prompt": full_prompt,
-            "steps": 8,
+        headers = {
+            "Authorization": f"Bearer {self.cf_api_token}",
+            "Accept": "application/json",
         }
 
-        logger.info(f"Cloudflare Workers AI 이미지 생성 중 (모드: {mode})...")
-        try:
-            resp = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self.cf_api_token}",
-                    "Accept": "application/json",
-                },
-                json=payload,
-                timeout=60,
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            # 1차는 품질 우선(steps=8), 재시도는 응답이 빠른 기본값(steps=4)
+            steps = 8 if attempt == 1 else 4
+            payload = {"prompt": full_prompt, "steps": steps}
+
+            logger.info(
+                f"Cloudflare Workers AI 이미지 생성 중 "
+                f"(모드: {mode}, 시도 {attempt}/{max_attempts}, steps={steps})..."
             )
+            try:
+                # (연결 10초, 응답 120초) — 기존 60초는 혼잡 시간대에 자주 초과됨
+                resp = requests.post(
+                    url, headers=headers, json=payload, timeout=(10, 120),
+                )
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logger.warning(
+                    f"Cloudflare Workers AI 응답 지연/연결 오류 "
+                    f"(시도 {attempt}/{max_attempts}): {type(e).__name__}"
+                )
+                if attempt < max_attempts:
+                    time.sleep(3)
+                    continue
+                return None
+            except Exception as e:
+                logger.warning(f"Cloudflare Workers AI 오류: {type(e).__name__}: {e}")
+                return None
+
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts:
+                logger.warning(
+                    f"Cloudflare Workers AI 일시 오류 ({resp.status_code}) — 재시도합니다."
+                )
+                time.sleep(5)
+                continue
+
             if resp.status_code != 200:
                 logger.warning(
                     f"Cloudflare Workers AI 실패 ({resp.status_code}): {resp.text[:200]}"
                 )
                 return None
 
-            # 응답이 JSON(+base64)이 아니라 raw 이미지 바이너리로 올 가능성도
-            # 방어적으로 함께 처리합니다 (Workers AI 모델별로 응답 형식이
-            # 다를 수 있음 — 공식 예제는 base64 JSON을 반환).
-            content_type = resp.headers.get("Content-Type", "")
-            if content_type.startswith("image/"):
-                image = Image.open(BytesIO(resp.content)).convert("RGB")
-            else:
-                data = resp.json()
-                if not data.get("success", True):
-                    logger.warning(f"Cloudflare Workers AI 실패: {data.get('errors')}")
-                    return None
-                b64_img = (data.get("result") or {}).get("image", "")
-                if not b64_img:
-                    logger.warning("Cloudflare Workers AI 응답에 image 데이터가 없음")
-                    return None
-                image = Image.open(BytesIO(base64.b64decode(b64_img))).convert("RGB")
+            try:
+                # 응답이 JSON(+base64)이 아니라 raw 이미지 바이너리로 올 가능성도
+                # 방어적으로 함께 처리합니다 (공식 예제는 base64 JSON을 반환).
+                content_type = resp.headers.get("Content-Type", "")
+                if content_type.startswith("image/"):
+                    image = Image.open(BytesIO(resp.content)).convert("RGB")
+                else:
+                    data = resp.json()
+                    if not data.get("success", True):
+                        logger.warning(f"Cloudflare Workers AI 실패: {data.get('errors')}")
+                        return None
+                    b64_img = (data.get("result") or {}).get("image", "")
+                    if not b64_img:
+                        logger.warning("Cloudflare Workers AI 응답에 image 데이터가 없음")
+                        return None
+                    image = Image.open(BytesIO(base64.b64decode(b64_img))).convert("RGB")
 
-            # width/height를 요청할 수 없으므로, 받은 이미지를 우리가 쓰는
-            # 표준 썸네일 비율(1024x576, 16:9)로 크롭 — Pexels/Pixabay/HF와
-            # 동일한 비율을 유지하기 위함.
-            image = _crop_fit(image, 1024, 576)
+                # width/height를 요청할 수 없으므로, 받은 이미지를 우리가 쓰는
+                # 표준 썸네일 비율(1024x576, 16:9)로 크롭합니다.
+                image = _crop_fit(image, 1024, 576)
 
-            file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
-            image.save(file_path, "JPEG", quality=92, optimize=True)
-            logger.info(f"Cloudflare Workers AI 이미지 저장: {file_path}")
-            return file_path
+                file_path = os.path.join(OUTPUT_DIR, filename.replace(".png", ".jpg"))
+                image.save(file_path, "JPEG", quality=92, optimize=True)
+                logger.info(f"Cloudflare Workers AI 이미지 저장: {file_path}")
+                return file_path
+            except Exception as e:
+                logger.warning(f"Cloudflare Workers AI 응답 처리 오류: {type(e).__name__}: {e}")
+                return None
 
-        except Exception as e:
-            logger.warning(f"Cloudflare Workers AI 오류: {e}")
-            return None
+        return None
 
     # ── FLUX.1-schnell (huggingface_hub 라이브러리 경유, provider 순차 폴백) ──
     def _generate_flux(
@@ -436,6 +572,8 @@ class ImageGenerator:
             f"{datetime.now().strftime('%Y%m%d')}{mode}".encode()
         ).hexdigest()[:8], 16) % (2 ** 32)
 
+        self._hf_payment_required = False
+
         for provider in HF_FLUX_PROVIDERS:
             logger.info(
                 f"FLUX.1-schnell 이미지 생성 중 (provider: {provider}, "
@@ -447,6 +585,12 @@ class ImageGenerator:
             )
             if result:
                 return result
+            if self._hf_payment_required:
+                logger.warning(
+                    "HF 크레딧 소진(402) 확인 — 나머지 provider는 시도하지 않고 "
+                    "다음 이미지 소스로 넘어갑니다."
+                )
+                return None
             logger.warning(f"provider={provider} 실패 — 다음 provider로 폴백")
 
         logger.warning(
@@ -504,6 +648,7 @@ class ImageGenerator:
                         f"[{provider}] 결제 필요(402) — 무료 크레딧 소진 가능성. "
                         f"HF PRO 결제 또는 Cloudflare Workers AI 사용을 권장합니다."
                     )
+                    self._hf_payment_required = True
                     return None
 
                 if status == 503 or "loading" in msg.lower():
@@ -533,6 +678,12 @@ class ImageGenerator:
                 return None
 
             except Exception as e:
+                if "not supported by provider" in str(e):
+                    # 재시도해도 결과가 같으므로 5초 대기 없이 즉시 다음 provider로
+                    logger.warning(
+                        f"[{provider}] FLUX 모델 미지원 — 재시도 없이 다음으로 넘어갑니다."
+                    )
+                    return None
                 logger.warning(f"[{provider}] FLUX 오류 (시도 {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     time.sleep(5)
@@ -652,21 +803,19 @@ class ImageGenerator:
         한글 폰트가 없으면 아무것도 하지 않고 조용히 반환합니다 (원본 이미지
         유지 — 절대 파이프라인을 중단시키지 않음).
         """
-        if not any(os.path.exists(p) for p in (_FONT_BLACK, _FONT_BOLD)):
+        if not _title_font_candidates():
             logger.warning(
-                "한글 폰트(Noto Sans CJK)를 찾을 수 없어 썸네일 제목 오버레이를 "
-                "건너뜁니다. GitHub Actions 워크플로우에 'fonts-noto-cjk' 설치 "
-                "단계가 있는지 확인하세요."
+                "한글 폰트(Noto Sans CJK 등)를 시스템에서 찾을 수 없어 썸네일 제목 "
+                "오버레이를 건너뜁니다. GitHub Actions 워크플로우에 "
+                "'fonts-noto-cjk' 설치 단계가 있는지 확인하세요."
             )
             return
 
-        clean_title = _clean_text(title)
         # SEO용 날짜/접두어는 화면에 다시 보여줄 필요가 없으므로 제거해
         # 짧고 강렬하게 만듭니다.
-        stripped = re.sub(r"^\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", clean_title)
-        stripped = re.sub(r"^미국\s*증시\s*[:：]?\s*", "", stripped).strip()
-        display_title = stripped or clean_title
+        display_title = self._display_title(title)
         if not display_title:
+            logger.warning("썸네일 제목이 비어 있어 오버레이를 건너뜁니다.")
             return
 
         img = Image.open(file_path).convert("RGBA")
@@ -687,7 +836,7 @@ class ImageGenerator:
         draw = ImageDraw.Draw(img)
 
         font_size = int(H * 0.10)
-        max_px = int(W * 0.70)          # 0.86 → 0.70 : 좌우 크롭에도 글자가 덜 잘리게
+        max_px = int(W * 0.70)          # 좌우 크롭에도 글자가 덜 잘리게
         min_size = int(H * 0.055)
         target = display_title.replace(" ", "")
 
@@ -707,6 +856,12 @@ class ImageGenerator:
         if not _fits(lines):
             lines = _wrap_title(draw, display_title, font, max_px, max_lines=3)
 
+        # ── 줄 높이와 시작 y좌표 (밴드 중앙 기준으로 세로 중앙 정렬) ──────────
+        line_h = int(font_size * 1.28)
+        total_h = line_h * len(lines)
+        center_y = int(H * 0.52)
+        start_y = center_y - total_h // 2
+
         # 제목 위 짧은 포인트 라인
         draw.rectangle(
             [(W // 2 - 46, start_y - 22), (W // 2 + 46, start_y - 16)],
@@ -721,4 +876,8 @@ class ImageGenerator:
             y += line_h
 
         img.convert("RGB").save(file_path, "JPEG", quality=92, optimize=True)
-        logger.info(f"썸네일 제목 오버레이 적용 완료: {file_path}")
+        logger.info(
+            f"썸네일 제목 오버레이 적용 완료: {file_path} "
+            f"(폰트 {os.path.basename(_title_font_candidates()[0])}, "
+            f"{len(lines)}줄, 글자크기 {font_size}px)"
+        )
