@@ -8,7 +8,9 @@ Google Gemini API를 사용해 3,000자 내외의 한글 블로그 포스팅을 
 
 v2: Gemini 호출을 gemini_client.py로 통일 (API 키 헤더 전송, 429/5xx/MAX_TOKENS 통합 처리)
 v3: 첫 문단 = 핵심 요약 규칙 추가(목록 카드/검색 미리보기용), 인사말 자동 제거 안전망,
-    목차는 첫 문단 다음에 삽입하고 '목차' 라벨 텍스트는 제거(목차 기능은 그대로 유지)
+    '목차' 라벨 텍스트 제거(목차 기능은 그대로 유지)
+v3.1: 목차(index_toc) 마크업을 다시 본문 맨 앞으로 되돌림(검증된 원래 위치).
+    '목차' 라벨 텍스트가 없으므로 목록 카드 요약에는 텍스트가 섞이지 않습니다.
 """
 
 import json
@@ -45,7 +47,9 @@ FALLBACK_IMAGE_PROMPT = {
 # ── 목차(TOC) 플레이스홀더 ──────────────────────────────────────────────────
 # '목차' 라벨 텍스트(<p>목차</p>)는 제거했습니다. 티스토리 목록 카드/검색 결과의
 # 요약 문구가 본문 앞부분 텍스트를 가져오기 때문에, 라벨이 있으면 요약이 "목차 ..."로
-# 시작하는 문제가 있었습니다. 목차 기능(스킨의 jquery.toc가 #toc를 채움)은 그대로입니다.
+# 시작하는 문제가 있었습니다. 목차 기능(스킨 스크립트가 #toc를 채움)은 그대로입니다.
+# 이 마크업은 텍스트가 전혀 없는 빈 목록이라, 본문 맨 앞에 두어도 요약 문구에는
+# 영향을 주지 않습니다.
 TOC_HTML_SNIPPET = (
     '<div class="index_toc">\n'
     '<ul id="toc" style="list-style-type: disc;" '
@@ -137,8 +141,9 @@ HTML 형식 규칙 (반드시 준수)
 단, 면책조항의 <blockquote>에는 반드시
 data-ke-style="style3"을 사용합니다.
 
-⑪ 첫 문단(핵심 요약) 바로 다음에 목차 마크업이 코드에서 자동 삽입됩니다.
+⑪ 본문 맨 앞에 목차 마크업이 코드에서 자동 삽입됩니다.
 직접 "목차"라는 텍스트나 <ul id="toc">를 작성하지 마세요.
+본문은 항상 핵심 요약 <p> 한 개로 시작합니다.
 
 ────────────────────────────────────────
 """
@@ -808,11 +813,11 @@ class ContentGenerator:
     @staticmethod
     def _prepend_toc(post: dict) -> dict:
         """
-        첫 <p>(핵심 요약) 바로 다음에 티스토리 목차를 삽입합니다.
+        티스토리 목차(index_toc) 마크업을 본문 맨 앞에 삽입합니다.
 
         - '목차' 라벨 텍스트는 넣지 않습니다(TOC_HTML_SNIPPET 참고).
-        - 본문이 <p>로 시작하지 않으면 기존처럼 맨 앞에 삽입합니다.
-        - 목차 기능(#toc)은 그대로이며, 스킨의 jquery.toc가 h2/h3으로 채웁니다.
+        - 이미 id="toc"가 있으면 중복 삽입하지 않습니다.
+        - 목차 기능(#toc)은 그대로이며, 스킨의 목차 스크립트가 h2/h3으로 채웁니다.
         """
         post = dict(post)
 
@@ -821,17 +826,7 @@ class ContentGenerator:
         if 'id="toc"' in content:
             return post
 
-        stripped = content.lstrip()
-        m = re.search(r"</p>", stripped, flags=re.IGNORECASE)
-
-        if stripped[:2].lower() == "<p" and m:
-            idx = m.end()
-            post["content"] = (
-                f"{stripped[:idx]}\n{TOC_HTML_SNIPPET}\n{stripped[idx:].lstrip()}"
-            )
-        else:
-            post["content"] = f"{TOC_HTML_SNIPPET}\n{content}"
-
+        post["content"] = f"{TOC_HTML_SNIPPET}\n{content.lstrip()}"
         return post
 
     @staticmethod
