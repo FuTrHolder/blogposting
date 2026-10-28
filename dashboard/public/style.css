@@ -1730,3 +1730,64 @@ textarea:focus { border-color: var(--amber); }
     font-size: 9px;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   블로그 원고 작성 진행 상황 (원고 패널 상단)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.blog-progress-box {
+  margin: 0 0 16px;
+  padding: 12px 14px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.blog-progress-box[hidden] { display: none; }
+.blog-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.blog-progress-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.blog-progress-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--skip-dim);
+  color: var(--skip);
+}
+.blog-progress-badge.running   { background: var(--amber-dim); color: var(--amber-strong); }
+.blog-progress-badge.completed { background: var(--gain-dim);  color: var(--gain); }
+.blog-progress-badge.failed    { background: var(--loss-dim);  color: var(--loss); }
+.blog-progress-box.failed { border-color: rgba(226, 99, 107, 0.45); }
+
+.blog-progress-error { margin-top: 10px; }
+.blog-progress-error[hidden] { display: none; }
+.blog-progress-error-step {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--loss);
+}
+.blog-progress-log {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

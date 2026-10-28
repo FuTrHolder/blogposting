@@ -54,6 +54,350 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 블로그 원고 작성 진행 상황 (원고 패널 상단) + 탭 자동 동기화
+//  - GET /api/blog-progress : 선택한 탭의 진행률/실패 로그 (실행 중에는 3초마다 갱신)
+//  - syncTabs()             : 10초마다 탭 목록만 조용히 갱신 (선택 상태/본문은 건드리지 않음)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const BLOG_PROGRESS_POLL_MS = 3000;
+const TAB_SYNC_INTERVAL_MS = 10000;
+// 워크플로우 timeout(15분)보다 길게 신호가 없으면 중단된 것으로 간주
+const BLOG_PROGRESS_STALE_MS = 20 * 60 * 1000;
+
+const BLOG_PROGRESS_MESSAGES = {
+  0: "원고 작성 워크플로우 시작",
+  1: "뉴스·시장 데이터 수집 완료",
+  2: "사실 기준표 구성 완료",
+  3: "블로그 원고 생성 완료",
+  4: "연관 포스트 삽입 완료",
+  5: "썸네일 생성 완료",
+  6: "대시보드 원고 업로드 완료",
+  7: "원고 작성 완료"
+};
+
+let blogProgressPollId = 0;
+let blogProgressActive = false;
+let lastTabsSignature = "";
+
+// '마케팅 실행' 버튼 제어: 원고 작성 중이거나 원고가 아직 없으면 비활성화
+let blogRunning = false;       // 현재 탭의 원고 작성이 진행 중인가
+let blogFailed = false;        // 현재 탭의 마지막 실행이 실패/중단되었는가
+let currentHasPost = null;     // null=확인 전, true/false=원고 존재 여부
+let triggerBlockedByBlog = false;
+const TRIGGER_BLOCK_NOTICE =
+  "원고 작성이 진행 중이거나 실패했거나, 원고가 아직 없어 마케팅을 실행할 수 없습니다.";
+
+function applyTriggerBlock() {
+  const btn = document.getElementById("trigger-btn");
+  const status = document.getElementById("trigger-status");
+  if (!btn) return;
+
+  const blocked = blogRunning || blogFailed || currentHasPost === false;
+
+  if (blocked) {
+    triggerBlockedByBlog = true;
+    btn.disabled = true;
+    btn.title = TRIGGER_BLOCK_NOTICE;
+    if (status && !status.textContent) status.textContent = TRIGGER_BLOCK_NOTICE;
+    return;
+  }
+
+  if (!triggerBlockedByBlog) return;
+  triggerBlockedByBlog = false;
+  btn.title = "";
+  if (status && status.textContent === TRIGGER_BLOCK_NOTICE) status.textContent = "";
+
+  // 마케팅 워크플로우가 이 탭에서 실제로 실행 중이면 계속 비활성 유지
+  const target = typeof getMarketingProgressTarget === "function"
+    ? getMarketingProgressTarget() : null;
+  const marketingBusy =
+    target && target.post_date === currentDate && target.mode === currentMode;
+  btn.disabled = !!marketingBusy;
+}
+
+function tabLabel(t) {
+  const suffix =
+    t.progress_status === "running" ? " ⏳"
+    : t.progress_status === "failed" ? " ❌"
+    : "";
+  return `${t.post_date} ${t.mode}${suffix}`;
+}
+
+function parseSqliteUtc(value) {
+  if (!value) return NaN;
+  return Date.parse(String(value).replace(" ", "T") + "Z");
+}
+
+function hideBlogProgress() {
+  blogRunning = false;
+  blogFailed = false;
+  applyTriggerBlock();
+  const box = document.getElementById("blog-progress-box");
+  if (box) {
+    box.hidden = true;
+    box.classList.remove("failed");
+  }
+}
+
+function renderBlogProgress(p, stale) {
+  const box = document.getElementById("blog-progress-box");
+  if (!box) return;
+
+  const status = stale ? "failed" : String(p.status || "running");
+  const step = Math.max(0, Math.min(7, Number(p.step) || 0));
+
+  blogRunning = status === "running";
+  blogFailed = status === "failed";
+  applyTriggerBlock();
+
+  // 작성 중에는 결과물(제목·본문·태그·썸네일)을 보여주지 않고 진행 과정만 표시합니다.
+  // (이전 실행의 결과물이 새 실행과 섞여 보이는 것도 방지)
+  if (blogRunning) showPendingPost();
+
+  box.hidden = false;
+  box.classList.toggle("failed", status === "failed");
+
+  document
+    .querySelectorAll("#blog-progress .marketing-progress-step")
+    .forEach((el, i) => el.classList.toggle("active", i < step));
+
+  const badge = document.getElementById("blog-progress-badge");
+  if (badge) {
+    badge.className = `blog-progress-badge ${status}`;
+    badge.textContent =
+      status === "running" ? `진행 중 ${step}/7`
+      : status === "completed" ? "완료"
+      : "실패";
+  }
+
+  const msg = document.getElementById("blog-progress-message");
+  if (msg) {
+    msg.classList.remove("running", "completed", "failed");
+    msg.classList.add(status);
+    msg.textContent = stale
+      ? "신호가 20분 이상 없습니다. 워크플로우가 중단(시간 초과 등)되었을 수 있습니다. GitHub Actions를 확인하세요."
+      : p.message || BLOG_PROGRESS_MESSAGES[step] || "원고 작성 중…";
+  }
+
+  const errBox = document.getElementById("blog-progress-error");
+  const errStep = document.getElementById("blog-progress-error-step");
+  const errLog = document.getElementById("blog-progress-log");
+  const runLink = document.getElementById("blog-progress-run-link");
+
+  const showError = status === "failed";
+  if (errBox) errBox.hidden = !showError;
+
+  if (showError) {
+    // textContent 만 사용 — 로그 내용이 HTML로 해석되지 않음
+    if (errStep) {
+      errStep.textContent = stale
+        ? "응답 없음 (마지막 단계: " + (BLOG_PROGRESS_MESSAGES[step] || step) + ")"
+        : (p.error_step || "알 수 없음") + " — 이번 실행의 결과물은 전달되지 않았습니다";
+    }
+    if (errLog) {
+      errLog.textContent =
+        p.error_log ||
+        "상세 로그가 기록되지 않았습니다. 아래 GitHub Actions 실행 페이지에서 확인하세요.";
+    }
+    if (runLink) {
+      const url = String(p.run_url || "");
+      if (url.startsWith("https://github.com/")) {
+        runLink.href = url;
+        runLink.hidden = false;
+      } else {
+        runLink.removeAttribute("href");
+        runLink.hidden = true;
+      }
+    }
+  }
+}
+
+async function loadBlogProgress(postDate, mode) {
+  const pollId = ++blogProgressPollId;
+  blogProgressActive = true;
+  let seenRunning = false;
+  let lastStep = null;
+  let lastStatus = null;
+
+  try {
+    while (pollId === blogProgressPollId) {
+      let p = null;
+
+      try {
+        const res = await fetch(
+          `/api/blog-progress?date=${encodeURIComponent(postDate)}` +
+            `&mode=${encodeURIComponent(mode)}&_=${Date.now()}`,
+          { cache: "no-store", headers: { Accept: "application/json" } }
+        );
+        if (res.ok) p = await res.json();
+      } catch (err) {
+        console.warn("원고 진행률 조회 실패:", err);
+      }
+
+      if (pollId !== blogProgressPollId) return;
+
+      if (!p || !p.exists) {
+        // 진행 기록이 없는 과거 탭 — 패널 숨김. 일시 오류면 다시 시도하지 않고 종료.
+        hideBlogProgress();
+        return;
+      }
+
+      const age = Date.now() - parseSqliteUtc(p.updated_at);
+      const stale =
+        p.status === "running" && Number.isFinite(age) && age > BLOG_PROGRESS_STALE_MS;
+
+      renderBlogProgress(p, stale);
+
+      // 상태(진행 중/완료/실패)가 바뀌면 탭 표시(⏳/❌)만 갱신합니다.
+      // 결과물은 모든 단계가 성공한 뒤 완료 시점에 한 번만 불러옵니다.
+      if (lastStatus !== null && p.status !== lastStatus) {
+        void syncTabs(true);
+      }
+      lastStep = p.step;
+      lastStatus = p.status;
+
+      if (p.status === "running" && !stale) {
+        seenRunning = true;
+        await new Promise((r) => setTimeout(r, BLOG_PROGRESS_POLL_MS));
+        continue;
+      }
+
+      // 종료 상태(완료/실패/중단)
+      if (seenRunning) {
+        // 실행 중이던 작업이 끝났다면 원고/탭 목록을 새로 반영
+        void loadContent(postDate, mode);
+        void syncTabs(true);
+      }
+      return;
+    }
+  } finally {
+    if (pollId === blogProgressPollId) blogProgressActive = false;
+  }
+}
+
+function buildTabsFromPosts(posts) {
+  const seen = new Set();
+  const tabs = [];
+  for (const p of posts) {
+    if (!p || !p.post_date || !p.mode) continue;
+    const key = `${p.post_date}|${p.mode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tabs.push(p);
+  }
+  return tabs;
+}
+
+// 탭 목록만 조용히 갱신합니다 (현재 선택/본문/마케팅 화면은 건드리지 않음).
+async function syncTabs(force = false) {
+  const nav = document.getElementById("tabs");
+  if (!nav || (document.hidden && !force)) return;
+
+  let posts;
+  try {
+    const res = await fetch("/api/posts", { cache: "no-store" });
+    if (!res.ok) return;
+    posts = await res.json();
+    if (!Array.isArray(posts)) return;
+  } catch (err) {
+    return; // 일시 오류는 다음 주기에 재시도
+  }
+
+  const tabs = buildTabsFromPosts(posts);
+  if (tabs.length === 0) return;
+
+  const signature = JSON.stringify(
+    tabs.map((t) => [t.post_date, t.mode, t.progress_status || ""])
+  );
+
+  if (signature !== lastTabsSignature) {
+    lastTabsSignature = signature;
+    nav.innerHTML = "";
+
+    tabs.forEach((t) => {
+      const btn = document.createElement("button");
+      const isActive = t.post_date === currentDate && t.mode === currentMode;
+      btn.className = "tab-btn" + (isActive ? " active" : "");
+      btn.textContent = tabLabel(t);
+      btn.onclick = () => selectTab(t.post_date, t.mode, btn);
+      nav.appendChild(btn);
+    });
+  }
+
+  // 첫 포스트가 처음 생긴 경우(선택된 탭 없음) 자동으로 첫 탭을 선택
+  if (!currentDate) {
+    const firstBtn = nav.querySelector(".tab-btn");
+    selectTab(tabs[0].post_date, tabs[0].mode, firstBtn);
+    return;
+  }
+
+  // 선택된 탭이 새로 '실행 중'이 되었는데 아직 폴링하지 않고 있다면 시작
+  const current = tabs.find(
+    (t) => t.post_date === currentDate && t.mode === currentMode
+  );
+  if (current && current.progress_status === "running" && !blogProgressActive) {
+    void loadBlogProgress(currentDate, currentMode);
+  }
+}
+
+function showPendingPost() {
+  const postTitle = document.getElementById("post-title");
+  const titleText = document.getElementById("title-text");
+  const contentText = document.getElementById("content-text");
+  const tagsChips = document.getElementById("tags-chips");
+  const tagsEmpty = document.getElementById("tags-empty");
+  const thumbImg = document.getElementById("thumb-img");
+  const thumbEmpty = document.getElementById("thumb-empty");
+  const thumbDownload = document.getElementById("thumb-download-link");
+  const thumbCopy = document.getElementById("thumb-copy-btn");
+
+  if (postTitle) {
+    postTitle.textContent = blogRunning ? "원고 작성 중" : "원고 없음";
+  }
+  if (titleText) titleText.value = "";
+  if (contentText) {
+    contentText.value = blogRunning
+      ? "원고를 작성하고 있습니다. 제목·본문·태그·썸네일은 모든 단계가 성공한 뒤 " +
+        "한 번에 전달되며, 완료되면 이 화면이 자동으로 갱신됩니다. " +
+        "위 '원고 작성 진행'에서 진행 과정을 확인하세요."
+      : "대시보드에 전달된 원고가 없습니다. 위 '원고 작성 진행' 상태를 확인하세요.";
+  }
+  if (tagsChips) tagsChips.innerHTML = "";
+  if (tagsEmpty) tagsEmpty.hidden = false;
+
+  currentThumbnailUrl = "";
+  if (thumbImg) {
+    thumbImg.removeAttribute("src");
+    thumbImg.hidden = true;
+  }
+  if (thumbEmpty) thumbEmpty.hidden = false;
+  if (thumbDownload) {
+    thumbDownload.removeAttribute("href");
+    thumbDownload.style.pointerEvents = "none";
+    thumbDownload.style.opacity = "0.5";
+  }
+  if (thumbCopy) thumbCopy.disabled = true;
+}
+
+function initBlogProgressButtons() {
+  const btn = document.getElementById("blog-progress-log-copy");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const log = document.getElementById("blog-progress-log");
+    if (!log || !log.textContent) return;
+    const original = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(log.textContent);
+      btn.textContent = "복사됨!";
+    } catch (err) {
+      btn.textContent = "복사 실패";
+      console.error(err);
+    }
+    setTimeout(() => { btn.textContent = original; }, 1200);
+  });
+}
+
 // ── 탭 로딩 ─────────────────────────────────────────────────────────────────
 
 async function loadTabs() {
@@ -91,19 +435,11 @@ async function loadTabs() {
     return;
   }
 
-  const seen = new Set();
-  const tabs = [];
+  const tabs = buildTabsFromPosts(posts);
 
-  for (const p of posts) {
-    if (!p || !p.post_date || !p.mode) continue;
-
-    const key = `${p.post_date}|${p.mode}`;
-
-    if (seen.has(key)) continue;
-
-    seen.add(key);
-    tabs.push(p);
-  }
+  lastTabsSignature = JSON.stringify(
+    tabs.map((t) => [t.post_date, t.mode, t.progress_status || ""])
+  );
 
   nav.innerHTML = "";
 
@@ -168,8 +504,7 @@ async function loadTabs() {
       "tab-btn" +
       (i === initialIndex ? " active" : "");
 
-    btn.textContent =
-      `${t.post_date} ${t.mode}`;
+    btn.textContent = tabLabel(t);
 
     btn.onclick = () =>
       selectTab(
@@ -211,6 +546,7 @@ function selectTab(postDate, mode, btn) {
 
   void loadContent(postDate, mode);
   void loadMarketing(postDate, mode);
+  void loadBlogProgress(postDate, mode);
 
   // 현재 선택된 탭이 실행 중인 마케팅 작업이라면
   // 진행률 polling을 자동으로 복원합니다.
@@ -231,6 +567,9 @@ function resetPostView() {
   const thumbCopy = document.getElementById("thumb-copy-btn");
   const marketingGrid = document.getElementById("marketing-grid");
   const kakaoText = document.getElementById("kakao-text");
+
+  currentHasPost = null;
+  hideBlogProgress();
 
   if (postTitle) {
     postTitle.textContent = "불러오는 중…";
@@ -309,9 +648,12 @@ async function loadContent(postDate, mode) {
     post = await res.json();
 
     if (!post) {
-      throw new Error(
-        "해당 날짜/모드의 포스트가 존재하지 않습니다."
-      );
+      // 원고 작성이 진행 중이라 아직 posts 행이 없는 탭 (진행 상황 패널이 대신 표시됨)
+      if (requestId !== contentRequestId) return;
+      currentHasPost = false;
+      applyTriggerBlock();
+      showPendingPost();
+      return;
     }
   } catch (err) {
     if (requestId !== contentRequestId) return;
@@ -348,6 +690,14 @@ async function loadContent(postDate, mode) {
   }
 
   if (requestId !== contentRequestId) return;
+
+  // 원고 작성이 진행 중이면 (이전 실행의 결과물이 있더라도) 표시하지 않습니다.
+  if (blogRunning) {
+    currentHasPost = !!post;
+    applyTriggerBlock();
+    showPendingPost();
+    return;
+  }
 
   currentBlogUrl = post?.blog_url || "";
 
@@ -512,6 +862,9 @@ async function loadContent(postDate, mode) {
   }
 
   updateKakaoBlogUrl(currentBlogUrl);
+
+  currentHasPost = true;
+  applyTriggerBlock();
 }
 
 // ── 대표 썸네일 복사 ────────────────────────────────────────────────────────
@@ -1465,6 +1818,12 @@ function initMarketingTrigger() {
         return;
       }
 
+      // 원고 작성 중이거나 원고가 없으면 실행하지 않음 (버튼 비활성화의 이중 안전장치)
+      if (blogRunning || blogFailed || currentHasPost === false) {
+        applyTriggerBlock();
+        return;
+      }
+
       const postDate =
         currentDate;
 
@@ -2360,7 +2719,18 @@ function initDashboard() {
     );
   }
 
+  try {
+    initBlogProgressButtons();
+  } catch (err) {
+    console.error("원고 진행 버튼 초기화 실패:", err);
+  }
+
   void loadTabs();
+
+  // 새로 시작된 원고 작성 워크플로우의 탭이 자동으로 나타나도록 주기적 동기화
+  setInterval(() => {
+    void syncTabs();
+  }, TAB_SYNC_INTERVAL_MS);
 
   try {
     initEconomicCalendar();

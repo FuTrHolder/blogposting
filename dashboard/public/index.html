@@ -203,6 +203,31 @@
         <h2 id="post-title">포스트를 선택하세요</h2>
       </div>
 
+      <div id="blog-progress-box" class="blog-progress-box" hidden>
+        <div class="blog-progress-head">
+          <span class="blog-progress-title">원고 작성 진행</span>
+          <span id="blog-progress-badge" class="blog-progress-badge"></span>
+        </div>
+        <div id="blog-progress" class="marketing-progress" aria-label="원고 작성 진행률">
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+          <span class="marketing-progress-step"></span>
+        </div>
+        <p id="blog-progress-message" class="marketing-progress-message muted">진행 상황 확인 중…</p>
+        <div id="blog-progress-error" class="blog-progress-error" hidden>
+          <p class="blog-progress-error-step">실패 지점: <strong id="blog-progress-error-step"></strong></p>
+          <pre id="blog-progress-log" class="blog-progress-log"></pre>
+          <div class="btn-row">
+            <button type="button" class="copy-btn" id="blog-progress-log-copy">로그 복사</button>
+            <a class="copy-btn" id="blog-progress-run-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 실행 보기 ↗</a>
+          </div>
+        </div>
+      </div>
+
       <div class="thumb-wrap">
         <img id="thumb-img" alt="썸네일" hidden>
         <p id="thumb-empty" class="muted">썸네일 없음</p>
