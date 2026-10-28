@@ -1,6 +1,7 @@
 // POST /api/ingest/content
 // GitHub Actions(daily_email.yml)가 블로그 본문 + 썸네일 URL(GitHub Release 링크)을
-// JSON으로 전송하는 엔드포인트. X-Ingest-Secret 헤더로 검증합니다 (Cloudflare Access 불필요).
+// JSON으로 전송하는 엔드포인트. 제목·본문·태그·썸네일은 항상 한 세트로 통째로 교체됩니다
+// (재실행 시 이전 실행의 썸네일이 새 원고에 남지 않도록 부분 갱신을 하지 않음). X-Ingest-Secret 헤더로 검증합니다 (Cloudflare Access 불필요).
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -32,9 +33,7 @@ export async function onRequestPost(context) {
          title = excluded.title,
          content = excluded.content,
          tags = excluded.tags,
-         thumbnail_url = CASE WHEN excluded.thumbnail_url != ''
-                              THEN excluded.thumbnail_url
-                              ELSE posts.thumbnail_url END`
+         thumbnail_url = excluded.thumbnail_url`
     )
       .bind(id, postDate, mode, title, content, JSON.stringify(tags), thumbnailUrl)
       .run();

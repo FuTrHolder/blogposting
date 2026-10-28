@@ -33,8 +33,22 @@ export async function onRequestPost(context) {
       .bind(cutoffStr)
       .run();
 
+    // 블로그 원고 진행 상태도 같은 보관 기간으로 정리 (테이블이 없어도 무시)
+    let blogProgressDeleted = null;
+    try {
+      const bp = await env.DB.prepare(
+        `DELETE FROM blog_progress WHERE post_date < ?1`
+      )
+        .bind(cutoffStr)
+        .run();
+      blogProgressDeleted = bp.meta?.changes ?? null;
+    } catch (e) {
+      console.warn("blog_progress 정리 건너뜀:", String(e));
+    }
+
     return json({
       ok: true,
+      deleted_blog_progress: blogProgressDeleted,
       cutoff: cutoffStr,
       retention_days: retentionDays,
       deleted_posts: postsResult.meta?.changes ?? null,
