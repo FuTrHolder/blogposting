@@ -48,3 +48,24 @@ CREATE TABLE IF NOT EXISTS marketing_progress (
 
 CREATE INDEX IF NOT EXISTS idx_marketing_progress_date_mode
   ON marketing_progress(post_date, mode);
+
+-- 블로그 원고 작성 워크플로우(daily_post.yml → main.py) 진행 상태
+-- `${post_date}_${mode}` 단위. 워크플로우 시작 시점에 행이 만들어져 대시보드 탭이 즉시 생성되고,
+-- 실패 시 실패 지점(error_step)과 로그(error_log, 민감정보 마스킹 후 최대 6000자)가 기록됩니다.
+-- ※ 기존 DB에는 이 블록만 D1 Console에서 한 번 실행하면 됩니다 (기존 테이블 영향 없음).
+CREATE TABLE IF NOT EXISTS blog_progress (
+  id TEXT PRIMARY KEY,              -- `${post_date}_${mode}`
+  post_date TEXT NOT NULL,
+  mode TEXT NOT NULL,               -- morning | evening
+  step INTEGER NOT NULL DEFAULT 0,  -- 0 ~ 7 (완료된 단계 수)
+  status TEXT NOT NULL DEFAULT 'running',
+                                    -- running | completed | failed
+  message TEXT,
+  error_step TEXT,                  -- 실패한 단계 이름
+  error_log TEXT,                   -- 실패 로그 (마스킹/절단됨)
+  run_url TEXT,                     -- GitHub Actions 실행 페이지 링크
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_blog_progress_date_mode
+  ON blog_progress(post_date, mode);
