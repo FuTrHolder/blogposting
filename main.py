@@ -9,6 +9,11 @@
 → 이미지 생성
 → Cloudflare 대시보드 업로드
 
+대시보드 진행 상황:
+  - 시작 시 blog_progress 행이 만들어져 해당 날짜/모드 탭이 즉시 생성됨
+  - 단계마다 push_blog_progress()로 0~7 진행률 갱신
+  - 실패 시 실패 단계 + 최근 로그 + traceback(민감정보 마스킹)을 대시보드에 기록
+
 포스팅 모드:
   morning:
     미국 전일 증시 마감 리뷰
@@ -25,8 +30,11 @@
 """
 
 import os
+import signal
 import sys
 import logging
+import traceback
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -54,6 +62,97 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 NY_TZ = ZoneInfo("America/New_York")
+
+
+# ── 대시보드 진행 상황 / 실패 로그 ───────────────────────────────────────────
+# 실패 시 "실패 직전에 무슨 일이 있었는지"를 대시보드에서 볼 수 있도록 최근 로그를
+# 메모리에 보관합니다. 전송 직전 dashboard_client.redact_secrets()로 API 키/토큰이
+# 마스킹되며, 대시보드는 Basic Auth로 보호됩니다.
+
+class _RingLogHandler(logging.Handler):
+    def __init__(self, capacity: int = 120):
+        super().__init__(level=logging.INFO)
+        self.lines: deque = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record)[:400])
+        except Exception:
+            pass
+
+
+_RING = _RingLogHandler()
+_RING.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+)
+logging.getLogger().addHandler(_RING)
+
+# post_date/mode는 main() 시작 직후 채워집니다.
+_CTX = {
+    "post_date": "",
+    "mode": "",
+    "step": 0,
+    "stage": "초기화",
+    "reported": False,
+}
+
+
+def _stage(name: str) -> None:
+    """현재 진행 중인 단계 이름 기록 (실패 시 '어디서 실패했는지' 표시용)."""
+    _CTX["stage"] = name
+
+
+def _progress(step: int, message: str, status: str = "running") -> None:
+    """대시보드에 진행률을 기록합니다. 실패해도 파이프라인은 계속됩니다."""
+    _CTX["step"] = step
+    if not (_CTX["post_date"] and _CTX["mode"]):
+        return
+    try:
+        dashboard_client.push_blog_progress(
+            post_date=_CTX["post_date"],
+            mode=_CTX["mode"],
+            step=step,
+            status=status,
+            message=message,
+        )
+    except Exception as e:  # push_blog_progress가 이미 삼키지만 이중 안전장치
+        logger.warning(f"진행률 기록 예외 (무시): {e}")
+
+
+def _report_failure(summary: str, exc: BaseException | None = None) -> None:
+    """실패 지점·최근 로그·traceback을 대시보드에 기록합니다 (1회만)."""
+    if _CTX["reported"]:
+        return
+    _CTX["reported"] = True
+
+    parts = ["[최근 로그]", *list(_RING.lines)[-40:]]
+    if exc is not None:
+        parts.append("")
+        parts.append("[Traceback]")
+        parts.append(
+            "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).strip()
+        )
+    parts.append("")
+    parts.append(f"[실패 요약] {summary}")
+
+    if not (_CTX["post_date"] and _CTX["mode"]):
+        logger.error("진행률 대상(post_date/mode) 미확정 — 대시보드 실패 기록 생략")
+        return
+
+    try:
+        dashboard_client.push_blog_progress(
+            post_date=_CTX["post_date"],
+            mode=_CTX["mode"],
+            step=_CTX["step"],
+            status="failed",
+            message=f"{_CTX['stage']} 실패: {summary}",
+            error_step=_CTX["stage"],
+            error_log="\n".join(parts),
+        )
+    except Exception as e:
+        logger.warning(f"실패 기록 예외 (무시): {e}")
 
 
 # 미국 증시 정규 휴장일
@@ -405,9 +504,16 @@ def main():
         f"[{mode.upper()} / {post_label}] ====="
     )
 
+    # 대시보드에 탭 생성 + 진행률 0단계 기록
+    _CTX["post_date"] = now_kst.strftime("%Y-%m-%d")
+    _CTX["mode"] = mode
+    _progress(0, "원고 작성 워크플로우 시작")
+
     # ─────────────────────────────────────────
     # 1. 뉴스 및 시장 데이터 수집
     # ─────────────────────────────────────────
+
+    _stage("뉴스 및 시장 데이터 수집")
 
     logger.info(
         "[1/5] 뉴스 및 시장 데이터 수집 중..."
@@ -433,15 +539,22 @@ def main():
         logger.error(
             "뉴스 수집 실패. 종료합니다."
         )
+        _report_failure(
+            "수집된 뉴스가 0건입니다 (Yahoo Finance RSS / Alpha Vantage 응답 확인 필요)"
+        )
         sys.exit(1)
 
     logger.info(
         f"  → 뉴스 {len(news_list)}건 수집 완료"
     )
 
+    _progress(1, "뉴스·시장 데이터 수집 완료")
+
     # ─────────────────────────────────────────
     # 1-1. 사실 기준표
     # ─────────────────────────────────────────
+
+    _stage("실적/경제지표 사실 기준표 구성")
 
     logger.info(
         "[1-1] 실적/경제지표 사실 기준표 구성 중..."
@@ -490,9 +603,13 @@ def main():
         fact_reference_block = ""
         fact_lookup = {}
 
+    _progress(2, "사실 기준표 구성 완료")
+
     # ─────────────────────────────────────────
     # 2. 블로그 글 생성
     # ─────────────────────────────────────────
+
+    _stage("블로그 원고 생성 (Gemini)")
 
     logger.info(
         f"[2/5] 블로그 글 생성 중 "
@@ -531,9 +648,13 @@ def main():
         f"{len(post['content'])}자"
     )
 
+    _progress(3, "블로그 원고 생성 완료")
+
     # ─────────────────────────────────────────
     # 2-1. 연관 포스트 3개 삽입
     # ─────────────────────────────────────────
+
+    _stage("연관 포스트 선정·삽입")
 
     logger.info(
         "[2-1/5] 연관 포스트 3개 선정 및 "
@@ -565,9 +686,16 @@ def main():
             "  → 연관 포스트 미반영"
         )
 
+    _progress(4, "연관 포스트 삽입 완료")
+    # 주의: 제목·본문·태그·썸네일은 하나의 결과물입니다. 모든 단계가 성공한 뒤
+    # [4/5] 단계에서 한 번에 대시보드로 전달합니다(중간 초안 업로드 없음).
+
+
     # ─────────────────────────────────────────
     # 3. 이미지 생성
     # ─────────────────────────────────────────
+
+    _stage("썸네일 이미지 생성")
 
     logger.info(
         "[3/5] 썸네일 이미지 생성 중..."
@@ -624,9 +752,13 @@ def main():
             f"(본문에는 추가하지 않음)"
         )
 
+    _progress(5, "썸네일 생성 완료")
+
     # ─────────────────────────────────────────
     # 4. Cloudflare 대시보드 업로드
     # ─────────────────────────────────────────
+
+    _stage("대시보드 원고 업로드")
 
     logger.info(
         "[4/5] Cloudflare 대시보드 업로드 중..."
@@ -659,6 +791,8 @@ def main():
             "  → 대시보드 업로드 완료"
         )
 
+        _progress(6, "결과물(제목·본문·태그·썸네일) 대시보드 전달 완료")
+
     else:
 
         logger.error(
@@ -667,11 +801,19 @@ def main():
             "INGEST_SECRET 설정을 확인하세요."
         )
 
+        _report_failure(
+            "대시보드 원고 업로드(/api/ingest/content) 실패 — "
+            "DASHBOARD_API_URL / INGEST_SECRET 설정과 Cloudflare 배포 상태를 확인하세요"
+        )
+
         sys.exit(1)
 
     # ─────────────────────────────────────────
     # 5. 완료
     # ─────────────────────────────────────────
+
+    _stage("완료")
+    _progress(7, "원고 작성 완료", status="completed")
 
     logger.info(
         f"===== 자동화 완료 "
@@ -679,5 +821,29 @@ def main():
     )
 
 
+def _on_terminate(signum, _frame):
+    """
+    GitHub Actions 수동 취소 / timeout-minutes 초과 시 러너가 SIGTERM(또는 SIGINT)을
+    보냅니다. 이때 어느 단계에서 중단됐는지와 직전 로그를 대시보드에 남기고 종료합니다.
+    """
+    name = signal.Signals(signum).name
+    _report_failure(
+        f"{_CTX['stage']} 진행 중 외부 신호({name})로 중단되었습니다 — "
+        "수동 취소 또는 워크플로우 timeout(15분) 초과일 가능성이 높습니다"
+    )
+    sys.exit(128 + signum)
+
+
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGTERM, _on_terminate)
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        logger.exception("원고 작성 워크플로우 예외 발생")
+        _report_failure(
+            f"{type(exc).__name__}: {str(exc)[:300]}",
+            exc,
+        )
+        raise

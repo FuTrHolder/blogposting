@@ -504,10 +504,25 @@ def push_content(
     if image_path:
         ext = os.path.splitext(image_path)[1] or ".jpg"
 
+        # 재실행 시 이전 실행의 이미지와 URL이 겹쳐 브라우저/프록시 캐시(24h)에
+        # 옛 썸네일이 남지 않도록 실행 ID를 파일명에 포함합니다.
+        # (오래된 자산은 cleanup_release_assets.py가 보관 기간 후 삭제)
+        run_tag = os.environ.get("GITHUB_RUN_ID", "")
+        run_tag += ("-" + os.environ["GITHUB_RUN_ATTEMPT"]) if os.environ.get("GITHUB_RUN_ATTEMPT") else ""
+        suffix = f"_{run_tag}" if run_tag else ""
+
         thumbnail_url = _upload_asset(
             image_path,
-            f"thumb_{post_date}_{mode}{ext}",
+            f"thumb_{post_date}_{mode}{suffix}{ext}",
         )
+
+        # 제목·본문·태그·썸네일은 한 세트입니다. 썸네일 업로드가 실패했는데
+        # 본문만 전달하면 이전 실행의 썸네일과 새 원고가 섞이므로 전체를 실패 처리합니다.
+        if not thumbnail_url:
+            logger.error(
+                "썸네일 업로드 실패 — 일부만 전달하지 않고 결과물 전달 전체를 중단합니다."
+            )
+            return False
 
     payload = {
         "post_date": post_date,
@@ -620,6 +635,116 @@ def push_marketing_progress(
             f"(계속 진행, step={step}, status={status}): {e}"
         )
         return False
+
+# ── 블로그 원고 작성 진행 상태 / 실패 로그 ──────────────────────────────────
+
+_SECRET_NAME_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
+_MAX_ERROR_LOG = 6000
+
+
+def redact_secrets(text: str) -> str:
+    """
+    대시보드로 보내는 로그에서 민감정보를 제거합니다.
+      1) 환경변수 중 이름에 KEY/TOKEN/SECRET/PASSWORD 가 들어간 값(6자 이상)을 그대로 마스킹
+      2) Bearer 토큰, URL/헤더 형태의 key=, token=, api_key= 등 패턴 마스킹
+      3) 마지막 6000자만 유지 (실패 직전 로그가 가장 중요)
+    """
+    text = str(text or "")
+
+    try:
+        for name, value in os.environ.items():
+            if len(value) >= 6 and any(h in name.upper() for h in _SECRET_NAME_HINTS):
+                text = text.replace(value, "***")
+    except Exception:
+        pass
+
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/=]{8,}", r"\1***", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+        r"password|x-goog-api-key|x-ingest-secret|authorization)\b(\s*[:=]\s*)"
+        r"[\"']?[^\s&\"',;]{6,}",
+        r"\1\2***",
+        text,
+    )
+    text = re.sub(r"(?i)([?&](?:key|apikey|api_key|token|access_token)=)[^&\s]+", r"\1***", text)
+
+    return text[-_MAX_ERROR_LOG:]
+
+
+def github_run_url() -> str:
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if repo and run_id:
+        return f"{server}/{repo}/actions/runs/{run_id}"
+    return ""
+
+
+def push_blog_progress(
+    post_date: str,
+    mode: str,
+    step: int,
+    status: str = "running",
+    message: str = "",
+    error_step: str = "",
+    error_log: str = "",
+) -> bool:
+    """
+    블로그 원고 작성 워크플로우의 진행 상태를 대시보드(D1)에 기록합니다.
+
+    step: 0=시작, 1=뉴스/시장데이터, 2=사실 기준표, 3=원고 생성, 4=연관 포스트,
+          5=썸네일, 6=대시보드 업로드, 7=완료
+    status: running | completed | failed
+    failed 일 때 error_step / error_log(마스킹됨)가 함께 저장되어 대시보드에서 확인됩니다.
+
+    이 함수의 실패는 절대 파이프라인을 중단시키지 않습니다 (예외를 삼킴).
+    """
+    base = _dashboard_base_url()
+    if not base:
+        logger.info("DASHBOARD_API_URL 미설정 — 원고 진행률 업로드 건너뜀")
+        return False
+
+    try:
+        step = max(0, min(int(step), 7))
+    except (TypeError, ValueError):
+        step = 0
+
+    status = str(status or "running").strip().lower()
+    if status not in {"running", "completed", "failed"}:
+        status = "running"
+
+    payload = {
+        "post_date": post_date,
+        "mode": mode,
+        "step": step,
+        "status": status,
+        "message": redact_secrets(message)[:500],
+        "error_step": redact_secrets(error_step)[:200],
+        "error_log": redact_secrets(error_log) if status == "failed" else "",
+        "run_url": github_run_url(),
+    }
+
+    try:
+        resp = requests.post(
+            f"{base}/api/ingest/blog-progress",
+            json=payload,
+            headers=_dashboard_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        logger.info(
+            f"대시보드 원고 진행률 업로드: {post_date} {mode} "
+            f"step={step}/7 status={status}"
+        )
+        return True
+    except Exception as e:
+        # 예외 메시지에 URL 쿼리 등이 섞일 수 있으므로 마스킹 후 기록
+        logger.warning(
+            f"대시보드 원고 진행률 업로드 실패 (계속 진행, step={step}): "
+            f"{redact_secrets(str(e))[:200]}"
+        )
+        return False
+
 
 def push_marketing_result(
     post_date: str,
