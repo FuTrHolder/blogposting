@@ -24,6 +24,25 @@ export async function onRequestGet(context) {
       return json(row || null);
     }
 
+    // 원고 작성 워크플로우가 시작되면(blog_progress 행 생성) 아직 posts 행이 없어도
+    // 탭이 바로 보이도록 합쳐서 반환합니다. blog_progress 테이블이 아직 없거나
+    // 조회가 실패해도 기존 쿼리로 폴백하므로 대시보드 탭 목록은 절대 깨지지 않습니다.
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT p.id AS id, p.post_date AS post_date, p.mode AS mode, p.title AS title,
+                p.thumbnail_url AS thumbnail_url, p.created_at AS created_at,
+                bp.status AS progress_status
+         FROM posts p LEFT JOIN blog_progress bp ON bp.id = p.id
+         UNION ALL
+         SELECT b.id, b.post_date, b.mode, NULL, NULL, b.updated_at, b.status
+         FROM blog_progress b WHERE b.id NOT IN (SELECT id FROM posts)
+         ORDER BY post_date DESC, mode ASC LIMIT 60`
+      ).all();
+      return json(results);
+    } catch (e) {
+      console.warn("blog_progress 병합 조회 실패 — 기존 쿼리로 폴백:", String(e));
+    }
+
     const { results } = await env.DB.prepare(
       `SELECT id, post_date, mode, title, thumbnail_url, created_at
        FROM posts ORDER BY post_date DESC, mode ASC LIMIT 60`
