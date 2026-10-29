@@ -3,7 +3,7 @@
 
 역할:
 1. 현재 포스트와 기존 포스트의 관련성 점수 계산
-2. 상위 N개 포스트 선정
+2. 상위 N개 포스트 선정 (오전↔저녁 짝 글 우선 포함)
 3. 실제 크롤링된 URL을 이용해 HTML 생성
 
 Gemini 호출 없음.
@@ -416,9 +416,16 @@ def select_related_posts(
     current_post: dict,
     candidates: list[dict],
     limit: int = 3,
+    current_mode: str = "",
+    today_kst=None,
 ) -> list[dict]:
     """
     현재 포스트와 관련성이 높은 포스트를 선정합니다.
+
+    Args:
+        current_mode: 현재 원고 모드("morning"/"evening"). 오전↔저녁 짝 글
+                      우선 포함에 사용합니다. 비어 있으면 짝 글 로직을 건너뜁니다.
+        today_kst:    KST 기준 오늘 날짜(datetime.date). 짝 글 판별에 사용합니다.
 
     안전장치:
     - 현재 URL 제외
