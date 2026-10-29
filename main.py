@@ -324,6 +324,7 @@ def add_related_posts(post: dict, mode: str = "", today_kst=None) -> dict:
     - RSS에서 최근 글을 읽기만 합니다.
     - 중복 실행 상태 파일을 변경하지 않습니다.
     - 연관 포스트 선정 실패가 블로그 원고 생성 전체를 실패시키지 않습니다.
+      (단, 실패 원인은 traceback과 함께 로그에 남깁니다.)
     """
 
     content = post.get(
@@ -453,7 +454,8 @@ def add_related_posts(post: dict, mode: str = "", today_kst=None) -> dict:
     except Exception as e:
         logger.warning(
             f"연관 포스트 처리 실패 — "
-            f"원고는 그대로 계속 진행합니다: {e}"
+            f"원고는 그대로 계속 진행합니다: {e}",
+            exc_info=True,
         )
 
         return post
@@ -528,6 +530,23 @@ def main():
     market_data = (
         fetcher.get_market_summary()
     )
+
+    # 지수 수치가 하나도 없으면 원고를 만들지 않습니다.
+    # (수치 없이 "지수 등락률 2개 이상"을 요구받은 모델이 숫자를 지어낼 수 있음)
+    index_count = sum(
+        1 for k, v in market_data.items()
+        if k != "fear_greed" and isinstance(v, dict) and v.get("price")
+    )
+
+    if index_count == 0:
+        logger.error(
+            "지수 데이터 0건. 수치 없이 원고를 만들면 안 되므로 종료합니다."
+        )
+        _report_failure(
+            "지수 시세를 Alpha Vantage·Yahoo 모두에서 가져오지 못했습니다 "
+            "(ALPHA_VANTAGE_API_KEY 한도/유효성 및 로그의 '시세 조회 실패' 확인)"
+        )
+        sys.exit(1)
 
     news_list = (
         fetcher.get_top_news(
@@ -686,7 +705,12 @@ def main():
             "  → 연관 포스트 미반영"
         )
 
-    _progress(4, "연관 포스트 삽입 완료")
+    _progress(
+        4,
+        "연관 포스트 삽입 완료"
+        if related_posts
+        else "연관 포스트 미삽입 (원고는 그대로 진행)",
+    )
     # 주의: 제목·본문·태그·썸네일은 하나의 결과물입니다. 모든 단계가 성공한 뒤
     # [4/5] 단계에서 한 번에 대시보드로 전달합니다(중간 초안 업로드 없음).
 
