@@ -1,5 +1,13 @@
 """
-플랫폼 발행 모듈 v7
+플랫폼 발행 모듈 v8
+변경사항 v8:
+  - [보안] 발행 결과(message/url)에서 액세스 토큰 등 민감값을 마스킹
+      Meta Graph/Threads API 호출은 access_token을 쿼리스트링으로 전달하므로,
+      requests 예외 문자열(str(e))에 "?access_token=..."이 그대로 포함될 수 있습니다.
+      이 문자열은 results → 대시보드(D1)·Gist(링크를 아는 사람이면 열람 가능)에
+      저장되므로, PublisherDispatcher.publish_all()에서 모든 결과를
+      _sanitize_result()로 한 번 정리한 뒤 반환합니다.
+
 변경사항 v7:
   - [기능 추가] Threads 답글 체인(스레드) 발행
       기존에는 threads_post 문자열 1개만 단일 게시물로 발행했습니다. Grok이
@@ -59,6 +67,7 @@
 """
 
 import os
+import re as _re
 import time
 import logging
 import requests
@@ -70,9 +79,31 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+try:
+    from dashboard_client import redact_secrets as _redact
+except Exception:  # 루트가 sys.path에 없는 환경 대비 최소 마스킹
+    def _redact(text: str) -> str:
+        text = str(text or "")
+        text = _re.sub(
+            r"(?i)(access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+            r"api[_-]?key|token|secret)(\s*[:=]\s*)[\"']?[^\s&\"',;]{6,}",
+            r"\1\2***",
+            text,
+        )
+        return _re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/=]{8,}", r"\1***", text)
+
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+
+
+def _sanitize_result(result: dict) -> dict:
+    """발행 결과의 message/url에서 토큰을 제거하고 길이를 제한합니다."""
+    clean = dict(result or {})
+    for key in ("message", "url"):
+        if clean.get(key):
+            clean[key] = _redact(str(clean[key]))[:500]
+    return clean
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1337,17 +1368,20 @@ class PublisherDispatcher:
         results: dict[str, dict] = {}
 
         # 1) 기존 발행 (썸네일/텍스트 — 플랫폼별 1건씩)
+        #    모든 결과는 _sanitize_result()로 토큰 마스킹 후 저장합니다
+        #    (이 results가 대시보드 D1과 Gist에 그대로 기록되기 때문).
         for name, publisher in self.publishers.items():
             logger.info(f"[{name.upper()}] 발행 시도 중...")
             try:
-                result        = publisher.publish(content, media_paths)
+                result        = _sanitize_result(publisher.publish(content, media_paths))
                 results[name] = result
                 status        = result.get("status", "?")
                 msg           = result.get("message", "")
                 logger.info(f"[{name.upper()}] {status}: {msg}")
             except Exception as e:
-                results[name] = {"status": "error", "message": str(e)}
-                logger.error(f"[{name.upper()}] 예외 발생: {e}")
+                msg = _redact(str(e))[:500]
+                results[name] = {"status": "error", "message": msg}
+                logger.error(f"[{name.upper()}] 예외 발생: {msg}")
             time.sleep(1)
 
         # 2) 릴스(영상) 추가 발행 — 공개 영상 URL이 확보된 경우에만 진행.
@@ -1366,14 +1400,15 @@ class PublisherDispatcher:
             key = f"{name}_reels"
             logger.info(f"[{key.upper()}] 릴스 발행 시도 중...")
             try:
-                result       = publisher.publish_reels(content, video_url)
+                result       = _sanitize_result(publisher.publish_reels(content, video_url))
                 results[key] = result
                 status       = result.get("status", "?")
                 msg          = result.get("message", "")
                 logger.info(f"[{key.upper()}] {status}: {msg}")
             except Exception as e:
-                results[key] = {"status": "error", "message": str(e)}
-                logger.error(f"[{key.upper()}] 예외 발생: {e}")
+                msg = _redact(str(e))[:500]
+                results[key] = {"status": "error", "message": msg}
+                logger.error(f"[{key.upper()}] 예외 발생: {msg}")
             time.sleep(1)
 
         return results
