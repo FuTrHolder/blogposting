@@ -9,15 +9,32 @@ GitHub Gist를 영구 스토리지로 사용합니다.
 Gist 파일 구조:
   marketing_state.json : 처리 완료 포스트 내역 (최근 50건)
   marketing_log.json   : 실행 로그 내역 (최근 100건)
+
+보안: Gist는 "secret"이어도 링크를 아는 사람은 열람할 수 있으므로,
+저장되는 message/url에서 액세스 토큰 등 민감값을 반드시 마스킹합니다.
 """
 
 import json
 import logging
 import os
+import re as _re
 import time
 from datetime import datetime, timezone, timedelta
 
 import requests
+
+try:
+    from dashboard_client import redact_secrets as _redact
+except Exception:  # check_state.py처럼 루트가 sys.path에 없는 경우
+    def _redact(text: str) -> str:
+        text = str(text or "")
+        text = _re.sub(
+            r"(?i)(access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+            r"api[_-]?key|token|secret)(\s*[:=]\s*)[\"']?[^\s&\"',;]{6,}",
+            r"\1\2***",
+            text,
+        )
+        return _re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/=]{8,}", r"\1***", text)
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +194,9 @@ class GistStateManager:
             "results": {
                 platform: {
                     "status": r.get("status"),
-                    "url": r.get("url", ""),
-                    "message": r.get("message", ""),
+                    # Gist는 링크를 아는 사람이면 열람 가능 → 토큰 마스킹 필수
+                    "url": _redact(r.get("url", ""))[:500],
+                    "message": _redact(r.get("message", ""))[:500],
                 }
                 for platform, r in results.items()
             },
@@ -213,7 +231,7 @@ class GistStateManager:
             "timestamp": now_kst,
             "level": level,
             "event": event,
-            "message": message,
+            "message": _redact(message)[:1000],
         }
         if post_id:
             entry["post_id"] = post_id
