@@ -416,10 +416,9 @@ class ImageGenerator:
     # ── 제목 표시용 문자열 정제 (날짜/접두어 제거) ──────────────────────────
     @staticmethod
     def _display_title(title: str) -> str:
+        from thumbnail_title import clean_overlay_title
         clean_title = _clean_text(title)
-        stripped = re.sub(r"^\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", clean_title)
-        stripped = re.sub(r"^미국\s*증시\s*[:：]?\s*", "", stripped).strip()
-        return stripped or clean_title
+        return clean_overlay_title(clean_title) or clean_title
 
     # ── 예비 오버레이: 밴드/장식 없이 가운데에 제목만 (메인 오버레이 실패 시) ─
     def _apply_simple_title_overlay(self, file_path: str, title: str) -> None:
