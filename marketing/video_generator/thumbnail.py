@@ -301,9 +301,8 @@ def _overlay_text_on_image(
     draw.text((32, 18+7), mode_txt, font=f_date, fill=(20,20,20))
 
     # 제목 (하단 영역)
-    title_clean = _strip_emoji(title)
-    title_clean = re.sub(r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*", "", title_clean)
-    title_clean = re.sub(r"미국\s*증시\s*[:：]?\s*", "", title_clean).strip()
+    from thumbnail_title import clean_overlay_title
+    title_clean = clean_overlay_title(_strip_emoji(title))
 
     text_y = int(H * 0.52)
     lines  = _pixel_wrap(title_clean, f_headline, WRAPW, max_lines=3)
