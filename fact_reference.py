@@ -582,14 +582,15 @@ def _build_macro_from_fallback(today: date, window_days: int) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_earnings_dashboard(timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict:
-    """
-    Earnings Dashboard JSON(배열)에서 워치리스트 종목의 실적 일정을 가져옵니다.
-    반환: {ticker: [record, ...]} (날짜순). 실패 시 {}.
-    report_date는 미국 현지 날짜 그대로 사용합니다 (여기서 변환하지 않음).
-    """
     try:
+        today = datetime.now(KST).date()
+        params = {
+            "from": (today - timedelta(days=3)).isoformat(),
+            "to": (today + timedelta(days=60)).isoformat(),
+        }
         response = requests.get(
-            EARNINGS_DASHBOARD_URL,
+            EARNINGS_DASHBOARD_URL.rstrip("/") + "/" + EARNINGS_CALENDAR_PATH,
+            params=params,
             timeout=timeout,
             headers={
                 "Accept": "application/json",
@@ -597,13 +598,28 @@ def fetch_earnings_dashboard(timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict:
             },
         )
         response.raise_for_status()
-        payload = response.json()
 
-        if not isinstance(payload, list):
-            logger.warning("Earnings Dashboard 응답이 배열이 아님")
+        ctype = response.headers.get("Content-Type", "")
+        if "json" not in ctype.lower():
+            logger.warning(
+                "Earnings Dashboard가 JSON이 아님 (Content-Type=%s, 앞 80자=%r)",
+                ctype, response.text[:80],
+            )
             return {}
 
-        result: dict = {}
+        payload = response.json()
+
+        # {"data": [...]} 같은 래핑 응답 대응
+        if isinstance(payload, dict):
+            for key in ("data", "events", "earnings", "results", "items"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+
+        if not isinstance(payload, list):
+            logger.warning("Earnings Dashboard 응답에서 배열을 찾지 못함 (타입=%s)", type(payload).__name__)
+            return {}
+           
         for item in payload:
             if not isinstance(item, dict):
                 continue
