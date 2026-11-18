@@ -42,6 +42,9 @@ NY_TZ = ZoneInfo("America/New_York")
 YAHOO_FINANCE_FEEDS = [
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC,%5EIXIC,%5EDJI&region=US&lang=en-US",
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,DIA&region=US&lang=en-US",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",       # CNBC Top News
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",        # CNBC Finance
+    "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch
 ]
 
 # Alpha Vantage GLOBAL_QUOTE는 주식·ETF 시세용이라 ^GSPC 같은 지수 심볼은
@@ -221,7 +224,12 @@ class NewsFetcher:
 
         for feed_url in YAHOO_FINANCE_FEEDS:
             try:
-                feed = feedparser.parse(feed_url)
+                feed = feedparser.parse(
+                    feed_url, agent="Mozilla/5.0 (compatible; seedsup-newsbot/1.0)"
+                )
+                logger.info(f"RSS 수집: {feed_url[:60]}... → {len(feed.entries)}건")
+                if not feed.entries:
+                    logger.warning(f"RSS 항목 0건 (주소 변경/차단 가능성): {feed_url[:80]}")
                 for entry in feed.entries:
                     title = entry.get("title", "").strip()
                     if not title or title in seen_titles:
@@ -246,10 +254,13 @@ class NewsFetcher:
             except Exception as e:
                 logger.warning(f"RSS 피드 수집 실패 ({feed_url}): {e}")
 
-        for item in self._fetch_av_news(now_utc):
-            if item["title"] not in seen_titles:
-                seen_titles.add(item["title"])
-                articles.append(item)
+        # NEWS_SENTIMENT는 유료(premium) 엔드포인트 → 기본 비활성화.
+        # 유료 키로 바꾸면 AV_NEWS_ENABLED=true 로만 켜면 됩니다.
+        if os.environ.get("AV_NEWS_ENABLED", "false").lower() == "true":
+            for item in self._fetch_av_news(now_utc):
+                if item["title"] not in seen_titles:
+                    seen_titles.add(item["title"])
+                    articles.append(item)
 
         # 최신순 정렬 (발행 시각을 알 수 없는 기사는 뒤로)
         articles.sort(key=lambda a: a.get("published_utc") or "", reverse=True)
