@@ -583,6 +583,14 @@ def _build_macro_from_fallback(today: date, window_days: int) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_earnings_dashboard(timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict:
+    """
+    Earnings Dashboard JSON(배열)에서 워치리스트 종목의 실적 일정을 가져옵니다.
+    반환: {ticker: [record, ...]} (날짜순). 실패 시 {}.
+    report_date는 미국 현지 날짜 그대로 사용합니다 (여기서 변환하지 않음).
+    """
+    # 상수 없이 함수 안에 직접 기재 (NameError 방지)
+    api_url = "https://earnings-dashboard.dmenc-hjw.workers.dev/api/calendar"
+
     try:
         today = datetime.now(KST).date()
         params = {
@@ -590,7 +598,7 @@ def fetch_earnings_dashboard(timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict:
             "to": (today + timedelta(days=60)).isoformat(),
         }
         response = requests.get(
-            EARNINGS_DASHBOARD_URL.rstrip("/") + "/" + EARNINGS_CALENDAR_PATH,
+            api_url,
             params=params,
             timeout=timeout,
             headers={
@@ -618,9 +626,13 @@ def fetch_earnings_dashboard(timeout: int = DEFAULT_HTTP_TIMEOUT) -> dict:
                     break
 
         if not isinstance(payload, list):
-            logger.warning("Earnings Dashboard 응답에서 배열을 찾지 못함 (타입=%s)", type(payload).__name__)
+            logger.warning(
+                "Earnings Dashboard 응답에서 배열을 찾지 못함 (타입=%s)",
+                type(payload).__name__,
+            )
             return {}
-           
+
+        result: dict = {}
         for item in payload:
             if not isinstance(item, dict):
                 continue
