@@ -49,6 +49,7 @@ NY_TZ = ZoneInfo("America/New_York")
 
 CALENDAR_API_URL = "https://blogposting.pages.dev/api/calendar?days=7"
 EARNINGS_DASHBOARD_URL = "https://earnings-dashboard.dmenc-hjw.workers.dev/"
+EARNINGS_CALENDAR_PATH = "calendar"   # Request URL 확인 후 필요하면 수정
 DEFAULT_HTTP_TIMEOUT = 20
 
 # '오늘 밤'으로 인정하는 창: 작성 시각 ~ +10시간 (21:00 KST 포스트 → 익일 07:00 KST까지)
