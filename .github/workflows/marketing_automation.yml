@@ -33,28 +33,51 @@ jobs:
 
     steps:
       - name: 📥 코드 체크아웃
+        id: m_checkout
         uses: actions/checkout@v4
 
       - name: 🐍 Python 3.11 설정
+        id: m_python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: 🎬 FFmpeg + 한글 폰트 설치
+      # Ubuntu 미러 일시 장애(연결 거부/타임아웃)로 설치가 실패하는 경우가 있어
+      # apt 자체 재시도 + 전체 재시도(최대 4회)를 적용합니다. 모두 무료입니다.
+      - name: 🎬 FFmpeg + 한글 폰트 설치 (재시도형)
+        id: m_apt
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fonts-noto-cjk
+          ok=0
+          for i in 1 2 3 4; do
+            if sudo apt-get update -qq -o Acquire::Retries=5 \
+              && sudo apt-get install -y --no-install-recommends --fix-missing \
+                   -o Acquire::Retries=5 -o Acquire::http::Timeout=30 \
+                   ffmpeg fonts-noto-cjk; then
+              ok=1
+              break
+            fi
+            echo "::warning::apt 설치 실패 (${i}/4) — 20초 후 재시도"
+            sleep 20
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::apt 설치가 4회 모두 실패했습니다 (Ubuntu 미러 장애 가능성)"
+            exit 1
+          fi
+          command -v ffmpeg && command -v ffprobe
           echo "✅ Noto Sans CJK 폰트 확인:"
           fc-list :lang=ko | head -3
 
       - name: 📦 패키지 설치
+        id: m_pip
         run: pip install -r marketing/requirements.txt
 
       - name: 📁 디렉토리 준비
+        id: m_dirs
         run: mkdir -p marketing/videos marketing/images marketing/fonts
 
       - name: 📣 마케팅 자동화 실행
+        id: m_run
         working-directory: marketing
         env:
           # ── Gist 상태 관리 ────────────────────────────────────────────
@@ -114,6 +137,69 @@ jobs:
           # X(Twitter) 완전 제거됨
 
         run: python main_marketing.py
+
+      # ── 중단 지점을 대시보드(marketing_progress)에 기록 ───────────────────
+      # 파이썬이 시작되기 전(apt/pip 설치 실패 등)이나 타임아웃·수동 취소로 죽으면
+      # main_marketing.py가 실패를 보고할 수 없어 진행률이 'running'으로 남고
+      # 대시보드의 "마케팅 실행" 버튼이 계속 잠깁니다. 이를 방지합니다.
+      # - main_marketing.py 자체가 실패한 경우는 파이썬이 남긴 상세 메시지를 보존하기 위해
+      #   덮어쓰지 않습니다(취소/타임아웃 제외). 그 경우의 잔여 'running'은
+      #   대시보드의 stale 판정(35분)이 처리합니다.
+      # - 대시보드에서 트리거하지 않은 수동 실행(post_date/mode 없음)은 건너뜁니다.
+      # - 시크릿은 env로만 전달하고 로그에 출력하지 않습니다. JSON은 jq --arg로 안전하게 생성합니다.
+      - name: 🚨 중단 지점을 대시보드에 기록
+        if: failure() || cancelled()
+        continue-on-error: true
+        env:
+          DASHBOARD_API_URL: ${{ secrets.DASHBOARD_API_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          MARKETING_POST_DATE: ${{ github.event.client_payload.post_date }}
+          MARKETING_MODE: ${{ github.event.client_payload.mode }}
+          O_CHECKOUT: ${{ steps.m_checkout.outcome }}
+          O_PYTHON: ${{ steps.m_python.outcome }}
+          O_APT: ${{ steps.m_apt.outcome }}
+          O_PIP: ${{ steps.m_pip.outcome }}
+          O_DIRS: ${{ steps.m_dirs.outcome }}
+          O_RUN: ${{ steps.m_run.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$DASHBOARD_API_URL" ] || [ -z "$INGEST_SECRET" ]; then
+            echo "DASHBOARD_API_URL/INGEST_SECRET 미설정 — 기록 건너뜀"; exit 0
+          fi
+          if [ -z "$MARKETING_POST_DATE" ] || [ -z "$MARKETING_MODE" ]; then
+            echo "대시보드 트리거가 아닌 실행 — 기록 건너뜀"; exit 0
+          fi
+          case "$MARKETING_MODE" in morning|evening) ;; *) echo "mode 값 이상 — 건너뜀"; exit 0;; esac
+          if ! echo "$MARKETING_POST_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            echo "post_date 형식 이상 — 건너뜀"; exit 0
+          fi
+
+          FAILED="알 수 없는 단계"
+          for pair in \
+            "코드 체크아웃:$O_CHECKOUT" "Python 설정:$O_PYTHON" \
+            "FFmpeg·폰트 설치(apt):$O_APT" "패키지 설치(pip):$O_PIP" \
+            "디렉토리 준비:$O_DIRS" "마케팅 자동화 실행:$O_RUN"; do
+            case "$pair" in *:failure|*:cancelled) FAILED="${pair%:*}"; break;; esac
+          done
+
+          # 파이썬 본 작업이 스스로 실패한 경우: 파이썬이 남긴 상세 메시지를 보존
+          if [ "$FAILED" = "마케팅 자동화 실행" ] && [ "$JOB_STATUS" != "cancelled" ]; then
+            echo "main_marketing.py가 직접 보고한 실패일 수 있어 덮어쓰지 않음"; exit 0
+          fi
+
+          if [ "$JOB_STATUS" = "cancelled" ]; then
+            MSG="마케팅 워크플로우 중단: 실행 취소 또는 시간 초과(30분) — 단계: ${FAILED}"
+          else
+            MSG="마케팅 워크플로우 중단: '${FAILED}' 단계 실패 (GitHub Actions 로그 확인)"
+          fi
+
+          jq -n --arg d "$MARKETING_POST_DATE" --arg m "$MARKETING_MODE" --arg msg "$MSG" \
+            '{post_date:$d, mode:$m, step:0, status:"failed", message:$msg}' \
+          | curl -sS -m 20 -X POST "${DASHBOARD_API_URL%/}/api/ingest/marketing-progress" \
+              -H "Content-Type: application/json" \
+              -H "X-Ingest-Secret: ${INGEST_SECRET}" \
+              --data-binary @- >/dev/null \
+            || echo "실패 기록 전송 실패 (무시)"
 
       - name: 📎 생성 파일 아티팩트 저장
         uses: actions/upload-artifact@v4
