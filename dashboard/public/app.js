@@ -1332,17 +1332,32 @@ async function loadMarketing(postDate, mode) {
 
 const MARKETING_PROGRESS_POLL_INTERVAL_MS = 3000;
 
-const MARKETING_PROGRESS_MESSAGES = {
-  0: "마케팅 워크플로우 시작",
-  1: "티스토리 포스트 확인 완료",
-  2: "플랫폼별 콘텐츠 생성 완료",
-  3: "영상 생성 완료",
-  4: "SNS 썸네일 생성 완료",
-  5: "발행용 공개 URL 확보 완료",
-  6: "플랫폼 발행 처리 완료",
-  7: "마케팅 워크플로우 완료"
-};
+// 워크플로우 timeout(30분)보다 길게 신호가 없으면 중단된 것으로 간주
+const MARKETING_PROGRESS_STALE_MS = 35 * 60 * 1000;
 
+function isMarketingProgressStale(progress) {
+  if (!progress || progress.status !== "running") return false;
+  const age = Date.now() - parseSqliteUtc(progress.updated_at);
+  return Number.isFinite(age) && age > MARKETING_PROGRESS_STALE_MS;
+}
+
+// 중단된(stale) 진행 상태를 화면에 반영하고 버튼을 복구합니다.
+function handleStaleMarketingProgress(progress) {
+  const msg =
+    "35분 이상 진행 신호가 없습니다. 워크플로우가 중단(설치 실패, 시간 초과 등)되었을 수 있습니다. " +
+    "GitHub Actions를 확인한 뒤 다시 실행하세요.";
+
+  updateMarketingProgress(progress.step, "failed", msg);
+
+  const statusElement = document.getElementById("trigger-status");
+  if (statusElement) statusElement.textContent = msg;
+
+  const triggerButton = document.getElementById("trigger-btn");
+  if (triggerButton) triggerButton.disabled = false;
+
+  clearMarketingProgressTarget();
+  applyTriggerBlock(); // 원고 작성 중/원고 없음이면 계속 비활성 유지
+}
 
 // ── 진행 중인 마케팅 작업 저장 ─────────────────────────────────────────────
 
@@ -1555,6 +1570,11 @@ async function pollMarketingProgress(
         return;
       }
 
+      if (isMarketingProgressStale(progress)) {
+        handleStaleMarketingProgress(progress);
+        return;
+      }
+
       if (
         progress &&
         progress.exists
@@ -1718,6 +1738,11 @@ async function initMarketingProgress() {
       !progress ||
       !progress.exists
     ) {
+      return;
+    }
+
+    if (isMarketingProgressStale(progress)) {
+      handleStaleMarketingProgress(progress);
       return;
     }
 
